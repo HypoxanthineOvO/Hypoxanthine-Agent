@@ -8,6 +8,21 @@ export interface Message {
   session_id: string;
 }
 
+export interface AssistantChunkEvent {
+  type: "assistant_chunk";
+  text: string;
+  sender: "assistant";
+  session_id: string;
+}
+
+export interface AssistantDoneEvent {
+  type: "assistant_done";
+  sender: "assistant";
+  session_id: string;
+}
+
+export type IncomingWsEvent = Message | AssistantChunkEvent | AssistantDoneEvent;
+
 export type ConnectionStatus =
   | "connecting"
   | "connected"

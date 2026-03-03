@@ -27,12 +27,33 @@ class SkillOutput(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class SingleModelConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str | None = None
+    litellm_model: str | None = None
+    fallback: str | None = None
+
+
 class ModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     default_model: str
-    models: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    task_type_to_model: dict[str, str] = Field(default_factory=dict)
+    task_routing: dict[str, str] = Field(default_factory=dict)
+    models: dict[str, SingleModelConfig] = Field(default_factory=dict)
+
+
+class ProviderConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    api_base: str
+    api_key: str
+
+
+class SecretsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    providers: dict[str, ProviderConfig] = Field(default_factory=dict)
 
 
 class DirectoryWhitelist(BaseModel):

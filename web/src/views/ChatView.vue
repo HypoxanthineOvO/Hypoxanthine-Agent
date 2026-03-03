@@ -50,7 +50,7 @@ const onSubmit = (): void => {
     <header class="chat-header">
       <div class="title-wrap">
         <p class="eyebrow">Hypo-Agent</p>
-        <h1>Gateway Echo Console</h1>
+        <h1>Gateway LLM Console</h1>
       </div>
       <div class="status-wrap">
         <ConnectionStatus :status="status" />

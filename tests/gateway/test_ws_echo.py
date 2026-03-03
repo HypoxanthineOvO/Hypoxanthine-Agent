@@ -5,8 +5,23 @@ from starlette.websockets import WebSocketDisconnect
 from hypo_agent.gateway.app import create_app
 
 
-def _client(token: str = "test-token") -> TestClient:
-    app = create_app(auth_token=token)
+class StubPipeline:
+    async def stream_reply(self, inbound):
+        text = inbound.text or ""
+        yield {
+            "type": "assistant_chunk",
+            "text": text.upper(),
+            "sender": "assistant",
+            "session_id": inbound.session_id,
+        }
+        yield {
+            "type": "assistant_done",
+            "sender": "assistant",
+            "session_id": inbound.session_id,
+        }
+
+def _client(token: str = "test-token", pipeline=None) -> TestClient:
+    app = create_app(auth_token=token, pipeline=pipeline or StubPipeline())
     return TestClient(app)
 
 
@@ -26,14 +41,23 @@ def test_ws_rejects_invalid_token() -> None:
         assert exc_info.value.code == 4401
 
 
-def test_ws_echoes_valid_message_payload() -> None:
+def test_ws_streams_valid_message_payload() -> None:
     with _client() as client:
         with client.websocket_connect("/ws?token=test-token") as ws:
             ws.send_json({"text": "hello", "sender": "user", "session_id": "s1"})
-            response = ws.receive_json()
-            assert response["sender"] == "assistant"
-            assert response["text"] == "hello"
-            assert response["session_id"] == "s1"
+            first = ws.receive_json()
+            second = ws.receive_json()
+            assert first == {
+                "type": "assistant_chunk",
+                "text": "HELLO",
+                "sender": "assistant",
+                "session_id": "s1",
+            }
+            assert second == {
+                "type": "assistant_done",
+                "sender": "assistant",
+                "session_id": "s1",
+            }
 
 
 def test_ws_rejects_invalid_message_shape() -> None:

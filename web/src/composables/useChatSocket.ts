@@ -1,6 +1,12 @@
 import { ref } from "vue";
 
-import type { ConnectionStatus, Message } from "../types/message";
+import type {
+  AssistantChunkEvent,
+  AssistantDoneEvent,
+  ConnectionStatus,
+  IncomingWsEvent,
+  Message,
+} from "../types/message";
 
 interface UseChatSocketOptions {
   url: string;
@@ -17,6 +23,22 @@ export function useChatSocket(options: UseChatSocketOptions) {
   const status = ref<ConnectionStatus>("disconnected");
   const messages = ref<Message[]>([]);
   let socket: WebSocket | null = null;
+  let streamingAssistantIndex: number | null = null;
+
+  const isMessage = (payload: IncomingWsEvent): payload is Message =>
+    "sender" in payload &&
+    "session_id" in payload &&
+    !("type" in payload);
+
+  const isAssistantChunkEvent = (
+    payload: IncomingWsEvent,
+  ): payload is AssistantChunkEvent =>
+    "type" in payload && payload.type === "assistant_chunk";
+
+  const isAssistantDoneEvent = (
+    payload: IncomingWsEvent,
+  ): payload is AssistantDoneEvent =>
+    "type" in payload && payload.type === "assistant_done";
 
   const connect = (): void => {
     if (
@@ -36,6 +58,7 @@ export function useChatSocket(options: UseChatSocketOptions) {
 
     socket.onclose = () => {
       status.value = "disconnected";
+      streamingAssistantIndex = null;
       socket = null;
     };
 
@@ -45,8 +68,42 @@ export function useChatSocket(options: UseChatSocketOptions) {
 
     socket.onmessage = (event: MessageEvent<string>) => {
       try {
-        const payload = JSON.parse(event.data) as Message;
-        if (!payload.sender || !payload.session_id) {
+        const payload = JSON.parse(event.data) as IncomingWsEvent;
+
+        if (isAssistantChunkEvent(payload)) {
+          const chunkText = payload.text ?? "";
+          const isExistingStreamSlot =
+            streamingAssistantIndex !== null &&
+            streamingAssistantIndex >= 0 &&
+            streamingAssistantIndex < messages.value.length &&
+            messages.value[streamingAssistantIndex]?.sender === "assistant" &&
+            messages.value[streamingAssistantIndex]?.session_id ===
+              payload.session_id;
+
+          if (!isExistingStreamSlot) {
+            messages.value.push({
+              text: chunkText,
+              sender: "assistant",
+              session_id: payload.session_id,
+            });
+            streamingAssistantIndex = messages.value.length - 1;
+            return;
+          }
+
+          const existing = messages.value[streamingAssistantIndex];
+          if (!existing) {
+            return;
+          }
+          existing.text = `${existing.text ?? ""}${chunkText}`;
+          return;
+        }
+
+        if (isAssistantDoneEvent(payload)) {
+          streamingAssistantIndex = null;
+          return;
+        }
+
+        if (!isMessage(payload) || !payload.sender || !payload.session_id) {
           return;
         }
         messages.value.push(payload);
@@ -61,6 +118,7 @@ export function useChatSocket(options: UseChatSocketOptions) {
       return;
     }
     socket.close();
+    streamingAssistantIndex = null;
     socket = null;
     status.value = "disconnected";
   };
