@@ -8,32 +8,75 @@ from hypo_agent.core.pipeline import ChatPipeline
 from hypo_agent.models import Message
 
 
-def test_pipeline_calls_router_with_single_user_message() -> None:
+class StubSessionMemory:
+    def __init__(self, history: list[Message] | None = None) -> None:
+        self.history = history or []
+        self.appended: list[Message] = []
+
+    def get_recent_messages(self, session_id: str, limit: int | None = None) -> list[Message]:
+        if limit is None:
+            return list(self.history)
+        return list(self.history)[-limit:]
+
+    def append(self, message: Message) -> None:
+        self.appended.append(message)
+
+
+def test_pipeline_injects_recent_history_before_inbound() -> None:
+    memory = StubSessionMemory(
+        history=[
+            Message(text="旧问题", sender="user", session_id="s1"),
+            Message(text="旧回答", sender="assistant", session_id="s1"),
+            Message(text=None, sender="assistant", session_id="s1"),
+            Message(text="ignored", sender="system", session_id="s1"),
+        ]
+    )
+
     class StubRouter:
         async def call(self, model_name, messages):
             assert model_name == "Gemini3Pro"
-            assert messages == [{"role": "user", "content": "你好"}]
-            return "你好，我在。"
+            assert messages == [
+                {"role": "user", "content": "旧问题"},
+                {"role": "assistant", "content": "旧回答"},
+                {"role": "user", "content": "新问题"},
+            ]
+            return "新回答"
 
-    pipeline = ChatPipeline(router=StubRouter(), chat_model="Gemini3Pro")
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+    )
     reply = asyncio.run(
-        pipeline.run_once(Message(text="你好", sender="user", session_id="s1"))
+        pipeline.run_once(Message(text="新问题", sender="user", session_id="s1"))
     )
 
     assert reply.sender == "assistant"
-    assert reply.text == "你好，我在。"
+    assert reply.text == "新回答"
     assert reply.session_id == "s1"
+    assert [m.sender for m in memory.appended] == ["user", "assistant"]
+    assert memory.appended[0].text == "新问题"
+    assert memory.appended[1].text == "新回答"
 
 
-def test_pipeline_stream_reply_emits_chunk_and_done_events() -> None:
+def test_pipeline_stream_reply_emits_chunk_and_done_events_and_persists() -> None:
+    memory = StubSessionMemory()
+
     class StubRouter:
-        async def stream(self, model_name, messages):
+        async def stream(self, model_name, messages, *, session_id=None):
             assert model_name == "Gemini3Pro"
             assert messages == [{"role": "user", "content": "hello"}]
+            assert session_id == "s1"
             yield "He"
             yield "llo"
 
-    pipeline = ChatPipeline(router=StubRouter(), chat_model="Gemini3Pro")
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+    )
 
     async def _collect() -> list[dict]:
         inbound = Message(text="hello", sender="user", session_id="s1")
@@ -59,14 +102,23 @@ def test_pipeline_stream_reply_emits_chunk_and_done_events() -> None:
             "session_id": "s1",
         },
     ]
+    assert [m.sender for m in memory.appended] == ["user", "assistant"]
+    assert memory.appended[1].text == "Hello"
 
 
 def test_pipeline_rejects_empty_text() -> None:
+    memory = StubSessionMemory()
+
     class StubRouter:
         async def call(self, model_name, messages):
             return "unused"
 
-    pipeline = ChatPipeline(router=StubRouter(), chat_model="Gemini3Pro")
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+    )
 
     with pytest.raises(ValueError, match="text"):
         asyncio.run(
@@ -74,3 +126,4 @@ def test_pipeline_rejects_empty_text() -> None:
                 Message(text="   ", sender="user", session_id="s1"),
             )
         )
+    assert memory.appended == []

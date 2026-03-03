@@ -8,6 +8,13 @@ export interface Message {
   session_id: string;
 }
 
+export interface SessionSummary {
+  session_id: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+}
+
 export interface AssistantChunkEvent {
   type: "assistant_chunk";
   text: string;

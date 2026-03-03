@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import AsyncIterator
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import structlog
@@ -17,6 +19,8 @@ class ModelRouter:
         self,
         config: RuntimeModelConfig,
         acompletion_fn=None,
+        on_stream_success: Callable[[dict[str, Any]], Awaitable[None] | None]
+        | None = None,
     ) -> None:
         self.config = config
         self._acompletion = acompletion_fn or litellm_acompletion
@@ -24,6 +28,7 @@ class ModelRouter:
             raise RuntimeError(
                 "litellm is not installed and no acompletion_fn was provided"
             )
+        self._on_stream_success = on_stream_success
         self.logger = structlog.get_logger("hypo_agent.model_router")
 
     async def call(self, model_name: str, messages: list[dict[str, Any]]) -> str:
@@ -78,6 +83,8 @@ class ModelRouter:
         self,
         model_name: str,
         messages: list[dict[str, Any]],
+        *,
+        session_id: str | None = None,
     ) -> AsyncIterator[str]:
         attempted: list[str] = []
         last_error: Exception | None = None
@@ -114,14 +121,25 @@ class ModelRouter:
                     started = True
                     yield text
 
+                event_payload = {
+                    "event": "model_stream_success",
+                    "session_id": session_id,
+                    "requested_model": model_name,
+                    "resolved_model": candidate,
+                    "input_tokens": usage["input_tokens"],
+                    "output_tokens": usage["output_tokens"],
+                    "total_tokens": usage["total_tokens"],
+                }
                 self.logger.info(
                     "model_stream_success",
+                    session_id=session_id,
                     requested_model=model_name,
                     resolved_model=candidate,
                     input_tokens=usage["input_tokens"],
                     output_tokens=usage["output_tokens"],
                     total_tokens=usage["total_tokens"],
                 )
+                await self._emit_stream_success(event_payload)
                 return
             except Exception as exc:  # pragma: no cover - exercised in tests
                 if started:
@@ -145,6 +163,14 @@ class ModelRouter:
         raise RuntimeError(
             f"All stream models failed for '{model_name}'. Attempted chain: {attempted}"
         ) from last_error
+
+    async def _emit_stream_success(self, payload: dict[str, Any]) -> None:
+        if self._on_stream_success is None:
+            return
+
+        result = self._on_stream_success(payload)
+        if inspect.isawaitable(result):
+            await result
 
     def _candidate_chain(self, start_model: str) -> list[str]:
         if start_model not in self.config.models:

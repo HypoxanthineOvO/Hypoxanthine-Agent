@@ -1,4 +1,5 @@
 import { ref } from "vue";
+import type { Ref } from "vue";
 
 import type {
   AssistantChunkEvent,
@@ -11,7 +12,7 @@ import type {
 interface UseChatSocketOptions {
   url: string;
   token: string;
-  sessionId: string;
+  sessionId: Ref<string>;
 }
 
 function withToken(url: string, token: string): string {
@@ -71,6 +72,10 @@ export function useChatSocket(options: UseChatSocketOptions) {
         const payload = JSON.parse(event.data) as IncomingWsEvent;
 
         if (isAssistantChunkEvent(payload)) {
+          if (payload.session_id !== options.sessionId.value) {
+            return;
+          }
+
           const chunkText = payload.text ?? "";
           const isExistingStreamSlot =
             streamingAssistantIndex !== null &&
@@ -90,7 +95,11 @@ export function useChatSocket(options: UseChatSocketOptions) {
             return;
           }
 
-          const existing = messages.value[streamingAssistantIndex];
+          const targetIndex = streamingAssistantIndex;
+          if (targetIndex === null) {
+            return;
+          }
+          const existing = messages.value[targetIndex];
           if (!existing) {
             return;
           }
@@ -99,11 +108,17 @@ export function useChatSocket(options: UseChatSocketOptions) {
         }
 
         if (isAssistantDoneEvent(payload)) {
+          if (payload.session_id !== options.sessionId.value) {
+            return;
+          }
           streamingAssistantIndex = null;
           return;
         }
 
         if (!isMessage(payload) || !payload.sender || !payload.session_id) {
+          return;
+        }
+        if (payload.session_id !== options.sessionId.value) {
           return;
         }
         messages.value.push(payload);
@@ -135,17 +150,23 @@ export function useChatSocket(options: UseChatSocketOptions) {
     const message: Message = {
       text: trimmed,
       sender: "user",
-      session_id: options.sessionId,
+      session_id: options.sessionId.value,
     };
     socket.send(JSON.stringify(message));
     messages.value.push(message);
     return true;
   };
 
+  const replaceMessages = (nextMessages: Message[]): void => {
+    messages.value = nextMessages.map((item) => ({ ...item }));
+    streamingAssistantIndex = null;
+  };
+
   return {
     connect,
     disconnect,
     messages,
+    replaceMessages,
     sendText,
     status,
   };
