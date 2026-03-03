@@ -20,6 +20,14 @@ class StubPipeline:
             "session_id": inbound.session_id,
         }
 
+
+class FailingPipeline:
+    async def stream_reply(self, inbound):
+        if False:  # pragma: no cover
+            yield {}
+        raise RuntimeError("fallback chain exhausted")
+
+
 def _client(token: str = "test-token", pipeline=None) -> TestClient:
     app = create_app(auth_token=token, pipeline=pipeline or StubPipeline())
     return TestClient(app)
@@ -67,3 +75,18 @@ def test_ws_rejects_invalid_message_shape() -> None:
             with pytest.raises(WebSocketDisconnect) as exc_info:
                 ws.receive_json()
             assert exc_info.value.code == 4400
+
+
+def test_ws_sends_error_event_on_pipeline_runtime_error() -> None:
+    with _client(pipeline=FailingPipeline()) as client:
+        with client.websocket_connect("/ws?token=test-token") as ws:
+            ws.send_json({"text": "hello", "sender": "user", "session_id": "s1"})
+            event = ws.receive_json()
+            assert event == {
+                "type": "error",
+                "message": "LLM 调用失败，请检查配置或稍后重试",
+                "session_id": "s1",
+            }
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                ws.receive_json()
+            assert exc_info.value.code == 1011
