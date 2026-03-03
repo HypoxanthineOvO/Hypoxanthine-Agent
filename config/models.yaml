@@ -1,0 +1,15 @@
+default_model: gpt-4o-mini
+models:
+  gpt-4o-mini:
+    provider: openai
+    temperature: 0.2
+    max_tokens: 2048
+  gpt-4.1:
+    provider: openai
+    temperature: 0.1
+    max_tokens: 4096
+task_type_to_model:
+  chat: gpt-4o-mini
+  summarize: gpt-4o-mini
+  plan: gpt-4.1
+  code: gpt-4.1

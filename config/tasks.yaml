@@ -1,0 +1,9 @@
+scheduler:
+  tick_interval_seconds: 15
+  max_concurrent_tasks: 2
+retry_policy:
+  max_retries: 2
+  backoff_seconds: 3
+task_defaults:
+  timeout_seconds: 120
+  priority: normal
