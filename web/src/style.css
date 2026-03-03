@@ -1,0 +1,46 @@
+:root {
+  --bg: #070a14;
+  --surface: #10172d;
+  --panel: #0d1428;
+  --panel-edge: #2a3556;
+  --text: #e7ecfa;
+  --muted: #96a4cd;
+  --brand: #4ddcb1;
+  --brand-2: #f5b95e;
+  --ok: #5be081;
+  --warn: #ffcb6b;
+  --error: #ff6c6c;
+
+  color: var(--text);
+  font-family:
+    "IBM Plex Sans",
+    "Noto Sans SC",
+    "PingFang SC",
+    "Hiragino Sans GB",
+    sans-serif;
+  font-synthesis: none;
+  font-weight: 400;
+  line-height: 1.5;
+  text-rendering: optimizeLegibility;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+}
+
+body {
+  background:
+    radial-gradient(60rem 60rem at -10% -20%, color-mix(in srgb, var(--brand) 18%, transparent), transparent 55%),
+    radial-gradient(50rem 50rem at 120% 10%, color-mix(in srgb, var(--brand-2) 12%, transparent), transparent 60%),
+    linear-gradient(160deg, #050813, #090f20 40%, #0b1122);
+  color: var(--text);
+  margin: 0;
+}
