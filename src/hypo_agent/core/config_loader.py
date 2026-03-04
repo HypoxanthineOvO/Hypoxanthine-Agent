@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import yaml
@@ -14,6 +15,9 @@ class ResolvedModelConfig(BaseModel):
     provider: str | None = None
     litellm_model: str | None = None
     fallback: str | None = None
+    supports_tool_calling: bool | None = None
+    context_window: int | None = None
+    description: str | None = None
     api_base: str | None = None
     api_key: str | None = None
 
@@ -33,6 +37,25 @@ def _load_yaml(path: Path) -> dict:
     if not isinstance(payload, dict):
         raise ValueError(f"Expected YAML mapping in {path}")
     return payload
+
+
+def _resolve_api_key(raw_api_key: str, *, provider_name: str, model_name: str) -> str:
+    api_key = raw_api_key.strip()
+    if not api_key:
+        raise ValueError(
+            f"Provider '{provider_name}' required by model '{model_name}' has empty api_key"
+        )
+    if not api_key.startswith("$"):
+        return api_key
+
+    env_name = api_key[1:]
+    env_value = os.getenv(env_name, "").strip()
+    if not env_value:
+        raise ValueError(
+            f"Environment variable '{env_name}' required by provider "
+            f"'{provider_name}' for model '{model_name}' is missing"
+        )
+    return env_value
 
 
 def load_runtime_model_config(
@@ -56,13 +79,20 @@ def load_runtime_model_config(
                 raise ValueError(
                     f"Provider '{model.provider}' required by model '{name}' is missing"
                 )
-            api_base = provider.api_base
-            api_key = provider.api_key
+            api_base = (provider.api_base or "").strip() or None
+            api_key = _resolve_api_key(
+                provider.api_key,
+                provider_name=model.provider,
+                model_name=name,
+            )
 
         resolved_models[name] = ResolvedModelConfig(
             provider=model.provider,
             litellm_model=model.litellm_model,
             fallback=model.fallback,
+            supports_tool_calling=model.supports_tool_calling,
+            context_window=model.context_window,
+            description=model.description,
             api_base=api_base,
             api_key=api_key,
         )
