@@ -11,6 +11,13 @@ from hypo_agent.models import Message, SkillOutput
 
 logger = structlog.get_logger()
 
+TOOL_USE_SYSTEM_PROMPT = (
+    "You are an assistant with access to tools. "
+    "When the user asks you to execute a command or run code, you MUST use "
+    "the provided tools instead of describing the action in text. "
+    "Always prefer using tools over explaining what you would do."
+)
+
 
 class ChatModelRouter(Protocol):
     async def call(
@@ -49,7 +56,7 @@ class ChatSkillManager(Protocol):
         params: dict[str, Any],
         *,
         session_id: str | None = None,
-    ) -> Any: ...
+    ) -> SkillOutput: ...
 
 
 class ChatPipeline:
@@ -82,21 +89,25 @@ class ChatPipeline:
         return outbound
 
     async def stream_reply(self, inbound: Message) -> AsyncIterator[dict[str, Any]]:
-        llm_messages = self._build_llm_messages(inbound)
+        use_tools = (
+            self.skill_manager is not None
+            and self.max_react_rounds > 0
+        )
+        llm_messages = self._build_llm_messages(inbound, use_tools=use_tools)
         self.session_memory.append(inbound)
 
         full_text = ""
-        use_tools = (
-            self.skill_manager is not None
-            and hasattr(self.router, "call_with_tools")
-            and self.max_react_rounds > 0
-        )
 
         if use_tools:
             assert self.skill_manager is not None
             tools = self.skill_manager.get_tools_schema()
             react_messages: list[dict[str, Any]] = list(llm_messages)
             reached_round_limit = True
+            logger.info(
+                "react.start",
+                session_id=inbound.session_id,
+                max_rounds=self.max_react_rounds,
+            )
 
             for round_num in range(1, self.max_react_rounds + 1):
                 decision = await self.router.call_with_tools(
@@ -106,24 +117,38 @@ class ChatPipeline:
                     session_id=inbound.session_id,
                 )
                 tool_calls = decision.get("tool_calls") or []
-                del round_num
+                logger.info(
+                    "react.round",
+                    round=round_num,
+                    tool_calls=len(tool_calls),
+                )
                 if not tool_calls:
                     reached_round_limit = False
-                    async for chunk in self.router.stream(
-                        self.chat_model,
-                        react_messages,
-                        session_id=inbound.session_id,
-                        tools=tools,
-                    ):
-                        if not chunk:
-                            continue
-                        full_text += chunk
+                    text = str(decision.get("text") or "")
+                    if text:
+                        full_text = text
                         yield {
                             "type": "assistant_chunk",
-                            "text": chunk,
+                            "text": text,
                             "sender": "assistant",
                             "session_id": inbound.session_id,
                         }
+                    else:
+                        async for chunk in self.router.stream(
+                            self.chat_model,
+                            react_messages,
+                            session_id=inbound.session_id,
+                            tools=tools,
+                        ):
+                            if not chunk:
+                                continue
+                            full_text += chunk
+                            yield {
+                                "type": "assistant_chunk",
+                                "text": chunk,
+                                "sender": "assistant",
+                                "session_id": inbound.session_id,
+                            }
                     break
 
                 react_messages.append(
@@ -168,6 +193,7 @@ class ChatPipeline:
                     )
 
             if reached_round_limit:
+                logger.warning("react.round_limit", session_id=inbound.session_id)
                 full_text = "Stopped due to max ReAct rounds limit."
                 yield {
                     "type": "assistant_chunk",
@@ -222,12 +248,20 @@ class ChatPipeline:
                 return parsed
         return {}
 
-    def _build_llm_messages(self, inbound: Message) -> list[dict[str, str]]:
+    def _build_llm_messages(
+        self,
+        inbound: Message,
+        *,
+        use_tools: bool = False,
+    ) -> list[dict[str, str]]:
         text = (inbound.text or "").strip()
         if not text:
             raise ValueError("text is required for M2 chat pipeline")
 
         llm_messages: list[dict[str, str]] = []
+        if use_tools:
+            llm_messages.append({"role": "system", "content": TOOL_USE_SYSTEM_PROMPT})
+
         history = self.session_memory.get_recent_messages(
             inbound.session_id,
             limit=self.history_window,

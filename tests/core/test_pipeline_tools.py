@@ -95,6 +95,8 @@ def test_pipeline_stream_reply_uses_call_with_tools_text_without_stream_call() -
             assert model_name == "Gemini3Pro"
             assert tools is not None
             assert session_id == "s1"
+            assert messages[0]["role"] == "system"
+            assert "MUST use the provided tools" in messages[0]["content"]
             return {"text": "direct answer", "tool_calls": []}
 
         async def stream(self, model_name, messages, *, session_id=None, tools=None):

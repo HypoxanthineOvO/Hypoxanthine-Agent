@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Callable
 
+import structlog
+
 from hypo_agent.models import CircuitBreakerConfig
+
+logger = structlog.get_logger()
 
 
 class CircuitBreaker:
@@ -35,6 +39,10 @@ class CircuitBreaker:
                     return False, f"session circuit breaker is open for '{session_id}'"
                 self._session_blocked_until.pop(session_id, None)
                 self._session_failures[session_id] = 0
+                logger.info(
+                    "circuit_breaker.session.recovered",
+                    session_id=session_id,
+                )
 
         tool_block_until = self._tool_blocked_until.get(tool_name)
         if tool_block_until is not None:
@@ -42,6 +50,7 @@ class CircuitBreaker:
                 return False, f"tool circuit breaker is open for '{tool_name}'"
             self._tool_blocked_until.pop(tool_name, None)
             self._tool_failures[tool_name] = 0
+            logger.info("circuit_breaker.tool.recovered", tool_name=tool_name)
 
         return True, ""
 
@@ -59,6 +68,11 @@ class CircuitBreaker:
         if next_tool_count >= self.config.tool_level_max_failures:
             self._tool_blocked_until[tool_name] = cooldown_deadline
             self._tool_failures[tool_name] = 0
+            logger.warning(
+                "circuit_breaker.tool.open",
+                tool_name=tool_name,
+                max_failures=self.config.tool_level_max_failures,
+            )
 
         if session_id is None:
             return
@@ -68,6 +82,11 @@ class CircuitBreaker:
         if next_session_count >= self.config.session_level_max_failures:
             self._session_blocked_until[session_id] = cooldown_deadline
             self._session_failures[session_id] = 0
+            logger.warning(
+                "circuit_breaker.session.open",
+                session_id=session_id,
+                max_failures=self.config.session_level_max_failures,
+            )
 
     def set_global_kill_switch(self, enabled: bool) -> None:
         self._global_kill_switch = bool(enabled)
