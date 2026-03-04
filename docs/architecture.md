@@ -199,14 +199,19 @@ class BaseSkill:
     async def execute(tool_name, params) -> Result
 ```
 
-**V1 内置 Skills**：
+**M4 内置 Skills**：
 
 | Skill | 职责 | 权限 |
 | --- | --- | --- |
-| **TmuxSkill** | 通过 libtmux 操控终端会话（发送命令、读取输出） | 授权目录内执行 |
-| **ReminderSkill** | 管理定时提醒，与 Scheduler 协作 | 无特殊权限 |
-| **FileSystemSkill** | 文件读写（受沙箱限制） | 默认只读，白名单目录可写 |
-| **LogInspectorSkill** | 用小模型总结日志，回答“你做了什么” | 只读日志 |
+| **TmuxSkill** | 在 tmux 会话中执行命令，支持超时与输出截断保护 | M4 暂不做权限校验 |
+| **CodeRunSkill** | 将 Python / shell 代码写入沙箱并执行，复用 TmuxSkill 返回结果 | M4 暂不做权限校验 |
+
+**M4 Tool Calling 执行路径**：
+
+1. Router 以 `tools` 参数调用 LLM（LiteLLM function calling）
+2. Pipeline 进入 ReAct 循环，解析 `tool_calls`
+3. SkillManager 统一分发工具调用，并集成 Circuit Breaker
+4. 工具结果回灌到 ReAct messages，直到模型结束或触发最大轮次限制
 
 **后期扩展**：
 
