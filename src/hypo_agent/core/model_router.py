@@ -31,7 +31,25 @@ class ModelRouter:
         self._on_stream_success = on_stream_success
         self.logger = structlog.get_logger("hypo_agent.model_router")
 
-    async def call(self, model_name: str, messages: list[dict[str, Any]]) -> str:
+    async def call(
+        self,
+        model_name: str,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> str:
+        payload = await self.call_with_tools(model_name, messages, tools=tools)
+        return payload["text"]
+
+    async def call_with_tools(
+        self,
+        model_name: str,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        del session_id
         attempted: list[str] = []
         last_error: Exception | None = None
 
@@ -48,13 +66,32 @@ class ModelRouter:
                 continue
 
             try:
-                response = await self._acompletion(
+                kwargs: dict[str, Any] = {
+                    "model": cfg.litellm_model,
+                    "messages": messages,
+                }
+                if isinstance(cfg.api_base, str) and cfg.api_base.strip():
+                    kwargs["api_base"] = cfg.api_base
+                if isinstance(cfg.api_key, str) and cfg.api_key.strip():
+                    kwargs["api_key"] = cfg.api_key
+                if tools is not None:
+                    kwargs["tools"] = tools
+                self.logger.debug(
+                    "call_with_tools.request",
                     model=cfg.litellm_model,
-                    messages=messages,
-                    api_base=cfg.api_base,
-                    api_key=cfg.api_key,
+                    tools_count=len(tools or []),
+                    messages_count=len(messages),
                 )
+
+                response = await self._acompletion(**kwargs)
                 text = self._extract_message_text(response)
+                has_tool_calls = self._has_tool_call_payload(response)
+                self.logger.debug(
+                    "call_with_tools.response_raw",
+                    has_tool_calls=has_tool_calls,
+                    text_length=len(text),
+                )
+                tool_calls = self._extract_tool_calls(response)
                 usage = self._extract_usage(response)
                 self.logger.info(
                     "model_call_success",
@@ -64,7 +101,7 @@ class ModelRouter:
                     output_tokens=usage["output_tokens"],
                     total_tokens=usage["total_tokens"],
                 )
-                return text
+                return {"text": text, "tool_calls": tool_calls}
             except Exception as exc:  # pragma: no cover - exercised in tests
                 attempted.append(candidate)
                 last_error = exc
@@ -85,6 +122,7 @@ class ModelRouter:
         messages: list[dict[str, Any]],
         *,
         session_id: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[str]:
         attempted: list[str] = []
         last_error: Exception | None = None
@@ -105,13 +143,19 @@ class ModelRouter:
             usage = {"input_tokens": None, "output_tokens": None, "total_tokens": None}
 
             try:
-                response_stream = await self._acompletion(
-                    model=cfg.litellm_model,
-                    messages=messages,
-                    api_base=cfg.api_base,
-                    api_key=cfg.api_key,
-                    stream=True,
-                )
+                kwargs: dict[str, Any] = {
+                    "model": cfg.litellm_model,
+                    "messages": messages,
+                    "stream": True,
+                }
+                if isinstance(cfg.api_base, str) and cfg.api_base.strip():
+                    kwargs["api_base"] = cfg.api_base
+                if isinstance(cfg.api_key, str) and cfg.api_key.strip():
+                    kwargs["api_key"] = cfg.api_key
+                if tools is not None:
+                    kwargs["tools"] = tools
+
+                response_stream = await self._acompletion(**kwargs)
 
                 async for chunk in response_stream:
                     usage = self._extract_usage(chunk, default=usage)
@@ -201,6 +245,162 @@ class ModelRouter:
 
         content = self._read_field(message, "content")
         return self._normalize_content(content)
+
+    def _extract_tool_calls(self, payload: Any) -> list[dict[str, Any]]:
+        choices = self._read_field(payload, "choices") or []
+        if not choices:
+            return []
+
+        first_choice = choices[0]
+        message = self._read_field(first_choice, "message")
+        if message is None:
+            return []
+
+        raw_calls = self._read_field(message, "tool_calls")
+        if raw_calls is None:
+            raw_calls = []
+        if isinstance(raw_calls, dict):
+            raw_calls = [raw_calls]
+        if not isinstance(raw_calls, list):
+            raw_calls = []
+
+        normalized: list[dict[str, Any]] = []
+        for idx, item in enumerate(raw_calls):
+            normalized_item = self._normalize_tool_call_item(item, default_id=f"call_{idx + 1}")
+            if normalized_item is not None:
+                normalized.append(normalized_item)
+        if normalized:
+            return normalized
+
+        # Legacy function-call format (some providers expose this shape).
+        function_call = self._read_field(message, "function_call")
+        normalized_function_call = self._normalize_function_call(
+            function_call,
+            default_id="call_1",
+        )
+        if normalized_function_call is not None:
+            return [normalized_function_call]
+
+        # Gemini-style content parts may include structured function call data.
+        content = self._read_field(message, "content")
+        if isinstance(content, list):
+            for idx, part in enumerate(content):
+                normalized_part = self._normalize_gemini_part_tool_call(
+                    part,
+                    default_id=f"call_{idx + 1}",
+                )
+                if normalized_part is not None:
+                    normalized.append(normalized_part)
+        return normalized
+
+    def _has_tool_call_payload(self, payload: Any) -> bool:
+        return bool(self._extract_tool_calls(payload))
+
+    def _normalize_tool_call_item(
+        self,
+        item: Any,
+        *,
+        default_id: str,
+    ) -> dict[str, Any] | None:
+        function_payload = self._read_field(item, "function")
+        if function_payload is None:
+            return None
+        name = self._read_field(function_payload, "name")
+        if not isinstance(name, str) or not name:
+            return None
+
+        arguments = self._read_field(function_payload, "arguments")
+        if isinstance(arguments, dict):
+            arguments = self._json_dump(arguments)
+        elif arguments is None:
+            arguments = "{}"
+        elif not isinstance(arguments, str):
+            arguments = str(arguments)
+
+        call_id = self._read_field(item, "id")
+        if not isinstance(call_id, str) or not call_id:
+            call_id = default_id
+
+        call_type = self._read_field(item, "type")
+        if not isinstance(call_type, str) or not call_type:
+            call_type = "function"
+
+        return {
+            "id": call_id,
+            "type": call_type,
+            "function": {
+                "name": name,
+                "arguments": arguments,
+            },
+        }
+
+    def _normalize_function_call(
+        self,
+        function_call: Any,
+        *,
+        default_id: str,
+    ) -> dict[str, Any] | None:
+        if function_call is None:
+            return None
+        name = self._read_field(function_call, "name")
+        if not isinstance(name, str) or not name:
+            return None
+
+        arguments = self._read_field(function_call, "arguments")
+        if isinstance(arguments, dict):
+            arguments = self._json_dump(arguments)
+        elif arguments is None:
+            arguments = "{}"
+        elif not isinstance(arguments, str):
+            arguments = str(arguments)
+
+        return {
+            "id": default_id,
+            "type": "function",
+            "function": {"name": name, "arguments": arguments},
+        }
+
+    def _normalize_gemini_part_tool_call(
+        self,
+        part: Any,
+        *,
+        default_id: str,
+    ) -> dict[str, Any] | None:
+        if not isinstance(part, dict):
+            return None
+
+        part_type = part.get("type")
+        if part_type not in {"tool_use", "function_call"}:
+            return None
+
+        name = part.get("name") or part.get("tool_name")
+        if not isinstance(name, str) or not name:
+            return None
+
+        arguments = part.get("arguments")
+        if arguments is None:
+            arguments = part.get("input")
+        if isinstance(arguments, dict):
+            arguments = self._json_dump(arguments)
+        elif arguments is None:
+            arguments = "{}"
+        elif not isinstance(arguments, str):
+            arguments = str(arguments)
+
+        call_id = part.get("id")
+        if not isinstance(call_id, str) or not call_id:
+            call_id = default_id
+
+        return {
+            "id": call_id,
+            "type": "function",
+            "function": {"name": name, "arguments": arguments},
+        }
+
+    def _json_dump(self, payload: dict[str, Any]) -> str:
+        import json
+
+        return json.dumps(payload, ensure_ascii=False)
 
     def _extract_delta_text(self, chunk: Any) -> str:
         choices = self._read_field(chunk, "choices") or []

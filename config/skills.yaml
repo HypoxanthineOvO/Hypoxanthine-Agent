@@ -1,11 +1,8 @@
 default_timeout_seconds: 30
 skills:
-  shell:
+  tmux:
     enabled: true
-    timeout_seconds: 60
-  memory_lookup:
+    timeout_seconds: 30
+  code_run:
     enabled: true
-    timeout_seconds: 10
-  web_search:
-    enabled: false
-    timeout_seconds: 20
+    timeout_seconds: 30

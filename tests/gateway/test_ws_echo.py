@@ -28,6 +28,37 @@ class FailingPipeline:
         raise RuntimeError("fallback chain exhausted")
 
 
+class ToolEventPipeline:
+    async def stream_reply(self, inbound):
+        yield {
+            "type": "tool_call_start",
+            "tool_name": "run_command",
+            "tool_call_id": "call_1",
+            "session_id": inbound.session_id,
+        }
+        yield {
+            "type": "tool_call_result",
+            "tool_name": "run_command",
+            "tool_call_id": "call_1",
+            "status": "success",
+            "result": {"stdout": "ok"},
+            "error_info": "",
+            "metadata": {},
+            "session_id": inbound.session_id,
+        }
+        yield {
+            "type": "assistant_chunk",
+            "text": "ok",
+            "sender": "assistant",
+            "session_id": inbound.session_id,
+        }
+        yield {
+            "type": "assistant_done",
+            "sender": "assistant",
+            "session_id": inbound.session_id,
+        }
+
+
 def _client(token: str = "test-token", pipeline=None) -> TestClient:
     app = create_app(auth_token=token, pipeline=pipeline or StubPipeline())
     return TestClient(app)
@@ -90,3 +121,17 @@ def test_ws_sends_error_event_on_pipeline_runtime_error() -> None:
             with pytest.raises(WebSocketDisconnect) as exc_info:
                 ws.receive_json()
             assert exc_info.value.code == 1011
+
+
+def test_ws_forwards_tool_events_without_modification() -> None:
+    with _client(pipeline=ToolEventPipeline()) as client:
+        with client.websocket_connect("/ws?token=test-token") as ws:
+            ws.send_json({"text": "hello", "sender": "user", "session_id": "s1"})
+            first = ws.receive_json()
+            second = ws.receive_json()
+            third = ws.receive_json()
+            fourth = ws.receive_json()
+            assert first["type"] == "tool_call_start"
+            assert second["type"] == "tool_call_result"
+            assert third["type"] == "assistant_chunk"
+            assert fourth["type"] == "assistant_done"
