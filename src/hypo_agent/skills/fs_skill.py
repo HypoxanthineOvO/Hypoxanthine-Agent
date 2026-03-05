@@ -253,6 +253,9 @@ class FileSystemSkill(BaseSkill):
                     },
                 )
         except Exception as exc:
+            message = str(exc)
+            if message.startswith("Cannot read encrypted PDF:"):
+                return SkillOutput(status="error", error_info=message)
             return SkillOutput(status="error", error_info=f"Failed to read file: {exc}")
 
         stat = path.stat()
@@ -402,7 +405,23 @@ class FileSystemSkill(BaseSkill):
         if not raw_path:
             return SkillOutput(status="error", error_info="path is required")
 
-        denied = self._deny_if_no_permission(raw_path, "write")
+        denied = self._deny_if_no_permission(raw_path, "read")
+        if denied is not None:
+            return denied
+
+        if (
+            self.permission_manager is not None
+            and not self.permission_manager.has_whitelist_match(raw_path)
+        ):
+            return SkillOutput(
+                status="error",
+                error_info=(
+                    f"Permission denied: Path '{Path(raw_path).expanduser().resolve(strict=False)}' "
+                    "is outside explicit whitelist visibility"
+                ),
+            )
+
+        denied = self._deny_if_no_permission(str(self.index_file), "write")
         if denied is not None:
             return denied
 
@@ -445,7 +464,11 @@ class FileSystemSkill(BaseSkill):
         if self.permission_manager is None:
             return None
 
-        allowed, reason = self.permission_manager.check_permission(path, operation)
+        allowed, reason = self.permission_manager.check_permission(
+            path,
+            operation,
+            log_allowed=False,
+        )
         if allowed:
             return None
         return SkillOutput(status="error", error_info=f"Permission denied: {reason}")
@@ -471,7 +494,7 @@ class FileSystemSkill(BaseSkill):
             if current != root:
                 yield current, level - 1
 
-            if level >= max_depth:
+            if level >= max_depth or not current.is_dir():
                 continue
 
             children = sorted(current.iterdir(), key=lambda item: (item.is_file(), item.name))
@@ -480,6 +503,8 @@ class FileSystemSkill(BaseSkill):
 
     def _read_pdf(self, path: Path) -> str:
         with fitz.open(path) as document:
+            if document.is_encrypted:
+                raise ValueError(f"Cannot read encrypted PDF: {path}")
             texts = [page.get_text("text") for page in document]
         return "\n".join(texts).strip()
 
@@ -511,7 +536,7 @@ class FileSystemSkill(BaseSkill):
                 "height": pixmap.height,
             }
         finally:
-            pixmap = None
+            del pixmap
 
     def _scan_tree(self, root: Path, depth: int) -> dict[str, Any]:
         files = [item for item in root.iterdir() if item.is_file()]

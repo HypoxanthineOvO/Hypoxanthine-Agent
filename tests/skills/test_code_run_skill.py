@@ -158,3 +158,51 @@ def test_code_run_skill_rejects_unsupported_language(tmp_path: Path) -> None:
 
     assert output.status == "error"
     assert "Unsupported language" in output.error_info
+
+
+def test_code_run_skill_runtime_falls_back_when_bwrap_exec_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = _permission_manager(tmp_path)
+    calls: list[tuple[str, ...]] = []
+    events: list[str] = []
+
+    class LogRecorder:
+        def info(self, event: str, **kwargs) -> None:
+            del kwargs
+            events.append(event)
+
+        def warning(self, event: str, **kwargs) -> None:
+            del kwargs
+            events.append(event)
+
+    monkeypatch.setattr(code_run_module, "logger", LogRecorder())
+
+    async def fake_subprocess_exec(*cmd: str, **kwargs: Any) -> StubProcess:
+        del kwargs
+        calls.append(tuple(cmd))
+        if len(calls) == 1:
+            return StubProcess(
+                stdout=b"",
+                stderr=b"bwrap: setting up uid map: Permission denied\n",
+                returncode=1,
+            )
+        return StubProcess(stdout=b"ok\n", stderr=b"", returncode=0)
+
+    skill = CodeRunSkill(
+        permission_manager=manager,
+        sandbox_dir=tmp_path / "sandbox",
+        subprocess_exec=fake_subprocess_exec,
+        which_fn=lambda _: "/usr/bin/bwrap",
+    )
+
+    output = asyncio.run(skill.execute("run_code", {"code": "echo ok", "language": "shell"}))
+
+    assert output.status == "success"
+    assert len(calls) == 2
+    assert calls[0][0] == "bwrap"
+    assert calls[1][0] == "bash"
+    assert calls[1][1] == "-lc"
+    assert output.metadata["sandbox_backend"] == "fallback"
+    assert "code_run.bwrap.runtime_fallback" in events

@@ -18,21 +18,27 @@ from hypo_agent.skills.fs_skill import FileSystemSkill
 def _build_skill(tmp_path: Path) -> tuple[FileSystemSkill, Path, Path]:
     writable = tmp_path / "workspace"
     readonly = tmp_path / "readonly"
+    index_file = tmp_path / "memory" / "knowledge" / "directory_index.yaml"
     writable.mkdir(parents=True, exist_ok=True)
     readonly.mkdir(parents=True, exist_ok=True)
+    index_file.parent.mkdir(parents=True, exist_ok=True)
 
     manager = PermissionManager(
         DirectoryWhitelist(
             rules=[
                 WhitelistRule(path=str(writable), permissions=["read", "write"]),
                 WhitelistRule(path=str(readonly), permissions=["read"]),
+                WhitelistRule(
+                    path=str(index_file.parent),
+                    permissions=["read", "write"],
+                ),
             ],
             default_policy="readonly",
         )
     )
     skill = FileSystemSkill(
         permission_manager=manager,
-        index_file=tmp_path / "memory" / "knowledge" / "directory_index.yaml",
+        index_file=index_file,
     )
     return skill, writable, readonly
 
@@ -292,3 +298,108 @@ def test_fs_skill_emits_observability_events(tmp_path: Path, monkeypatch) -> Non
     assert "fs.list" in events
     assert "fs.scan" in events
     assert "fs.index.update" in events
+
+
+def test_update_description_allows_readonly_target_if_index_file_writable(tmp_path: Path) -> None:
+    src_root = tmp_path / "src"
+    target_dir = src_root / "hypo_agent" / "security"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "guard.py").write_text("x = 1\n", encoding="utf-8")
+    index_file = tmp_path / "memory" / "knowledge" / "directory_index.yaml"
+
+    manager = PermissionManager(
+        DirectoryWhitelist(
+            rules=[
+                WhitelistRule(path=str(src_root), permissions=["read"]),
+                WhitelistRule(
+                    path=str(index_file.parent),
+                    permissions=["read", "write"],
+                ),
+            ],
+            default_policy="readonly",
+        )
+    )
+    skill = FileSystemSkill(permission_manager=manager, index_file=index_file)
+
+    asyncio.run(skill.execute("scan_directory", {"path": str(src_root), "depth": 4}))
+    output = asyncio.run(
+        skill.execute(
+            "update_directory_description",
+            {"path": str(target_dir), "description": "security module"},
+        )
+    )
+
+    assert output.status == "success"
+    payload = yaml.safe_load(index_file.read_text(encoding="utf-8"))
+    root_key = str(src_root.resolve(strict=False))
+    assert payload["directories"][root_key]["children"]["hypo_agent"]["children"][
+        "security"
+    ]["description"] == "security module"
+
+
+def test_update_description_rejects_path_outside_explicit_whitelist(tmp_path: Path) -> None:
+    src_root = tmp_path / "src"
+    src_root.mkdir(parents=True, exist_ok=True)
+    index_file = tmp_path / "memory" / "knowledge" / "directory_index.yaml"
+    outside = tmp_path / "outside" / "secret"
+    outside.mkdir(parents=True, exist_ok=True)
+
+    manager = PermissionManager(
+        DirectoryWhitelist(
+            rules=[
+                WhitelistRule(path=str(src_root), permissions=["read"]),
+                WhitelistRule(
+                    path=str(index_file.parent),
+                    permissions=["read", "write"],
+                ),
+            ],
+            default_policy="readonly",
+        )
+    )
+    skill = FileSystemSkill(permission_manager=manager, index_file=index_file)
+    asyncio.run(skill.execute("scan_directory", {"path": str(src_root), "depth": 2}))
+
+    output = asyncio.run(
+        skill.execute(
+            "update_directory_description",
+            {"path": str(outside), "description": "should fail"},
+        )
+    )
+
+    assert output.status == "error"
+    assert "explicit whitelist" in output.error_info.lower()
+
+
+def test_list_directory_handles_mixed_file_and_directory_entries(tmp_path: Path) -> None:
+    skill, writable, _ = _build_skill(tmp_path)
+    (writable / "top.txt").write_text("top", encoding="utf-8")
+    nested = writable / "nested"
+    nested.mkdir(parents=True, exist_ok=True)
+    (nested / "child.txt").write_text("child", encoding="utf-8")
+
+    output = asyncio.run(skill.execute("list_directory", {"path": str(writable), "depth": 2}))
+
+    assert output.status == "success"
+    assert "top.txt" in output.result
+    assert "nested" in output.result
+    assert "child.txt" in output.result
+
+
+def test_read_file_returns_friendly_error_for_encrypted_pdf(tmp_path: Path) -> None:
+    skill, _, readonly = _build_skill(tmp_path)
+    file_path = readonly / "encrypted.pdf"
+    pdf = fitz.open()
+    page = pdf.new_page()
+    page.insert_text((72, 72), "secret")
+    pdf.save(
+        file_path,
+        encryption=fitz.PDF_ENCRYPT_AES_256,
+        owner_pw="owner-password",
+        user_pw="user-password",
+    )
+    pdf.close()
+
+    output = asyncio.run(skill.execute("read_file", {"path": str(file_path)}))
+
+    assert output.status == "error"
+    assert f"Cannot read encrypted PDF: {file_path}" in output.error_info

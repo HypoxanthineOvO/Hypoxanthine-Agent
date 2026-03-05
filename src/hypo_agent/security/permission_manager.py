@@ -22,7 +22,13 @@ class PermissionManager:
 
         self._resolved_rules.sort(key=lambda item: len(str(item[0])), reverse=True)
 
-    def check_permission(self, path: str, operation: Operation) -> tuple[bool, str]:
+    def check_permission(
+        self,
+        path: str,
+        operation: Operation,
+        *,
+        log_allowed: bool = True,
+    ) -> tuple[bool, str]:
         try:
             resolved_path = self._resolve_path(path)
         except (OSError, RuntimeError) as exc:
@@ -41,13 +47,14 @@ class PermissionManager:
             base_path, permissions, rule = matched_rule
             if operation in permissions:
                 reason = f"Allowed by whitelist rule '{rule.path}'"
-                logger.info(
-                    "permission.check.allowed",
-                    path=path,
-                    resolved_path=str(resolved_path),
-                    operation=operation,
-                    reason=reason,
-                )
+                if log_allowed:
+                    logger.info(
+                        "permission.check.allowed",
+                        path=path,
+                        resolved_path=str(resolved_path),
+                        operation=operation,
+                        reason=reason,
+                    )
                 return True, reason
 
             reason = (
@@ -65,13 +72,14 @@ class PermissionManager:
 
         if self._whitelist.default_policy == "readonly" and operation == "read":
             reason = "Allowed by readonly default policy"
-            logger.info(
-                "permission.check.allowed",
-                path=path,
-                resolved_path=str(resolved_path),
-                operation=operation,
-                reason=reason,
-            )
+            if log_allowed:
+                logger.info(
+                    "permission.check.allowed",
+                    path=path,
+                    resolved_path=str(resolved_path),
+                    operation=operation,
+                    reason=reason,
+                )
             return True, reason
 
         reason = (
@@ -86,6 +94,13 @@ class PermissionManager:
             reason=reason,
         )
         return False, reason
+
+    def has_whitelist_match(self, path: str) -> bool:
+        try:
+            resolved_path = self._resolve_path(path)
+        except (OSError, RuntimeError):
+            return False
+        return self._find_matching_rule(resolved_path) is not None
 
     def writable_paths(self) -> list[Path]:
         return self.paths_for_operation("write")

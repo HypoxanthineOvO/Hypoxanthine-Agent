@@ -124,6 +124,36 @@ class CodeRunSkill(BaseSkill):
                 },
             )
 
+        if (
+            backend == "bwrap"
+            and int(process_result["returncode"]) != 0
+            and process_result["stderr"].lstrip().startswith("bwrap:")
+        ):
+            logger.warning(
+                "code_run.bwrap.runtime_fallback",
+                command=command,
+                returncode=process_result["returncode"],
+                stderr=process_result["stderr"],
+            )
+            backend = "fallback"
+            try:
+                process_result = await self._run_process(
+                    ["bash", "-lc", command],
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                self._safe_unlink(file_path)
+                return SkillOutput(
+                    status="timeout",
+                    error_info=f"Command timed out after {timeout} seconds",
+                    metadata={
+                        "timeout_seconds": timeout,
+                        "language": language,
+                        "file_path": str(file_path),
+                        "sandbox_backend": backend,
+                    },
+                )
+
         self._safe_unlink(file_path)
 
         stdout, stdout_truncated = self._truncate_output(process_result["stdout"])

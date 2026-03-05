@@ -251,3 +251,8 @@ def test_skill_manager_skips_permission_check_for_skills_without_permissions() -
     output = asyncio.run(manager.invoke("echo", {"text": "ok"}, session_id="s1"))
     assert output.status == "success"
 
+
+def test_skill_manager_infers_scan_directory_as_write_operation() -> None:
+    manager = SkillManager()
+    assert manager._infer_operation("scan_directory") == "write"
+    assert manager._infer_operation("update_directory_description") == "read"

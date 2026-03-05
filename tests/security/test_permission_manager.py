@@ -120,3 +120,33 @@ def test_permission_manager_emits_allowed_and_denied_logs(
     event_names = [item[1] for item in recorder.events]
     assert "permission.check.allowed" in event_names
     assert "permission.check.denied" in event_names
+
+
+def test_permission_manager_can_suppress_allowed_logs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class LogRecorder:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def info(self, event: str, **kwargs) -> None:
+            del kwargs
+            self.events.append(event)
+
+        def warning(self, event: str, **kwargs) -> None:
+            del kwargs
+            self.events.append(event)
+
+    recorder = LogRecorder()
+    monkeypatch.setattr(permission_module, "logger", recorder)
+    manager = _manager(tmp_path)
+
+    allowed, _ = manager.check_permission(
+        str(tmp_path / "projects" / "allowed.txt"),
+        "read",
+        log_allowed=False,
+    )
+
+    assert allowed is True
+    assert "permission.check.allowed" not in recorder.events

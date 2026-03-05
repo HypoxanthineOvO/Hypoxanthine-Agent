@@ -14,6 +14,15 @@ logger = structlog.get_logger()
 
 
 class SkillManager:
+    _OPERATION_OVERRIDES: dict[str, Literal["read", "write", "execute"]] = {
+        "read_file": "read",
+        "write_file": "write",
+        "list_directory": "read",
+        "scan_directory": "write",
+        "get_directory_index": "read",
+        "update_directory_description": "read",
+    }
+
     def __init__(
         self,
         skills: list[BaseSkill] | None = None,
@@ -182,6 +191,9 @@ class SkillManager:
 
     def _infer_operation(self, tool_name: str) -> Literal["read", "write", "execute"]:
         lowered = tool_name.lower()
+        override = self._OPERATION_OVERRIDES.get(lowered)
+        if override is not None:
+            return override
         if "write" in lowered or lowered.startswith("update_"):
             return "write"
         if "execute" in lowered or lowered.startswith("run_"):
