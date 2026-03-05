@@ -18,7 +18,10 @@ dependencies = [
   "pyyaml>=6.0.0,<7.0.0",
   "structlog>=24.0.0,<26.0.0",
   "litellm>=1.60.0,<2.0.0",
-  "aiosqlite>=0.20.0,<1.0.0"
+  "aiosqlite>=0.20.0,<1.0.0",
+  "pymupdf>=1.26.0,<2.0.0",
+  "python-pptx>=1.0.0,<2.0.0",
+  "python-docx>=1.1.0,<2.0.0"
 ]
 
 [project.optional-dependencies]

@@ -109,9 +109,12 @@ def test_security_config_whitelist_and_circuit_breaker():
     security = SecurityConfig.model_validate(
         {
             "directory_whitelist": {
-                "read": ["./docs"],
-                "write": ["./logs"],
-                "execute": ["./workflows"],
+                "rules": [
+                    {"path": "./docs", "permissions": ["read"]},
+                    {"path": "./logs", "permissions": ["read", "write"]},
+                    {"path": "./workflows", "permissions": ["execute"]},
+                ],
+                "default_policy": "readonly",
             },
             "circuit_breaker": {
                 "tool_level_max_failures": 3,
@@ -122,9 +125,10 @@ def test_security_config_whitelist_and_circuit_breaker():
         }
     )
 
-    assert security.directory_whitelist.read == ["./docs"]
-    assert security.directory_whitelist.write == ["./logs"]
-    assert security.directory_whitelist.execute == ["./workflows"]
+    assert security.directory_whitelist.default_policy == "readonly"
+    assert security.directory_whitelist.rules[0].path == "./docs"
+    assert security.directory_whitelist.rules[0].permissions == ["read"]
+    assert security.directory_whitelist.rules[1].permissions == ["read", "write"]
     assert security.circuit_breaker.tool_level_max_failures == 3
     assert security.circuit_breaker.session_level_max_failures == 5
     assert security.circuit_breaker.cooldown_seconds == 120

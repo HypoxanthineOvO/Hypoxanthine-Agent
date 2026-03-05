@@ -6,3 +6,5 @@ skills:
   code_run:
     enabled: true
     timeout_seconds: 30
+  filesystem:
+    enabled: true

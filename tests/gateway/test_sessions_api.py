@@ -18,6 +18,7 @@ def _build_app(tmp_path) -> TestClient:
     deps = AppDeps(
         session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
         structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        permission_manager=object(),
     )
     app = create_app(auth_token="test-token", pipeline=DummyPipeline(), deps=deps)
     return TestClient(app)

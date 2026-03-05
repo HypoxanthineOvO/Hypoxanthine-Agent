@@ -2,27 +2,90 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
-from hypo_agent.models import SkillOutput
+from hypo_agent.models import DirectoryWhitelist, WhitelistRule
+from hypo_agent.security.permission_manager import PermissionManager
+from hypo_agent.skills import code_run_skill as code_run_module
 from hypo_agent.skills.code_run_skill import CodeRunSkill
 
 
-class StubTmuxSkill:
-    def __init__(self, response: SkillOutput | None = None) -> None:
-        self.calls: list[tuple[str, dict]] = []
-        self.response = response or SkillOutput(
-            status="success",
-            result={"stdout": "ok\n", "stderr": "", "exit_code": 0},
+class StubProcess:
+    def __init__(self, *, stdout: bytes = b"ok\n", stderr: bytes = b"", returncode: int = 0) -> None:
+        self._stdout = stdout
+        self._stderr = stderr
+        self.returncode = returncode
+        self.killed = False
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return self._stdout, self._stderr
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+def _permission_manager(tmp_path: Path) -> PermissionManager:
+    writable = tmp_path / "projects"
+    writable.mkdir(parents=True, exist_ok=True)
+    readonly = tmp_path / "docs"
+    readonly.mkdir(parents=True, exist_ok=True)
+    return PermissionManager(
+        DirectoryWhitelist(
+            rules=[
+                WhitelistRule(path=str(writable), permissions=["read", "write", "execute"]),
+                WhitelistRule(path=str(readonly), permissions=["read"]),
+            ],
+            default_policy="readonly",
         )
-
-    async def execute(self, tool_name: str, params: dict) -> SkillOutput:
-        self.calls.append((tool_name, params))
-        return self.response
+    )
 
 
-def test_code_run_skill_executes_python_via_tmux(tmp_path: Path) -> None:
-    tmux = StubTmuxSkill()
-    skill = CodeRunSkill(tmux_skill=tmux, sandbox_dir=tmp_path)
+def test_build_bwrap_command_includes_rw_overrides(tmp_path: Path) -> None:
+    manager = _permission_manager(tmp_path)
+    skill = CodeRunSkill(permission_manager=manager, sandbox_dir=tmp_path / "sandbox")
+
+    command = "python /tmp/hypo-agent-sandbox/run.py"
+    bwrap_cmd = skill._build_bwrap_command(command)
+    serialized = " ".join(bwrap_cmd)
+
+    assert bwrap_cmd[0] == "bwrap"
+    assert "--ro-bind / /" in serialized
+    assert "--dev /dev" in serialized
+    assert "--proc /proc" in serialized
+    assert "--unshare-all" in serialized
+    assert "--share-net" in serialized
+    assert f"--bind {tmp_path / 'projects'} {tmp_path / 'projects'}" in serialized
+    assert f"--bind {tmp_path / 'sandbox'} {tmp_path / 'sandbox'}" in serialized
+    assert bwrap_cmd[-3:] == ["bash", "-lc", command]
+
+
+def test_code_run_skill_executes_with_bwrap_when_available(tmp_path: Path, monkeypatch) -> None:
+    manager = _permission_manager(tmp_path)
+    calls: list[tuple[str, ...]] = []
+    events: list[str] = []
+
+    class LogRecorder:
+        def info(self, event: str, **kwargs) -> None:
+            del kwargs
+            events.append(event)
+
+        def warning(self, event: str, **kwargs) -> None:
+            del kwargs
+            events.append(event)
+
+    monkeypatch.setattr(code_run_module, "logger", LogRecorder())
+
+    async def fake_subprocess_exec(*cmd: str, **kwargs: Any) -> StubProcess:
+        del kwargs
+        calls.append(tuple(cmd))
+        return StubProcess(stdout=b"result\n", stderr=b"", returncode=0)
+
+    skill = CodeRunSkill(
+        permission_manager=manager,
+        sandbox_dir=tmp_path / "sandbox",
+        subprocess_exec=fake_subprocess_exec,
+        which_fn=lambda _: "/usr/bin/bwrap",
+    )
 
     output = asyncio.run(
         skill.execute(
@@ -35,35 +98,53 @@ def test_code_run_skill_executes_python_via_tmux(tmp_path: Path) -> None:
     )
 
     assert output.status == "success"
-    assert tmux.calls
-    tool_name, params = tmux.calls[0]
-    assert tool_name == "run_command"
-    assert params["command"].startswith("python ")
-    assert str(tmp_path) in params["command"]
+    assert calls
+    assert calls[0][0] == "bwrap"
+    assert output.metadata["sandbox_backend"] == "bwrap"
+    assert "code_run.bwrap.exec" in events
 
 
-def test_code_run_skill_executes_shell_via_tmux(tmp_path: Path) -> None:
-    tmux = StubTmuxSkill()
-    skill = CodeRunSkill(tmux_skill=tmux, sandbox_dir=tmp_path)
+def test_code_run_skill_falls_back_when_bwrap_missing(tmp_path: Path, monkeypatch) -> None:
+    manager = _permission_manager(tmp_path)
+    calls: list[tuple[str, ...]] = []
+    events: list[str] = []
 
-    output = asyncio.run(
-        skill.execute(
-            "run_code",
-            {
-                "code": "echo ok",
-                "language": "shell",
-            },
-        )
+    class LogRecorder:
+        def info(self, event: str, **kwargs) -> None:
+            del kwargs
+            events.append(event)
+
+        def warning(self, event: str, **kwargs) -> None:
+            del kwargs
+            events.append(event)
+
+    monkeypatch.setattr(code_run_module, "logger", LogRecorder())
+
+    async def fake_subprocess_exec(*cmd: str, **kwargs: Any) -> StubProcess:
+        del kwargs
+        calls.append(tuple(cmd))
+        return StubProcess(stdout=b"ok\n", stderr=b"", returncode=0)
+
+    skill = CodeRunSkill(
+        permission_manager=manager,
+        sandbox_dir=tmp_path / "sandbox",
+        subprocess_exec=fake_subprocess_exec,
+        which_fn=lambda _: None,
     )
 
+    output = asyncio.run(skill.execute("run_code", {"code": "echo ok", "language": "shell"}))
+
     assert output.status == "success"
-    _, params = tmux.calls[0]
-    assert params["command"].startswith("bash ")
+    assert calls
+    assert calls[0][0] == "bash"
+    assert calls[0][1] == "-lc"
+    assert output.metadata["sandbox_backend"] == "fallback"
+    assert "code_run.bwrap.fallback" in events
 
 
 def test_code_run_skill_rejects_unsupported_language(tmp_path: Path) -> None:
-    tmux = StubTmuxSkill()
-    skill = CodeRunSkill(tmux_skill=tmux, sandbox_dir=tmp_path)
+    manager = _permission_manager(tmp_path)
+    skill = CodeRunSkill(permission_manager=manager, sandbox_dir=tmp_path / "sandbox")
 
     output = asyncio.run(
         skill.execute(
@@ -77,13 +158,3 @@ def test_code_run_skill_rejects_unsupported_language(tmp_path: Path) -> None:
 
     assert output.status == "error"
     assert "Unsupported language" in output.error_info
-    assert tmux.calls == []
-
-
-def test_code_run_skill_propagates_tmux_timeout(tmp_path: Path) -> None:
-    tmux = StubTmuxSkill(response=SkillOutput(status="timeout", error_info="timeout"))
-    skill = CodeRunSkill(tmux_skill=tmux, sandbox_dir=tmp_path)
-
-    output = asyncio.run(skill.execute("run_code", {"code": "print('ok')"}))
-    assert output.status == "timeout"
-

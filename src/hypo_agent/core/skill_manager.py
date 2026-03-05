@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 import yaml
 
 from hypo_agent.models import SkillOutput
+from hypo_agent.security.permission_manager import PermissionManager
 from hypo_agent.skills.base import BaseSkill
 
 logger = structlog.get_logger()
@@ -18,10 +19,12 @@ class SkillManager:
         skills: list[BaseSkill] | None = None,
         *,
         circuit_breaker: Any | None = None,
+        permission_manager: PermissionManager | None = None,
     ) -> None:
         self._skills: dict[str, BaseSkill] = {}
         self._tool_to_skill: dict[str, BaseSkill] = {}
         self._circuit_breaker = circuit_breaker
+        self._permission_manager = permission_manager
         if skills:
             self.register_many(skills)
 
@@ -99,6 +102,28 @@ class SkillManager:
             )
             return result
 
+        if (
+            self._permission_manager is not None
+            and skill.required_permissions
+            and isinstance(params.get("path"), str)
+        ):
+            path = str(params["path"])
+            operation = self._infer_operation(tool_name)
+            allowed, reason = self._permission_manager.check_permission(path, operation)
+            if not allowed:
+                logger.warning(
+                    "skill.invoke.blocked.permission",
+                    tool_name=tool_name,
+                    session_id=session_id,
+                    path=path,
+                    operation=operation,
+                    reason=reason,
+                )
+                return SkillOutput(
+                    status="error",
+                    error_info=f"Permission denied: {reason}",
+                )
+
         try:
             result = await skill.execute(tool_name, params)
         except Exception as exc:
@@ -154,6 +179,14 @@ class SkillManager:
             )
 
         return result
+
+    def _infer_operation(self, tool_name: str) -> Literal["read", "write", "execute"]:
+        lowered = tool_name.lower()
+        if "write" in lowered or lowered.startswith("update_"):
+            return "write"
+        if "execute" in lowered or lowered.startswith("run_"):
+            return "execute"
+        return "read"
 
     def _read_tool_name(self, tool: dict[str, Any]) -> str:
         function_payload = tool.get("function")

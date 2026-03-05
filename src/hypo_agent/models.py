@@ -59,12 +59,18 @@ class SecretsConfig(BaseModel):
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
 
 
+class WhitelistRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    permissions: list[Literal["read", "write", "execute"]] = Field(default_factory=list)
+
+
 class DirectoryWhitelist(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    read: list[str] = Field(default_factory=list)
-    write: list[str] = Field(default_factory=list)
-    execute: list[str] = Field(default_factory=list)
+    rules: list[WhitelistRule] = Field(default_factory=list)
+    default_policy: Literal["readonly"] = "readonly"
 
 
 class CircuitBreakerConfig(BaseModel):
