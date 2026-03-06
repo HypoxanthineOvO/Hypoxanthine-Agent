@@ -11,7 +11,9 @@ import yaml
 
 from hypo_agent.core.config_loader import load_runtime_model_config
 from hypo_agent.core.model_router import ModelRouter
+from hypo_agent.core.output_compressor import OutputCompressor
 from hypo_agent.core.pipeline import ChatPipeline
+from hypo_agent.core.slash_commands import SlashCommandHandler
 from hypo_agent.core.skill_manager import SkillManager
 from hypo_agent.gateway.kill_switch_api import router as kill_switch_api_router
 from hypo_agent.gateway.sessions_api import router as sessions_api_router
@@ -27,6 +29,7 @@ from hypo_agent.skills import CodeRunSkill, FileSystemSkill, TmuxSkill
 class AppDeps:
     session_memory: SessionMemory
     structured_store: StructuredStore
+    output_compressor: OutputCompressor | None = None
     skill_manager: SkillManager | None = None
     circuit_breaker: CircuitBreaker | None = None
     permission_manager: PermissionManager | None = None
@@ -114,11 +117,21 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
             input_tokens=event.get("input_tokens"),
             output_tokens=event.get("output_tokens"),
             total_tokens=event.get("total_tokens"),
+            latency_ms=event.get("latency_ms"),
         )
 
     runtime_config = load_runtime_model_config()
     router = ModelRouter(runtime_config, on_stream_success=on_stream_success)
-    chat_model = runtime_config.task_routing.get("chat", runtime_config.default_model)
+    if deps.output_compressor is None:
+        deps.output_compressor = OutputCompressor(router=router)
+    chat_model = router.get_model_for_task("chat")
+    slash_commands = SlashCommandHandler(
+        router=router,
+        session_memory=deps.session_memory,
+        structured_store=deps.structured_store,
+        circuit_breaker=deps.circuit_breaker,
+        skill_manager=deps.skill_manager,
+    )
     return ChatPipeline(
         router=router,
         chat_model=chat_model,
@@ -126,6 +139,8 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
         history_window=20,
         skill_manager=deps.skill_manager,
         max_react_rounds=5,
+        slash_commands=slash_commands,
+        output_compressor=deps.output_compressor,
     )
 
 
@@ -163,13 +178,16 @@ def create_app(
         allow_headers=["*"],
     )
     app.add_middleware(WsTokenAuthMiddleware, auth_token=auth_token)
+    pipeline_instance = pipeline or _build_default_pipeline(resolved_deps)
+
     app.state.deps = resolved_deps
     app.state.session_memory = resolved_deps.session_memory
     app.state.structured_store = resolved_deps.structured_store
     app.state.skill_manager = resolved_deps.skill_manager
     app.state.circuit_breaker = resolved_deps.circuit_breaker
     app.state.permission_manager = resolved_deps.permission_manager
-    app.state.pipeline = pipeline or _build_default_pipeline(resolved_deps)
+    app.state.output_compressor = resolved_deps.output_compressor
+    app.state.pipeline = pipeline_instance
 
     app.include_router(ws_router)
     app.include_router(sessions_api_router)

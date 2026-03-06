@@ -7,6 +7,8 @@ __pycache__/
 
 .claude/
 .codex/
+.vscode/
+.playwright/
 
 web/node_modules/
 web/dist/
@@ -19,3 +21,4 @@ memory/*
 !memory/knowledge/.gitkeep
 !memory/sessions/
 !memory/sessions/.gitkeep
+memory/sessions/*.jsonl

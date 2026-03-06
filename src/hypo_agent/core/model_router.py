@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import AsyncIterator
 from collections.abc import Awaitable, Callable
+from time import perf_counter
 from typing import Any
 
 import structlog
@@ -36,9 +37,15 @@ class ModelRouter:
         model_name: str,
         messages: list[dict[str, Any]],
         *,
+        session_id: str | None = None,
         tools: list[dict[str, Any]] | None = None,
     ) -> str:
-        payload = await self.call_with_tools(model_name, messages, tools=tools)
+        payload = await self.call_with_tools(
+            model_name,
+            messages,
+            tools=tools,
+            session_id=session_id,
+        )
         return payload["text"]
 
     async def call_with_tools(
@@ -49,9 +56,9 @@ class ModelRouter:
         tools: list[dict[str, Any]] | None = None,
         session_id: str | None = None,
     ) -> dict[str, Any]:
-        del session_id
         attempted: list[str] = []
         last_error: Exception | None = None
+        started_at = perf_counter()
 
         for candidate in self._candidate_chain(model_name):
             cfg = self.config.models[candidate]
@@ -101,6 +108,18 @@ class ModelRouter:
                     output_tokens=usage["output_tokens"],
                     total_tokens=usage["total_tokens"],
                 )
+                await self._emit_stream_success(
+                    {
+                        "event": "model_call_success",
+                        "session_id": session_id,
+                        "requested_model": model_name,
+                        "resolved_model": candidate,
+                        "input_tokens": usage["input_tokens"],
+                        "output_tokens": usage["output_tokens"],
+                        "total_tokens": usage["total_tokens"],
+                        "latency_ms": (perf_counter() - started_at) * 1000.0,
+                    }
+                )
                 return {"text": text, "tool_calls": tool_calls}
             except Exception as exc:  # pragma: no cover - exercised in tests
                 attempted.append(candidate)
@@ -126,6 +145,7 @@ class ModelRouter:
     ) -> AsyncIterator[str]:
         attempted: list[str] = []
         last_error: Exception | None = None
+        started_at = perf_counter()
 
         for candidate in self._candidate_chain(model_name):
             cfg = self.config.models[candidate]
@@ -173,6 +193,7 @@ class ModelRouter:
                     "input_tokens": usage["input_tokens"],
                     "output_tokens": usage["output_tokens"],
                     "total_tokens": usage["total_tokens"],
+                    "latency_ms": (perf_counter() - started_at) * 1000.0,
                 }
                 self.logger.info(
                     "model_stream_success",
@@ -182,6 +203,7 @@ class ModelRouter:
                     input_tokens=usage["input_tokens"],
                     output_tokens=usage["output_tokens"],
                     total_tokens=usage["total_tokens"],
+                    latency_ms=event_payload["latency_ms"],
                 )
                 await self._emit_stream_success(event_payload)
                 return
@@ -207,6 +229,12 @@ class ModelRouter:
         raise RuntimeError(
             f"All stream models failed for '{model_name}'. Attempted chain: {attempted}"
         ) from last_error
+
+    def get_model_for_task(self, task_type: str) -> str:
+        return self.config.task_routing.get(task_type, self.config.default_model)
+
+    def get_fallback_chain(self, start_model: str) -> list[str]:
+        return self._candidate_chain(start_model)
 
     async def _emit_stream_success(self, payload: dict[str, Any]) -> None:
         if self._on_stream_success is None:

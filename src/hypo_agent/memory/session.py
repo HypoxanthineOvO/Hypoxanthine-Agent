@@ -49,6 +49,11 @@ class SessionMemory:
         # TODO(M9+): add pagination/streaming for very large session histories.
         return self._read_all_messages(session_id)
 
+    def clear_session(self, session_id: str) -> None:
+        self._buffers.pop(session_id, None)
+        self._loaded.discard(session_id)
+        self._session_file(session_id).unlink(missing_ok=True)
+
     def list_sessions(self) -> list[dict[str, object]]:
         # TODO(M9+): optimize to read only first/last non-empty lines per file.
         sessions: list[dict[str, object]] = []

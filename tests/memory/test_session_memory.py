@@ -92,3 +92,19 @@ def test_session_memory_new_instance_reads_existing_files_for_listing_and_histor
     assert listed[0]["session_id"] == "persisted"
     assert listed[0]["message_count"] == 2
     assert [m.text for m in history] == ["u1", "a1"]
+
+
+def test_session_memory_clear_session_removes_buffer_and_jsonl(tmp_path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    store = SessionMemory(sessions_dir=sessions_dir, buffer_limit=20)
+    store.append(Message(text="u1", sender="user", session_id="to-clear"))
+    store.append(Message(text="a1", sender="assistant", session_id="to-clear"))
+
+    assert len(store.get_recent_messages("to-clear")) == 2
+    assert len(store.get_messages("to-clear")) == 2
+
+    store.clear_session("to-clear")
+
+    assert store.get_recent_messages("to-clear") == []
+    assert store.get_messages("to-clear") == []
+    assert store.list_sessions() == []

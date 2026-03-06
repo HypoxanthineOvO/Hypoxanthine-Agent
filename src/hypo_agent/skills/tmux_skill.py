@@ -20,7 +20,7 @@ class TmuxSkill(BaseSkill):
         self,
         *,
         default_timeout_seconds: int = 30,
-        max_output_chars: int = 8000,
+        max_output_chars: int = 262144,
         sandbox_dir: Path | str = "/tmp/hypo-agent-sandbox",
         subprocess_exec=None,
     ) -> None:
@@ -203,4 +203,3 @@ class TmuxSkill(BaseSkill):
             path.unlink(missing_ok=True)
         except OSError:
             pass
-

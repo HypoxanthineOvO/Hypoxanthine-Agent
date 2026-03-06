@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hypo_agent.gateway.app import _build_default_deps
+from hypo_agent.gateway.app import AppDeps, _build_default_deps, create_app
+from hypo_agent.memory.session import SessionMemory
+from hypo_agent.memory.structured_store import StructuredStore
 from hypo_agent.models import SecurityConfig
 
 
@@ -49,3 +51,19 @@ skills:
     assert deps.skill_manager._permission_manager is deps.permission_manager
     assert deps.skill_manager._skills["code_run"].permission_manager is deps.permission_manager
     assert deps.skill_manager._skills["filesystem"].permission_manager is deps.permission_manager
+
+
+def test_create_app_exposes_output_compressor_from_deps(tmp_path: Path) -> None:
+    class DummyPipeline:
+        async def stream_reply(self, inbound):
+            del inbound
+            if False:  # pragma: no cover
+                yield {}
+
+    deps = AppDeps(
+        session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+        structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        output_compressor=object(),
+    )
+    app = create_app(auth_token="test-token", pipeline=DummyPipeline(), deps=deps)
+    assert app.state.output_compressor is deps.output_compressor

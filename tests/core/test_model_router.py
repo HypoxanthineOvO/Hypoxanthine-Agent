@@ -230,17 +230,16 @@ def test_model_router_emits_stream_success_event_with_usage(
 
     chunks = asyncio.run(_collect())
     assert chunks == ["ok", "!"]
-    assert emitted == [
-        {
-            "event": "model_stream_success",
-            "session_id": "s1",
-            "requested_model": "Gemini3Pro",
-            "resolved_model": "Gemini3Pro",
-            "input_tokens": 3,
-            "output_tokens": 2,
-            "total_tokens": 5,
-        }
-    ]
+    assert len(emitted) == 1
+    assert emitted[0]["event"] == "model_stream_success"
+    assert emitted[0]["session_id"] == "s1"
+    assert emitted[0]["requested_model"] == "Gemini3Pro"
+    assert emitted[0]["resolved_model"] == "Gemini3Pro"
+    assert emitted[0]["input_tokens"] == 3
+    assert emitted[0]["output_tokens"] == 2
+    assert emitted[0]["total_tokens"] == 5
+    assert isinstance(emitted[0]["latency_ms"], float)
+    assert emitted[0]["latency_ms"] >= 0
 
 
 def test_model_router_rejects_fallback_cycle() -> None:
@@ -505,3 +504,107 @@ def test_model_router_does_not_pass_api_base_when_missing() -> None:
     assert result == "ok"
     assert "api_base" not in captured[0]
     assert captured[0]["api_key"] == "mini-key"
+
+
+def test_model_router_get_model_for_task_uses_task_routing(
+    runtime_config: RuntimeModelConfig,
+) -> None:
+    async def fake_acompletion(**kwargs):
+        del kwargs
+        return {
+            "choices": [{"message": {"content": "ok", "tool_calls": []}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    router = ModelRouter(runtime_config, acompletion_fn=fake_acompletion)
+
+    assert router.get_model_for_task("chat") == "Gemini3Pro"
+    assert router.get_model_for_task("lightweight") == "DeepseekV3_2"
+    assert router.get_model_for_task("missing_task") == "Gemini3Pro"
+
+
+def test_model_router_call_with_tools_emits_success_event_with_latency(
+    runtime_config: RuntimeModelConfig,
+) -> None:
+    emitted: list[dict] = []
+
+    async def on_stream_success(event: dict) -> None:
+        emitted.append(event)
+
+    async def fake_acompletion(**kwargs):
+        del kwargs
+        return {
+            "choices": [{"message": {"content": "ok", "tool_calls": []}}],
+            "usage": {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13},
+        }
+
+    router = ModelRouter(
+        runtime_config,
+        acompletion_fn=fake_acompletion,
+        on_stream_success=on_stream_success,
+    )
+
+    payload = asyncio.run(
+        router.call_with_tools(
+            "Gemini3Pro",
+            [{"role": "user", "content": "hi"}],
+            session_id="s-latency",
+        )
+    )
+
+    assert payload["text"] == "ok"
+    assert emitted[0]["event"] == "model_call_success"
+    assert emitted[0]["session_id"] == "s-latency"
+    assert emitted[0]["requested_model"] == "Gemini3Pro"
+    assert emitted[0]["resolved_model"] == "Gemini3Pro"
+    assert emitted[0]["input_tokens"] == 9
+    assert emitted[0]["output_tokens"] == 4
+    assert emitted[0]["total_tokens"] == 13
+    assert isinstance(emitted[0]["latency_ms"], float)
+    assert emitted[0]["latency_ms"] >= 0
+
+
+def test_model_router_stream_emits_latency_ms(runtime_config: RuntimeModelConfig) -> None:
+    emitted: list[dict] = []
+
+    async def on_stream_success(event: dict) -> None:
+        emitted.append(event)
+
+    async def fake_acompletion(**kwargs):
+        del kwargs
+
+        async def _gen():
+            yield {"choices": [{"delta": {"content": "ok"}}]}
+            yield {
+                "choices": [{"delta": {"content": "!"}}],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 2,
+                    "total_tokens": 3,
+                },
+            }
+
+        return _gen()
+
+    router = ModelRouter(
+        runtime_config,
+        acompletion_fn=fake_acompletion,
+        on_stream_success=on_stream_success,
+    )
+
+    async def _collect() -> list[str]:
+        chunks: list[str] = []
+        async for chunk in router.stream(
+            "Gemini3Pro",
+            [{"role": "user", "content": "hi"}],
+            session_id="s-stream-latency",
+        ):
+            chunks.append(chunk)
+        return chunks
+
+    chunks = asyncio.run(_collect())
+    assert chunks == ["ok", "!"]
+    assert emitted[0]["event"] == "model_stream_success"
+    assert emitted[0]["session_id"] == "s-stream-latency"
+    assert isinstance(emitted[0]["latency_ms"], float)
+    assert emitted[0]["latency_ms"] >= 0

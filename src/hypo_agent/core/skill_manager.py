@@ -60,6 +60,19 @@ class SkillManager:
             all_tools.extend(skill.tools)
         return all_tools
 
+    def list_skills(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for skill in self._skills.values():
+            items.append(
+                {
+                    "name": skill.name,
+                    "description": skill.description,
+                    "enabled": True,
+                    "tools": [self._read_tool_name(tool) for tool in skill.tools],
+                }
+            )
+        return items
+
     @staticmethod
     def find_enabled_skills(path: Path | str = "config/skills.yaml") -> set[str]:
         payload = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}

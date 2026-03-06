@@ -112,11 +112,16 @@ def test_tmux_skill_times_out_when_wait_exceeds_timeout() -> None:
 
 
 def test_tmux_skill_truncates_long_output() -> None:
-    long_text = "a" * 9005
+    long_text = "a" * 270000
     skill = TmuxSkill(subprocess_exec=_build_fake_tmux_exec(command_stdout=long_text))
     output = asyncio.run(skill.execute("run_command", {"command": "python -c 'print(1)'"}))
 
     assert output.status == "success"
     assert output.metadata["truncated"] is True
-    assert len(output.result["stdout"]) <= 8050
+    assert len(output.result["stdout"]) <= 262200
     assert "[truncated" in output.result["stdout"]
+
+
+def test_tmux_skill_default_max_output_chars_is_256k() -> None:
+    skill = TmuxSkill(subprocess_exec=_build_fake_tmux_exec(command_stdout="ok"))
+    assert skill.max_output_chars == 262144

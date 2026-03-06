@@ -57,10 +57,16 @@ class StructuredStore:
                         input_tokens INTEGER,
                         output_tokens INTEGER,
                         total_tokens INTEGER,
+                        latency_ms REAL,
                         created_at TEXT NOT NULL
                     )
                     """
                 )
+                async with db.execute("PRAGMA table_info(token_usage)") as cursor:
+                    columns = await cursor.fetchall()
+                column_names = {str(column[1]) for column in columns}
+                if "latency_ms" not in column_names:
+                    await db.execute("ALTER TABLE token_usage ADD COLUMN latency_ms REAL")
                 await db.commit()
 
             self._initialized = True
@@ -131,6 +137,7 @@ class StructuredStore:
         input_tokens: int | None,
         output_tokens: int | None,
         total_tokens: int | None,
+        latency_ms: float | None = None,
     ) -> None:
         await self.init()
         await self.upsert_session(session_id)
@@ -144,9 +151,10 @@ class StructuredStore:
                     input_tokens,
                     output_tokens,
                     total_tokens,
+                    latency_ms,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -155,6 +163,7 @@ class StructuredStore:
                     input_tokens,
                     output_tokens,
                     total_tokens,
+                    latency_ms,
                     _now_iso(),
                 ),
             )
@@ -170,7 +179,7 @@ class StructuredStore:
             if session_id is None:
                 query = """
                     SELECT id, session_id, requested_model, resolved_model,
-                           input_tokens, output_tokens, total_tokens, created_at
+                           input_tokens, output_tokens, total_tokens, latency_ms, created_at
                     FROM token_usage
                     ORDER BY id DESC
                 """
@@ -178,7 +187,7 @@ class StructuredStore:
             else:
                 query = """
                     SELECT id, session_id, requested_model, resolved_model,
-                           input_tokens, output_tokens, total_tokens, created_at
+                           input_tokens, output_tokens, total_tokens, latency_ms, created_at
                     FROM token_usage
                     WHERE session_id = ?
                     ORDER BY id DESC
@@ -186,5 +195,76 @@ class StructuredStore:
                 params = (session_id,)
 
             async with db.execute(query, params) as cursor:
+                rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def summarize_token_usage(
+        self,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            where_clause = ""
+            params: tuple[Any, ...] = ()
+            if session_id is not None:
+                where_clause = "WHERE session_id = ?"
+                params = (session_id,)
+
+            query = f"""
+                SELECT
+                    resolved_model,
+                    COUNT(*) AS calls,
+                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                    COALESCE(SUM(total_tokens), 0) AS total_tokens
+                FROM token_usage
+                {where_clause}
+                GROUP BY resolved_model
+                ORDER BY calls DESC, resolved_model ASC
+            """
+            async with db.execute(query, params) as cursor:
+                rows = [dict(row) for row in await cursor.fetchall()]
+
+            total_query = f"""
+                SELECT
+                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                    COALESCE(SUM(total_tokens), 0) AS total_tokens
+                FROM token_usage
+                {where_clause}
+            """
+            async with db.execute(total_query, params) as cursor:
+                total_row = await cursor.fetchone()
+
+        totals = dict(total_row) if total_row is not None else {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        }
+        return {
+            "session_id": session_id,
+            "rows": rows,
+            "totals": totals,
+        }
+
+    async def summarize_latency_by_model(self) -> list[dict[str, Any]]:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT
+                    resolved_model,
+                    COUNT(latency_ms) AS calls,
+                    MIN(latency_ms) AS min_latency_ms,
+                    MAX(latency_ms) AS max_latency_ms,
+                    AVG(latency_ms) AS avg_latency_ms
+                FROM token_usage
+                WHERE latency_ms IS NOT NULL
+                GROUP BY resolved_model
+                ORDER BY calls DESC, resolved_model ASC
+                """
+            ) as cursor:
                 rows = await cursor.fetchall()
         return [dict(row) for row in rows]
