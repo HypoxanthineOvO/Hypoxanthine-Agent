@@ -12,14 +12,18 @@
     "test:ui": "vitest --ui"
   },
   "dependencies": {
+    "@monaco-editor/loader": "^1.7.0",
     "@traptitech/markdown-it-katex": "^3.6.0",
+    "echarts": "^6.0.0",
     "highlight.js": "^11.11.1",
     "katex": "^0.16.35",
     "markdown-it": "^14.1.1",
     "markdown-it-task-lists": "^2.1.1",
     "mermaid": "^11.12.3",
     "naive-ui": "^2.43.2",
-    "vue": "^3.5.25"
+    "vue": "^3.5.25",
+    "vue-echarts": "^8.0.1",
+    "yaml": "^2.8.2"
   },
   "devDependencies": {
     "@types/markdown-it": "^14.1.2",

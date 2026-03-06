@@ -3,6 +3,7 @@ import {
   NButton,
   NConfigProvider,
   NGlobalStyle,
+  NMessageProvider,
   NNotificationProvider,
 } from "naive-ui";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
@@ -10,6 +11,9 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import SideNav from "./components/layout/SideNav.vue";
 import { useThemeMode } from "./composables/useThemeMode";
 import ChatView from "./views/ChatView.vue";
+import ConfigView from "./views/ConfigView.vue";
+import DashboardView from "./views/DashboardView.vue";
+import MemoryView from "./views/MemoryView.vue";
 
 const fallbackWsUrl = (() => {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -21,6 +25,7 @@ const token = import.meta.env.VITE_WS_TOKEN ?? "dev-token-change-me";
 const apiBase = import.meta.env.VITE_API_BASE ?? "";
 
 const { mode, theme, toggleMode } = useThemeMode();
+const activeView = ref<"chat" | "dashboard" | "config" | "memory">("chat");
 
 const viewportWidth = ref(window.innerWidth);
 const sidebarCollapsed = ref(false);
@@ -51,6 +56,19 @@ const onSidebarCollapseEvent = (): void => {
   if (isTablet.value) {
     sidebarCollapsed.value = true;
   }
+};
+
+const titleByView: Record<typeof activeView.value, string> = {
+  chat: "Hypo-Agent · Chat Workspace",
+  dashboard: "Hypo-Agent · Dashboard",
+  config: "Hypo-Agent · Config Editor",
+  memory: "Hypo-Agent · Memory Editor",
+};
+
+const pageTitle = computed(() => titleByView[activeView.value]);
+
+const onSelectView = (view: "chat" | "dashboard" | "config" | "memory"): void => {
+  activeView.value = view;
 };
 
 watch(mode, (nextMode) => {
@@ -91,36 +109,62 @@ onUnmounted(() => {
 <template>
   <n-config-provider :theme="theme">
     <n-notification-provider>
-      <n-global-style />
-      <div class="app-shell">
-        <aside v-if="showSideNav" class="app-rail">
-          <SideNav :collapsed="collapsed" active="chat" />
-        </aside>
+      <n-message-provider>
+        <n-global-style />
+        <div class="app-shell">
+          <aside v-if="showSideNav" class="app-rail">
+            <SideNav
+              :collapsed="collapsed"
+              :active="activeView"
+              @select="onSelectView"
+            />
+          </aside>
 
-        <main class="app-main">
-          <header class="main-header">
-            <div class="header-left">
-              <n-button
-                v-if="isTablet"
-                size="small"
-                tertiary
-                @click="toggleSidebar"
-              >
-                {{ collapsed ? "展开导航" : "折叠导航" }}
+          <main class="app-main">
+            <header class="main-header">
+              <div class="header-left">
+                <n-button
+                  v-if="isTablet"
+                  size="small"
+                  tertiary
+                  @click="toggleSidebar"
+                >
+                  {{ collapsed ? "展开导航" : "折叠导航" }}
+                </n-button>
+                <p class="header-title">{{ pageTitle }}</p>
+              </div>
+
+              <n-button size="small" tertiary @click="toggleMode">
+                切换 {{ mode === "dark" ? "Light" : "Dark" }}
               </n-button>
-              <p class="header-title">Hypo-Agent · Chat Workspace</p>
-            </div>
+            </header>
 
-            <n-button size="small" tertiary @click="toggleMode">
-              切换 {{ mode === "dark" ? "Light" : "Dark" }}
-            </n-button>
-          </header>
-
-          <section class="main-body">
-            <ChatView :ws-url="wsUrl" :token="token" :api-base="apiBase" />
-          </section>
-        </main>
-      </div>
+            <section class="main-body">
+              <ChatView
+                v-if="activeView === 'chat'"
+                :ws-url="wsUrl"
+                :token="token"
+                :api-base="apiBase"
+              />
+              <DashboardView
+                v-else-if="activeView === 'dashboard'"
+                :token="token"
+                :api-base="apiBase"
+              />
+              <ConfigView
+                v-else-if="activeView === 'config'"
+                :token="token"
+                :api-base="apiBase"
+              />
+              <MemoryView
+                v-else
+                :token="token"
+                :api-base="apiBase"
+              />
+            </section>
+          </main>
+        </div>
+      </n-message-provider>
     </n-notification-provider>
   </n-config-provider>
 </template>

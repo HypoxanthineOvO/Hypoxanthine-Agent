@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,11 +17,15 @@ from hypo_agent.core.output_compressor import OutputCompressor
 from hypo_agent.core.pipeline import ChatPipeline
 from hypo_agent.core.slash_commands import SlashCommandHandler
 from hypo_agent.core.skill_manager import SkillManager
+from hypo_agent.gateway.config_api import router as config_api_router
 from hypo_agent.gateway.compressed_api import router as compressed_api_router
+from hypo_agent.gateway.dashboard_api import router as dashboard_api_router
 from hypo_agent.gateway.files_api import router as files_api_router
 from hypo_agent.gateway.kill_switch_api import router as kill_switch_api_router
+from hypo_agent.gateway.memory_api import router as memory_api_router
 from hypo_agent.gateway.sessions_api import router as sessions_api_router
 from hypo_agent.gateway.middleware import WsTokenAuthMiddleware
+from hypo_agent.gateway.settings import load_gateway_settings
 from hypo_agent.gateway.ws import router as ws_router
 from hypo_agent.memory import SessionMemory, StructuredStore
 from hypo_agent.models import SecurityConfig
@@ -36,6 +41,51 @@ class AppDeps:
     skill_manager: SkillManager | None = None
     circuit_breaker: CircuitBreaker | None = None
     permission_manager: PermissionManager | None = None
+    reload_config: Any | None = None
+
+
+def _register_enabled_skills(
+    *,
+    skill_manager: SkillManager,
+    permission_manager: PermissionManager,
+    skills_config_path: Path = Path("config/skills.yaml"),
+) -> None:
+    skills_payload: dict[str, Any] = {}
+    if skills_config_path.exists():
+        loaded = yaml.safe_load(skills_config_path.read_text(encoding="utf-8")) or {}
+        if isinstance(loaded, dict):
+            skills_payload = loaded
+
+    default_timeout = int(skills_payload.get("default_timeout_seconds", 30))
+    enabled_skills = (
+        SkillManager.find_enabled_skills(skills_config_path)
+        if skills_config_path.exists()
+        else set()
+    )
+    per_skill = skills_payload.get("skills", {})
+    tmux_cfg = per_skill.get("tmux", {}) if isinstance(per_skill, dict) else {}
+    code_run_cfg = per_skill.get("code_run", {}) if isinstance(per_skill, dict) else {}
+    tmux_timeout = int(tmux_cfg.get("timeout_seconds", default_timeout))
+    code_run_timeout = int(code_run_cfg.get("timeout_seconds", default_timeout))
+
+    if "tmux" in enabled_skills:
+        skill_manager.register(TmuxSkill(default_timeout_seconds=tmux_timeout))
+
+    if "code_run" in enabled_skills:
+        skill_manager.register(
+            CodeRunSkill(
+                permission_manager=permission_manager,
+                default_timeout_seconds=code_run_timeout,
+            )
+        )
+
+    if "filesystem" in enabled_skills:
+        skill_manager.register(
+            FileSystemSkill(
+                permission_manager=permission_manager,
+                index_file="memory/knowledge/directory_index.yaml",
+            )
+        )
 
 
 def _default_security() -> SecurityConfig:
@@ -57,46 +107,10 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
         permission_manager=permission_manager,
         structured_store=structured_store,
     )
-
-    skills_config_path = Path("config/skills.yaml")
-    skills_payload: dict[str, Any] = {}
-    if skills_config_path.exists():
-        loaded = yaml.safe_load(skills_config_path.read_text(encoding="utf-8")) or {}
-        if isinstance(loaded, dict):
-            skills_payload = loaded
-
-    default_timeout = int(skills_payload.get("default_timeout_seconds", 30))
-    enabled_skills = (
-        SkillManager.find_enabled_skills(skills_config_path)
-        if skills_config_path.exists()
-        else set()
+    _register_enabled_skills(
+        skill_manager=skill_manager,
+        permission_manager=permission_manager,
     )
-    per_skill = skills_payload.get("skills", {})
-    tmux_cfg = per_skill.get("tmux", {}) if isinstance(per_skill, dict) else {}
-    code_run_cfg = per_skill.get("code_run", {}) if isinstance(per_skill, dict) else {}
-    tmux_timeout = int(tmux_cfg.get("timeout_seconds", default_timeout))
-    code_run_timeout = int(code_run_cfg.get("timeout_seconds", default_timeout))
-
-    tmux_skill: TmuxSkill | None = None
-    if "tmux" in enabled_skills:
-        tmux_skill = TmuxSkill(default_timeout_seconds=tmux_timeout)
-        skill_manager.register(tmux_skill)
-
-    if "code_run" in enabled_skills:
-        skill_manager.register(
-            CodeRunSkill(
-                permission_manager=permission_manager,
-                default_timeout_seconds=code_run_timeout,
-            )
-        )
-
-    if "filesystem" in enabled_skills:
-        skill_manager.register(
-            FileSystemSkill(
-                permission_manager=permission_manager,
-                index_file="memory/knowledge/directory_index.yaml",
-            )
-        )
 
     return AppDeps(
         session_memory=SessionMemory(sessions_dir="memory/sessions", buffer_limit=20),
@@ -188,6 +202,9 @@ def create_app(
     pipeline_instance = pipeline or _build_default_pipeline(resolved_deps)
 
     app.state.auth_token = auth_token
+    app.state.started_at = datetime.now(UTC)
+    app.state.config_dir = Path("config")
+    app.state.knowledge_dir = Path("memory/knowledge")
     app.state.deps = resolved_deps
     app.state.session_memory = resolved_deps.session_memory
     app.state.structured_store = resolved_deps.structured_store
@@ -197,9 +214,38 @@ def create_app(
     app.state.output_compressor = resolved_deps.output_compressor
     app.state.pipeline = pipeline_instance
 
+    def reload_config() -> None:
+        settings = load_gateway_settings()
+        deps = app.state.deps
+        deps.permission_manager = PermissionManager(settings.security.directory_whitelist)
+        deps.circuit_breaker = CircuitBreaker(settings.security.circuit_breaker)
+        deps.skill_manager = SkillManager(
+            circuit_breaker=deps.circuit_breaker,
+            permission_manager=deps.permission_manager,
+            structured_store=deps.structured_store,
+        )
+        _register_enabled_skills(
+            skill_manager=deps.skill_manager,
+            permission_manager=deps.permission_manager,
+        )
+
+        deps.output_compressor = None
+        app.state.auth_token = settings.auth_token
+        app.state.permission_manager = deps.permission_manager
+        app.state.circuit_breaker = deps.circuit_breaker
+        app.state.skill_manager = deps.skill_manager
+        app.state.pipeline = _build_default_pipeline(deps)
+        app.state.output_compressor = deps.output_compressor
+
+    resolved_deps.reload_config = reload_config
+    app.state.reload_config = reload_config
+
     app.include_router(ws_router)
     app.include_router(sessions_api_router)
     app.include_router(compressed_api_router)
     app.include_router(files_api_router)
     app.include_router(kill_switch_api_router)
+    app.include_router(dashboard_api_router)
+    app.include_router(config_api_router)
+    app.include_router(memory_api_router)
     return app
