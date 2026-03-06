@@ -45,9 +45,12 @@
 }
 
 html,
-body,
+body {
+  height: 100%;
+}
+
 #app {
-  min-height: 100%;
+  min-height: 100vh;
 }
 
 body {
@@ -65,4 +68,52 @@ body {
     linear-gradient(160deg, color-mix(in srgb, var(--bg) 92%, black 8%), var(--bg));
   color: var(--text);
   margin: 0;
+}
+
+.markdown-body table,
+.bubble table {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  display: block;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--panel-edge);
+  padding: 0.35rem 0.55rem;
+  text-align: left;
+}
+
+.markdown-body thead th {
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  font-weight: 600;
+}
+
+.markdown-body .code-header {
+  align-items: center;
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  border-bottom: 1px solid var(--panel-edge);
+  display: flex;
+  font-size: 0.72rem;
+  justify-content: space-between;
+  padding: 0.25rem 0.6rem;
+}
+
+.markdown-body .code-lang {
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.markdown-body .copy-btn {
+  background: transparent;
+  border: 1px solid var(--panel-edge);
+  border-radius: 0.35rem;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
 }

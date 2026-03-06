@@ -5,12 +5,16 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 import structlog
 
+from hypo_agent.gateway.auth import require_api_token
+
 router = APIRouter(prefix="/api")
 logger = structlog.get_logger("hypo_agent.gateway.compressed_api")
 
 
 @router.get("/compressed/{cache_id}")
 async def get_compressed_original(cache_id: str, request: Request) -> dict[str, Any]:
+    require_api_token(request)
+
     compressor = getattr(request.app.state, "output_compressor", None)
     if compressor is None:
         logger.warning(

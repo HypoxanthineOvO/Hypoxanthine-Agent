@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from "vue";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRenderer";
 
@@ -9,6 +9,25 @@ const props = defineProps<{
 
 const root = ref<HTMLElement | null>(null);
 
+const onRootClick = (event: MouseEvent): void => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) {
+    return;
+  }
+
+  const button = target.closest(".copy-btn");
+  if (!(button instanceof HTMLButtonElement)) {
+    return;
+  }
+
+  const text = button.dataset.code ?? "";
+  if (!navigator.clipboard?.writeText) {
+    return;
+  }
+
+  void navigator.clipboard.writeText(text);
+};
+
 const renderMermaidIfNeeded = async (): Promise<void> => {
   if (!root.value) {
     return;
@@ -17,7 +36,12 @@ const renderMermaidIfNeeded = async (): Promise<void> => {
 };
 
 onMounted(() => {
+  root.value?.addEventListener("click", onRootClick);
   void renderMermaidIfNeeded();
+});
+
+onBeforeUnmount(() => {
+  root.value?.removeEventListener("click", onRootClick);
 });
 
 watch(

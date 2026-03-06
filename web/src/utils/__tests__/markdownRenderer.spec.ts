@@ -23,4 +23,13 @@ describe("markdownRenderer", () => {
     const html = renderMarkdown("```mermaid\nflowchart LR\nA-->B\n```\n");
     expect(html).toContain("language-mermaid");
   });
+
+  it("adds code header with language label and copy button", () => {
+    const html = renderMarkdown("```python\nprint('ok')\n```\n");
+    expect(html).toContain('class="code-header"');
+    expect(html).toContain('class="code-lang"');
+    expect(html).toContain("python");
+    expect(html).toContain('class="copy-btn"');
+    expect(html).toContain("data-code=");
+  });
 });

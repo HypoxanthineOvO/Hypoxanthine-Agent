@@ -49,7 +49,10 @@ def test_get_compressed_original_hit(tmp_path) -> None:
     cache_id = str(compressed_meta["cache_id"])
 
     with client:
-        response = client.get(f"/api/compressed/{cache_id}")
+        response = client.get(
+            f"/api/compressed/{cache_id}",
+            params={"token": "test-token"},
+        )
 
     assert response.status_code == 200
     payload = response.json()
@@ -61,7 +64,10 @@ def test_get_compressed_original_not_found(tmp_path) -> None:
     client, _ = _build_client(tmp_path)
 
     with client:
-        response = client.get("/api/compressed/not-found")
+        response = client.get(
+            "/api/compressed/not-found",
+            params={"token": "test-token"},
+        )
 
     assert response.status_code == 404
 
@@ -70,6 +76,18 @@ def test_get_compressed_original_returns_503_when_unavailable(tmp_path) -> None:
     client, _ = _build_client(tmp_path, with_compressor=False)
 
     with client:
-        response = client.get("/api/compressed/abc")
+        response = client.get(
+            "/api/compressed/abc",
+            params={"token": "test-token"},
+        )
 
     assert response.status_code == 503
+
+
+def test_get_compressed_original_requires_token(tmp_path) -> None:
+    client, _ = _build_client(tmp_path)
+
+    with client:
+        response = client.get("/api/compressed/abc")
+
+    assert response.status_code == 401

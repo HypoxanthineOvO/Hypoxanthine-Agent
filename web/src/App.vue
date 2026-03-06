@@ -11,7 +11,12 @@ import SideNav from "./components/layout/SideNav.vue";
 import { useThemeMode } from "./composables/useThemeMode";
 import ChatView from "./views/ChatView.vue";
 
-const wsUrl = import.meta.env.VITE_WS_URL ?? "ws://127.0.0.1:8000/ws";
+const fallbackWsUrl = (() => {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}/ws`;
+})();
+
+const wsUrl = import.meta.env.VITE_WS_URL ?? fallbackWsUrl;
 const token = import.meta.env.VITE_WS_TOKEN ?? "dev-token-change-me";
 const apiBase = import.meta.env.VITE_API_BASE ?? "";
 
@@ -55,6 +60,12 @@ watch(mode, (nextMode) => {
 watch(isDesktop, (nextIsDesktop) => {
   if (nextIsDesktop) {
     sidebarCollapsed.value = false;
+  }
+});
+
+watch(isTablet, (nextIsTablet, prevIsTablet) => {
+  if (nextIsTablet && !prevIsTablet) {
+    sidebarCollapsed.value = true;
   }
 });
 
@@ -121,7 +132,7 @@ onUnmounted(() => {
   grid-template-columns: auto 1fr;
   margin: 0 auto;
   max-width: 1320px;
-  min-height: 100vh;
+  height: 100vh;
   padding: 0.85rem;
 }
 
@@ -134,6 +145,7 @@ onUnmounted(() => {
   display: grid;
   gap: 0.85rem;
   grid-template-rows: auto 1fr;
+  min-height: 0;
   min-width: 0;
 }
 
@@ -163,7 +175,9 @@ onUnmounted(() => {
 }
 
 .main-body {
+  min-height: 0;
   min-width: 0;
+  overflow: hidden;
 }
 
 @media (max-width: 1023px) {

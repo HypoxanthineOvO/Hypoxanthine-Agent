@@ -20,6 +20,7 @@ describe("CompressedMessage", () => {
           compressed_chars: 500,
         },
         apiBase: "http://localhost:8000/api",
+        token: "test-token",
         toolName: "run_command",
       },
     });
@@ -27,7 +28,9 @@ describe("CompressedMessage", () => {
     await wrapper.get(".source-button").trigger("click");
     await flushPromises();
 
-    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/compressed/cache-1");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/api/compressed/cache-1?token=test-token",
+    );
     expect(wrapper.text()).toContain("print('ok')");
 
     await wrapper.get(".source-button").trigger("click");
@@ -52,6 +55,7 @@ describe("CompressedMessage", () => {
           compressed_chars: 500,
         },
         apiBase: "http://localhost:8000/api",
+        token: "test-token",
         filePath: "notes.md",
       },
     });

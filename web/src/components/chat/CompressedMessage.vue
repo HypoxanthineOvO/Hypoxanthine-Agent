@@ -10,11 +10,13 @@ const props = withDefaults(
     summary: string;
     compressedMeta?: CompressedMeta;
     apiBase?: string;
+    token?: string;
     toolName?: string;
     filePath?: string;
   }>(),
   {
     apiBase: "/api",
+    token: "",
     toolName: "",
     filePath: "",
   },
@@ -81,7 +83,7 @@ const loadOriginal = async (): Promise<void> => {
   loadError.value = "";
   try {
     const response = await fetch(
-      `${props.apiBase}/compressed/${encodeURIComponent(props.compressedMeta.cache_id)}`,
+      `${props.apiBase}/compressed/${encodeURIComponent(props.compressedMeta.cache_id)}?token=${encodeURIComponent(props.token)}`,
     );
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
@@ -146,6 +148,16 @@ const loadOriginal = async (): Promise<void> => {
 
 .original-slot {
   margin-top: 0.45rem;
+  max-height: 40vh;
+  overflow-y: auto;
+  border: 1px solid var(--panel-edge);
+  border-radius: 0.5rem;
+  padding: 0.5rem;
+}
+
+.original-slot :deep(pre) {
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .placeholder {

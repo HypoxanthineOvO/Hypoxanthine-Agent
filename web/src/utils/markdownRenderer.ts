@@ -19,17 +19,19 @@ const markdown: MarkdownIt = new MarkdownIt({
   breaks: true,
   highlight(code: string, language: string): string {
     const normalizedLang = typeof language === "string" ? language.trim() : "";
+    const dataCode = escapeHtml(code);
+    const languageLabel = normalizedLang || "text";
+    const header = `<div class="code-header"><span class="code-lang">${escapeHtml(languageLabel)}</span><button class="copy-btn" type="button" data-code="${dataCode}">📋 Copy</button></div>`;
     if (normalizedLang && hljs.getLanguage(normalizedLang)) {
       const highlighted = hljs.highlight(code, {
         language: normalizedLang,
         ignoreIllegals: true,
       }).value;
-      return `<pre class="hljs"><code class="language-${normalizedLang}">${highlighted}</code></pre>`;
+      return `<pre class="hljs code-block-wrapper">${header}<code class="language-${normalizedLang}">${highlighted}</code></pre>`;
     }
 
-    const escaped = escapeHtml(code);
     const languageClass = normalizedLang ? ` class="language-${normalizedLang}"` : "";
-    return `<pre class="hljs"><code${languageClass}>${escaped}</code></pre>`;
+    return `<pre class="hljs code-block-wrapper">${header}<code${languageClass}>${dataCode}</code></pre>`;
   },
   html: false,
   linkify: true,

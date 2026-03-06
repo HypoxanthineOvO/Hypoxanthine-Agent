@@ -5,9 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ChatView from "../ChatView.vue";
 
 class MockWebSocket {
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSING = 2;
+  static CLOSED = 3;
   static instances: MockWebSocket[] = [];
 
   readonly url: string;
+  readyState = MockWebSocket.CONNECTING;
   onopen: ((event: Event) => void) | null = null;
   onclose: ((event: CloseEvent) => void) | null = null;
   onerror: ((event: Event) => void) | null = null;
@@ -21,10 +26,12 @@ class MockWebSocket {
   send(): void {}
 
   close(): void {
+    this.readyState = MockWebSocket.CLOSED;
     this.onclose?.({} as CloseEvent);
   }
 
   emitOpen(): void {
+    this.readyState = MockWebSocket.OPEN;
     this.onopen?.(new Event("open"));
   }
 
@@ -55,14 +62,16 @@ async function flushUi(): Promise<void> {
 }
 
 describe("ChatView", () => {
-  it("shows disconnected status by default", () => {
+  it("auto-connects websocket on mount", async () => {
     const wrapper = mount(ChatView, {
       props: {
         wsUrl: "ws://localhost:8000/ws",
         token: "test-token",
       },
     });
-    expect(wrapper.text()).toContain("Disconnected");
+    await flushUi();
+    expect(wrapper.text()).toContain("Connecting");
+    expect(MockWebSocket.instances).toHaveLength(1);
   });
 
   it("loads sessions and message history on mount", async () => {

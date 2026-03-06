@@ -31,6 +31,7 @@ const props = withDefaults(
 const draft = ref("");
 const composerExpanded = ref(false);
 const composerRef = ref<HTMLTextAreaElement | null>(null);
+const messagesRef = ref<HTMLElement | null>(null);
 const sessions = ref<SessionSummary[]>([]);
 const activeSessionId = ref(props.sessionId);
 
@@ -275,8 +276,17 @@ const onSubmit = (): void => {
   });
 };
 
+const scrollToBottom = (): void => {
+  const element = messagesRef.value;
+  if (!element) {
+    return;
+  }
+  element.scrollTop = element.scrollHeight;
+};
+
 onMounted(() => {
   void loadSessions();
+  connect();
   void nextTick(() => {
     adjustComposerHeight();
   });
@@ -285,6 +295,27 @@ onMounted(() => {
 watch(draft, () => {
   adjustComposerHeight();
 });
+
+watch(
+  () => messages.value.length,
+  () => {
+    void nextTick(() => {
+      scrollToBottom();
+    });
+  },
+);
+
+watch(
+  () => {
+    const last = messages.value[messages.value.length - 1];
+    return last?.text?.length ?? 0;
+  },
+  () => {
+    void nextTick(() => {
+      scrollToBottom();
+    });
+  },
+);
 
 watch(lastError, (error) => {
   if (!error || error.session_id !== activeSessionId.value || notification === null) {
@@ -412,7 +443,7 @@ useHotkey([
         @retry="reconnectNow"
       />
 
-      <main class="messages" aria-live="polite">
+      <main ref="messagesRef" class="messages" aria-live="polite">
         <MessageBubble
           v-for="(message, index) in messages"
           :key="`${message.session_id}-${message.sender}-${index}`"
@@ -423,6 +454,7 @@ useHotkey([
             :summary="String(message.result ?? '')"
             :compressed-meta="message.compressed_meta"
             :api-base="normalizedApiBase"
+            :token="token"
             :tool-name="message.tool_name"
             :file-path="resolveCompressedFilePath(message)"
           />
@@ -493,7 +525,9 @@ useHotkey([
   display: grid;
   gap: 1rem;
   grid-template-columns: 260px 1fr;
+  height: 100%;
   margin: 0 auto;
+  min-height: 0;
   max-width: 1040px;
   padding: 1.2rem;
 }
@@ -504,6 +538,8 @@ useHotkey([
   border-radius: 0.95rem;
   display: grid;
   gap: 0.75rem;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
   padding: 0.8rem;
 }
 
@@ -516,7 +552,7 @@ useHotkey([
 .session-list {
   display: grid;
   gap: 0.5rem;
-  max-height: 60vh;
+  min-height: 0;
   overflow-y: auto;
 }
 
@@ -552,6 +588,8 @@ useHotkey([
 .chat-main {
   display: grid;
   gap: 1rem;
+  grid-template-rows: auto auto 1fr auto;
+  min-height: 0;
 }
 
 .chat-header {
@@ -614,7 +652,7 @@ useHotkey([
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
-  max-height: 56vh;
+  min-height: 0;
   overflow-y: auto;
   padding: 1rem;
 }
@@ -721,15 +759,16 @@ useHotkey([
   margin: 0;
 }
 
-@media (max-width: 860px) {
+@media (max-width: 1023px) {
   .chat-shell {
     border-radius: 0.9rem;
     grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
     padding: 0.85rem;
   }
 
-  .session-list {
-    max-height: 22vh;
+  .session-sidebar {
+    max-height: clamp(8rem, 24vh, 12rem);
   }
 
   .chat-header {

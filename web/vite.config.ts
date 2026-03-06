@@ -3,6 +3,23 @@ import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 
 export default defineConfig({
+  server: {
+    host: "0.0.0.0",
+    port: 5173,
+    strictPort: true,
+    allowedHosts: true,
+    proxy: {
+      "/api": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: true,
+      },
+      "/ws": {
+        target: "http://127.0.0.1:8000",
+        ws: true,
+        changeOrigin: true,
+      },
+    },
+  },
   plugins: [
     vue(),
     VitePWA({
