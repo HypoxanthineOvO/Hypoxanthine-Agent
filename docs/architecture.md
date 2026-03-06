@@ -116,6 +116,7 @@ graph LR
 ```
 
 - **Preprocess**：用廉价模型对消息进行意图分类、提取关键实体、判断是否需要调用工具。
+- **Slash Commands Pre-dispatch（M6）**：若用户消息以 `/` 开头且命中内置指令（如 `/model status`、`/token`、`/kill`），直接在 Pipeline 内处理并返回，跳过 LLM 调用（零 token）。
 - **Memory Injection**：根据当前上下文从三层记忆中检索相关信息，注入到 Prompt 中。
 - **LLM Reasoning**：由 Model Router 选定的模型执行推理。
 - **Skill Execution**：如果 LLM 返回工具调用请求，通过 Skill Manager 执行，结果回馈给 LLM 继续推理（标准的 ReAct 循环）。
@@ -124,6 +125,7 @@ graph LR
 
 - 配置文件驱动（`models.yaml`），定义 `task_type → model` 的映射规则。
 - Pipeline 的 Preprocess 阶段识别出任务类型后，Router 自动选择对应模型。
+- 每次模型调用记录 `token_usage + latency_ms` 到 L2（SQLite），用于 `/model status` 与 `/token*` 统计。
 - 提供 `/model status` 指令查看当前模型分配与用量。
 - **相对 OpenClaw 的增强**：OpenClaw 通常只配置单一模型，Hypo-Agent 的多模型路由是核心差异化特性。
 
@@ -301,26 +303,29 @@ graph TD
 - **回流机制**：副会话结束时，用小模型生成摘要，回流到主会话的上下文中（而非把所有细节灌回去）。
 - **WebUI 展示**：主会话为默认视图，副会话以可折叠的侧边栏/标签页形式展示（类似旧系统设计的"单收件箱 + 可折叠后台任务"）。
 
-### 3.10 Error Parser Chain（错误压缩中间件）
+### 3.10 OutputCompressor（工具输出压缩中间件）
 
-*引入自旧系统 Milestone 3 的 Error Parser 子模型链路。*
+*M6 将旧命名 Error Parser Chain 统一为 OutputCompressor，并扩展为通用工具输出压缩器。*
 
-当 Skill 返回的输出超过阈值（默认 500 行或 8000 字符）时，Pipeline 自动触发压缩流程：
+当 Skill 返回内容过长时，Pipeline 在 ReAct 工具回灌前自动触发压缩：
 
 ```mermaid
 graph LR
     A["Skill Output<br>(Raw)"] --> B{"Length > Threshold?"}
     B -->|No| C["Pass Through"]
-    B -->|Yes| D["Cheap Model<br>(Compress & Summarize)"]
-    D --> E["Compressed Output<br>+ Key Errors Extracted"]
-    E --> C
-    C --> F["Feed to Main LLM"]
+    B -->|Yes| D["OutputCompressor<br>(task_routing.lightweight)"]
+    D --> E["Compressed Text<br>(<= 2500 chars)"]
+    E --> F["Feed to Main LLM"]
 ```
 
-- 作为 Pipeline 的可配置中间件，默认启用。
-- 压缩模型使用 Qwen/DeepSeek 等廉价模型，提取关键错误信息和摘要。
-- 原始输出同时写入日志，不丢失任何信息。
-- **核心价值**：避免海量终端输出（编译报错、测试日志等）浪费主模型的 context window 和 Token。
+- 触发阈值：`len(output) > 2500` 字符。
+- 路由模型：`task_routing.lightweight`（当前为 `DeepseekV3_2`）。
+- 压缩模式：
+  - `<=128K`：单次压缩。
+  - `>128K`：按约 `80K` 分段压缩并最多迭代 3 轮。
+- 原始输出保留：structlog 事件 + 内存最近 10 条缓存（便于追问细节）。
+- 输出标记：`[📦 Output compressed from X → Y chars. Original saved to logs. Ask me for details.]`
+- **核心价值**：限制工具输出在可控窗口内，降低 ReAct 上下文膨胀和 Token 成本。
 
 ### 3.11 Memory GC（记忆垃圾回收）
 
