@@ -6,6 +6,18 @@ export interface Message {
   sender: string;
   timestamp?: string;
   session_id: string;
+  senderName?: string;
+  senderAvatar?: string;
+  channel?: string;
+  event_type?: "tool_call_start" | "tool_call_result";
+  tool_name?: string;
+  tool_call_id?: string;
+  arguments?: Record<string, unknown>;
+  status?: string;
+  result?: unknown;
+  error_info?: string;
+  metadata?: Record<string, unknown>;
+  compressed_meta?: CompressedMeta;
 }
 
 export interface SessionSummary {
@@ -28,10 +40,51 @@ export interface AssistantDoneEvent {
   session_id: string;
 }
 
-export type IncomingWsEvent = Message | AssistantChunkEvent | AssistantDoneEvent;
+export interface CompressedMeta {
+  cache_id: string;
+  original_chars: number;
+  compressed_chars: number;
+}
+
+export interface ToolCallStartEvent {
+  type: "tool_call_start";
+  tool_name: string;
+  tool_call_id: string;
+  arguments: Record<string, unknown>;
+  session_id: string;
+}
+
+export interface ToolCallResultEvent {
+  type: "tool_call_result";
+  tool_name: string;
+  tool_call_id: string;
+  status: string;
+  result: unknown;
+  error_info: string;
+  metadata: Record<string, unknown>;
+  session_id: string;
+  compressed_meta?: CompressedMeta;
+}
+
+export interface WsErrorEvent {
+  type: "error";
+  code: string;
+  message: string;
+  retryable: boolean;
+  session_id: string;
+}
+
+export type IncomingWsEvent =
+  | Message
+  | AssistantChunkEvent
+  | AssistantDoneEvent
+  | ToolCallStartEvent
+  | ToolCallResultEvent
+  | WsErrorEvent;
 
 export type ConnectionStatus =
   | "connecting"
+  | "reconnecting"
   | "connected"
   | "disconnected"
   | "error";

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Literal
 
 import structlog
@@ -29,11 +31,13 @@ class SkillManager:
         *,
         circuit_breaker: Any | None = None,
         permission_manager: PermissionManager | None = None,
+        structured_store: Any | None = None,
     ) -> None:
         self._skills: dict[str, BaseSkill] = {}
         self._tool_to_skill: dict[str, BaseSkill] = {}
         self._circuit_breaker = circuit_breaker
         self._permission_manager = permission_manager
+        self._structured_store = structured_store
         if skills:
             self.register_many(skills)
 
@@ -97,6 +101,7 @@ class SkillManager:
         session_id: str | None = None,
     ) -> SkillOutput:
         logger.info("skill.invoke.start", tool_name=tool_name, session_id=session_id)
+        started_at = perf_counter()
 
         if self._circuit_breaker is not None:
             allowed, reason = self._circuit_breaker.can_execute(tool_name, session_id)
@@ -107,7 +112,17 @@ class SkillManager:
                     session_id=session_id,
                     reason=reason,
                 )
-                return SkillOutput(status="error", error_info=reason)
+                blocked = SkillOutput(status="error", error_info=reason)
+                await self._record_tool_invocation(
+                    tool_name=tool_name,
+                    params=params,
+                    session_id=session_id,
+                    status="blocked",
+                    result=None,
+                    error_info=reason,
+                    duration_ms=self._duration_ms(started_at),
+                )
+                return blocked
 
         skill = self._tool_to_skill.get(tool_name)
         if skill is None:
@@ -121,6 +136,15 @@ class SkillManager:
                 session_id=session_id,
                 status=result.status,
                 error=result.error_info,
+            )
+            await self._record_tool_invocation(
+                tool_name=tool_name,
+                params=params,
+                session_id=session_id,
+                status="error",
+                result=None,
+                error_info=result.error_info,
+                duration_ms=self._duration_ms(started_at),
             )
             return result
 
@@ -141,10 +165,20 @@ class SkillManager:
                     operation=operation,
                     reason=reason,
                 )
-                return SkillOutput(
+                blocked = SkillOutput(
                     status="error",
                     error_info=f"Permission denied: {reason}",
                 )
+                await self._record_tool_invocation(
+                    tool_name=tool_name,
+                    params=params,
+                    session_id=session_id,
+                    status="blocked",
+                    result=None,
+                    error_info=reason,
+                    duration_ms=self._duration_ms(started_at),
+                )
+                return blocked
 
         try:
             result = await skill.execute(tool_name, params)
@@ -165,6 +199,15 @@ class SkillManager:
                 status=result.status,
                 error=result.error_info,
             )
+            await self._record_tool_invocation(
+                tool_name=tool_name,
+                params=params,
+                session_id=session_id,
+                status="error",
+                result=None,
+                error_info=result.error_info,
+                duration_ms=self._duration_ms(started_at),
+            )
             return result
 
         if not isinstance(result, SkillOutput):
@@ -180,6 +223,15 @@ class SkillManager:
                 session_id=session_id,
                 status=normalized.status,
                 error=normalized.error_info,
+            )
+            await self._record_tool_invocation(
+                tool_name=tool_name,
+                params=params,
+                session_id=session_id,
+                status="error",
+                result=None,
+                error_info=normalized.error_info,
+                duration_ms=self._duration_ms(started_at),
             )
             return normalized
 
@@ -200,6 +252,15 @@ class SkillManager:
                 error=result.error_info,
             )
 
+        await self._record_tool_invocation(
+            tool_name=tool_name,
+            params=params,
+            session_id=session_id,
+            status=result.status,
+            result=result.result,
+            error_info=result.error_info,
+            duration_ms=self._duration_ms(started_at),
+        )
         return result
 
     def _infer_operation(self, tool_name: str) -> Literal["read", "write", "execute"]:
@@ -219,3 +280,58 @@ class SkillManager:
             return ""
         name = function_payload.get("name")
         return str(name) if isinstance(name, str) else ""
+
+    async def _record_tool_invocation(
+        self,
+        *,
+        tool_name: str,
+        params: dict[str, Any],
+        session_id: str | None,
+        status: str,
+        result: Any,
+        error_info: str,
+        duration_ms: float,
+    ) -> None:
+        if self._structured_store is None or not session_id:
+            return
+
+        normalized_status = self._normalize_invocation_status(status)
+        try:
+            await self._structured_store.record_tool_invocation(
+                session_id=session_id,
+                tool_name=tool_name,
+                params=self._serialize_for_storage(params),
+                status=normalized_status,
+                result_preview=self._build_result_preview(result, error_info),
+                duration_ms=duration_ms,
+                error_info=error_info,
+            )
+        except Exception as exc:  # pragma: no cover - defensive safeguard
+            logger.warning(
+                "skill_manager.record.failed",
+                tool_name=tool_name,
+                session_id=session_id,
+                error=str(exc),
+            )
+
+    def _normalize_invocation_status(self, status: str) -> str:
+        lowered = status.lower()
+        if lowered in {"success", "error", "timeout", "blocked"}:
+            return lowered
+        return "error"
+
+    def _build_result_preview(self, result: Any, error_info: str) -> str:
+        if result is not None:
+            return self._serialize_for_storage(result)[:500]
+        if error_info:
+            return error_info[:500]
+        return ""
+
+    def _serialize_for_storage(self, value: Any) -> str:
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(value)
+
+    def _duration_ms(self, started_at: float) -> float:
+        return max((perf_counter() - started_at) * 1000.0, 0.0)

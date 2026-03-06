@@ -339,6 +339,11 @@ def test_pipeline_stream_reply_compresses_tool_output_before_tool_message() -> N
 
         async def compress_if_needed(self, output: str, metadata: dict) -> tuple[str, bool]:
             self.calls.append((output, metadata))
+            metadata["compressed_meta"] = {
+                "cache_id": "cache_1",
+                "original_chars": 5000,
+                "compressed_chars": 120,
+            }
             return "[📦 输出已压缩 (5000 → 120 字符)。如需查看原文，请告知。]\ncompressed", True
 
     compressor = StubOutputCompressor()
@@ -390,6 +395,11 @@ def test_pipeline_stream_reply_compresses_tool_output_before_tool_message() -> N
     assert compressor.calls
     assert events[1]["type"] == "tool_call_result"
     assert events[1]["result"].startswith("[📦 输出已压缩")
+    assert events[1]["compressed_meta"] == {
+        "cache_id": "cache_1",
+        "original_chars": 5000,
+        "compressed_chars": 120,
+    }
     tool_messages = [m for m in router.last_messages if m.get("role") == "tool"]
     assert tool_messages
     assert tool_messages[-1]["content"].startswith("[📦 输出已压缩")

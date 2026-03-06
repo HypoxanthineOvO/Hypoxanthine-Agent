@@ -6,6 +6,8 @@ from typing import Any, Protocol
 
 import structlog
 
+from hypo_agent.core.channel_adapter import ChannelAdapter, WebUIAdapter
+from hypo_agent.core.rich_response import RichResponse
 from hypo_agent.memory.session import SessionMemory
 from hypo_agent.models import Message, SkillOutput
 
@@ -82,6 +84,7 @@ class ChatPipeline:
         max_react_rounds: int = 5,
         slash_commands: SlashCommands | None = None,
         output_compressor: ChatOutputCompressor | None = None,
+        channel_adapter: ChannelAdapter | None = None,
     ) -> None:
         self.router = router
         self.chat_model = chat_model
@@ -91,6 +94,7 @@ class ChatPipeline:
         self.max_react_rounds = max_react_rounds
         self.slash_commands = slash_commands
         self.output_compressor = output_compressor
+        self.channel_adapter = channel_adapter or WebUIAdapter()
 
     async def run_once(self, inbound: Message) -> Message:
         slash_result = await self._try_handle_slash(inbound)
@@ -115,17 +119,16 @@ class ChatPipeline:
     async def stream_reply(self, inbound: Message) -> AsyncIterator[dict[str, Any]]:
         slash_result = await self._try_handle_slash(inbound)
         if slash_result is not None:
-            yield {
-                "type": "assistant_chunk",
-                "text": slash_result,
-                "sender": "assistant",
-                "session_id": inbound.session_id,
-            }
-            yield {
-                "type": "assistant_done",
-                "sender": "assistant",
-                "session_id": inbound.session_id,
-            }
+            yield self._format_event(
+                event_type="assistant_chunk",
+                response=RichResponse(text=slash_result),
+                session_id=inbound.session_id,
+            )
+            yield self._format_event(
+                event_type="assistant_done",
+                response=RichResponse(),
+                session_id=inbound.session_id,
+            )
             return
 
         use_tools = (
@@ -166,12 +169,11 @@ class ChatPipeline:
                     text = str(decision.get("text") or "")
                     if text:
                         full_text = text
-                        yield {
-                            "type": "assistant_chunk",
-                            "text": text,
-                            "sender": "assistant",
-                            "session_id": inbound.session_id,
-                        }
+                        yield self._format_event(
+                            event_type="assistant_chunk",
+                            response=RichResponse(text=text),
+                            session_id=inbound.session_id,
+                        )
                     else:
                         async for chunk in self.router.stream(
                             self.chat_model,
@@ -182,12 +184,11 @@ class ChatPipeline:
                             if not chunk:
                                 continue
                             full_text += chunk
-                            yield {
-                                "type": "assistant_chunk",
-                                "text": chunk,
-                                "sender": "assistant",
-                                "session_id": inbound.session_id,
-                            }
+                            yield self._format_event(
+                                event_type="assistant_chunk",
+                                response=RichResponse(text=chunk),
+                                session_id=inbound.session_id,
+                            )
                     break
 
                 react_messages.append(
@@ -201,13 +202,19 @@ class ChatPipeline:
                     tool_name = self._extract_tool_name(tool_call)
                     tool_call_id = str(tool_call.get("id") or "")
                     arguments = self._parse_tool_arguments(tool_call)
-                    yield {
-                        "type": "tool_call_start",
-                        "tool_name": tool_name,
-                        "tool_call_id": tool_call_id,
-                        "arguments": arguments,
-                        "session_id": inbound.session_id,
-                    }
+                    yield self._format_event(
+                        event_type="tool_call_start",
+                        response=RichResponse(
+                            tool_calls=[
+                                {
+                                    "tool_name": tool_name,
+                                    "tool_call_id": tool_call_id,
+                                    "arguments": arguments,
+                                }
+                            ]
+                        ),
+                        session_id=inbound.session_id,
+                    )
 
                     output = await self.skill_manager.invoke(
                         tool_name,
@@ -221,30 +228,42 @@ class ChatPipeline:
                     tool_content = serialized_output
                     tool_result_for_event: Any = output.result
                     tool_metadata_for_event = dict(output.metadata)
+                    compressed_meta_for_event: dict[str, Any] | None = None
                     if self.output_compressor is not None:
+                        compression_metadata: dict[str, Any] = {
+                            "session_id": inbound.session_id,
+                            "tool_name": tool_name,
+                            "tool_call_id": tool_call_id,
+                        }
                         tool_content, was_compressed = await self.output_compressor.compress_if_needed(
                             serialized_output,
-                            {
-                                "session_id": inbound.session_id,
-                                "tool_name": tool_name,
-                                "tool_call_id": tool_call_id,
-                            },
+                            compression_metadata,
                         )
                         if was_compressed:
                             tool_result_for_event = tool_content
                             tool_metadata_for_event["compressed"] = True
                             tool_metadata_for_event["original_chars"] = len(serialized_output)
                             tool_metadata_for_event["compressed_chars"] = len(tool_content)
-                    yield {
-                        "type": "tool_call_result",
-                        "tool_name": tool_name,
-                        "tool_call_id": tool_call_id,
-                        "status": output.status,
-                        "result": tool_result_for_event,
-                        "error_info": output.error_info,
-                        "metadata": tool_metadata_for_event,
-                        "session_id": inbound.session_id,
-                    }
+                            compressed_meta = compression_metadata.get("compressed_meta")
+                            if isinstance(compressed_meta, dict):
+                                compressed_meta_for_event = dict(compressed_meta)
+                    yield self._format_event(
+                        event_type="tool_call_result",
+                        response=RichResponse(
+                            compressed_meta=compressed_meta_for_event,
+                            tool_calls=[
+                                {
+                                    "tool_name": tool_name,
+                                    "tool_call_id": tool_call_id,
+                                    "status": output.status,
+                                    "result": tool_result_for_event,
+                                    "error_info": output.error_info,
+                                    "metadata": tool_metadata_for_event,
+                                }
+                            ],
+                        ),
+                        session_id=inbound.session_id,
+                    )
                     react_messages.append(
                         {
                             "role": "tool",
@@ -256,12 +275,11 @@ class ChatPipeline:
             if reached_round_limit:
                 logger.warning("react.round_limit", session_id=inbound.session_id)
                 full_text = "Stopped due to max ReAct rounds limit."
-                yield {
-                    "type": "assistant_chunk",
-                    "text": full_text,
-                    "sender": "assistant",
-                    "session_id": inbound.session_id,
-                }
+                yield self._format_event(
+                    event_type="assistant_chunk",
+                    response=RichResponse(text=full_text),
+                    session_id=inbound.session_id,
+                )
         else:
             async for chunk in self.router.stream(
                 self.chat_model,
@@ -271,12 +289,11 @@ class ChatPipeline:
                 if not chunk:
                     continue
                 full_text += chunk
-                yield {
-                    "type": "assistant_chunk",
-                    "text": chunk,
-                    "sender": "assistant",
-                    "session_id": inbound.session_id,
-                }
+                yield self._format_event(
+                    event_type="assistant_chunk",
+                    response=RichResponse(text=chunk),
+                    session_id=inbound.session_id,
+                )
 
         outbound = Message(
             text=full_text,
@@ -284,11 +301,11 @@ class ChatPipeline:
             session_id=inbound.session_id,
         )
         self.session_memory.append(outbound)
-        yield {
-            "type": "assistant_done",
-            "sender": "assistant",
-            "session_id": inbound.session_id,
-        }
+        yield self._format_event(
+            event_type="assistant_done",
+            response=RichResponse(),
+            session_id=inbound.session_id,
+        )
 
     def _extract_tool_name(self, tool_call: dict[str, Any]) -> str:
         function_payload = tool_call.get("function") or {}
@@ -352,3 +369,16 @@ class ChatPipeline:
         if self.slash_commands is None:
             return None
         return await self.slash_commands.try_handle(inbound)
+
+    def _format_event(
+        self,
+        *,
+        event_type: str,
+        response: RichResponse,
+        session_id: str,
+    ) -> dict[str, Any]:
+        return self.channel_adapter.format(
+            response,
+            event_type=event_type,
+            session_id=session_id,
+        )

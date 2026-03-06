@@ -60,16 +60,37 @@ class OutputCompressor:
 
         marker, body_budget = self._build_marker(len(output), len(working))
         if body_budget <= 0:
-            return marker[: self.target_chars], True
+            final_output = marker[: self.target_chars]
+            self._attach_compressed_meta(
+                metadata=metadata,
+                cache_id=cache_id,
+                original_chars=len(output),
+                compressed_chars=len(final_output),
+            )
+            return final_output, True
 
         body = working[:body_budget]
         compressed_chars = len(body)
         marker, body_budget = self._build_marker(len(output), compressed_chars)
         if body_budget <= 0:
-            return marker[: self.target_chars], True
+            final_output = marker[: self.target_chars]
+            self._attach_compressed_meta(
+                metadata=metadata,
+                cache_id=cache_id,
+                original_chars=len(output),
+                compressed_chars=len(final_output),
+            )
+            return final_output, True
         body = body[:body_budget]
         final_output = f"{marker}\n{body}"
-        return final_output[: self.target_chars], True
+        trimmed = final_output[: self.target_chars]
+        self._attach_compressed_meta(
+            metadata=metadata,
+            cache_id=cache_id,
+            original_chars=len(output),
+            compressed_chars=len(trimmed),
+        )
+        return trimmed, True
 
     def get_recent_originals(self) -> dict[str, dict[str, Any]]:
         return dict(self._recent_originals)
@@ -147,3 +168,17 @@ class OutputCompressor:
         while len(self._recent_originals) > self.cache_size:
             self._recent_originals.popitem(last=False)
         return cache_id
+
+    def _attach_compressed_meta(
+        self,
+        *,
+        metadata: dict[str, Any],
+        cache_id: str,
+        original_chars: int,
+        compressed_chars: int,
+    ) -> None:
+        metadata["compressed_meta"] = {
+            "cache_id": cache_id,
+            "original_chars": original_chars,
+            "compressed_chars": compressed_chars,
+        }

@@ -49,6 +49,7 @@ skills:
     assert deps.permission_manager is not None
     assert deps.skill_manager is not None
     assert deps.skill_manager._permission_manager is deps.permission_manager
+    assert deps.skill_manager._structured_store is deps.structured_store
     assert deps.skill_manager._skills["code_run"].permission_manager is deps.permission_manager
     assert deps.skill_manager._skills["filesystem"].permission_manager is deps.permission_manager
 

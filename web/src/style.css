@@ -1,15 +1,15 @@
 :root {
-  --bg: #070a14;
-  --surface: #10172d;
-  --panel: #0d1428;
-  --panel-edge: #2a3556;
-  --text: #e7ecfa;
-  --muted: #96a4cd;
-  --brand: #4ddcb1;
-  --brand-2: #f5b95e;
-  --ok: #5be081;
-  --warn: #ffcb6b;
-  --error: #ff6c6c;
+  --bg: #eef3fb;
+  --surface: #ffffff;
+  --panel: #f7f9ff;
+  --panel-edge: #cfd9ea;
+  --text: #1b2538;
+  --muted: #607090;
+  --brand: #2bb586;
+  --brand-2: #f2a23f;
+  --ok: #1fa663;
+  --warn: #cc8a17;
+  --error: #cf3d3d;
 
   color: var(--text);
   font-family:
@@ -22,6 +22,20 @@
   font-weight: 400;
   line-height: 1.5;
   text-rendering: optimizeLegibility;
+}
+
+:root[data-theme="dark"] {
+  --bg: #070a14;
+  --surface: #10172d;
+  --panel: #0d1428;
+  --panel-edge: #2a3556;
+  --text: #e7ecfa;
+  --muted: #96a4cd;
+  --brand: #4ddcb1;
+  --brand-2: #f5b95e;
+  --ok: #5be081;
+  --warn: #ffcb6b;
+  --error: #ff6c6c;
 }
 
 *,
@@ -38,9 +52,17 @@ body,
 
 body {
   background:
-    radial-gradient(60rem 60rem at -10% -20%, color-mix(in srgb, var(--brand) 18%, transparent), transparent 55%),
-    radial-gradient(50rem 50rem at 120% 10%, color-mix(in srgb, var(--brand-2) 12%, transparent), transparent 60%),
-    linear-gradient(160deg, #050813, #090f20 40%, #0b1122);
+    radial-gradient(
+      60rem 60rem at -10% -20%,
+      color-mix(in srgb, var(--brand) 14%, transparent),
+      transparent 55%
+    ),
+    radial-gradient(
+      50rem 50rem at 120% 10%,
+      color-mix(in srgb, var(--brand-2) 10%, transparent),
+      transparent 60%
+    ),
+    linear-gradient(160deg, color-mix(in srgb, var(--bg) 92%, black 8%), var(--bg));
   color: var(--text);
   margin: 0;
 }

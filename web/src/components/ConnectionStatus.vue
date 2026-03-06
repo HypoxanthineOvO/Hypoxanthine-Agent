@@ -13,6 +13,8 @@ const label = computed(() => {
       return "Connected";
     case "connecting":
       return "Connecting";
+    case "reconnecting":
+      return "Reconnecting";
     case "error":
       return "Error";
     default:
@@ -62,6 +64,15 @@ const label = computed(() => {
 }
 
 .status[data-state="connecting"] .dot {
+  background: var(--warn);
+}
+
+.status[data-state="reconnecting"] {
+  background: color-mix(in srgb, var(--warn) 28%, transparent);
+  color: var(--warn);
+}
+
+.status[data-state="reconnecting"] .dot {
   background: var(--warn);
 }
 
