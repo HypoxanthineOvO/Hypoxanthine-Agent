@@ -454,3 +454,62 @@ hypo-agent/
 | `PersonaConfig` | 助手人设配置结构 | `name`, `aliases`, `personality`, `speaking_style` |
 
 补充：`SecurityConfig` 在实现中由两个子模型组成：`DirectoryWhitelist` 与 `CircuitBreakerConfig`。
+
+### 3.16 M7a 增补（Chat View + UI Foundation）
+
+M7a 在不破坏既有 WebSocket 协议行为的前提下，补齐了 Chat View 渲染能力与 UI 基础架构，并引入后续多渠道扩展所需的内部抽象层。
+
+#### 3.16.1 Gateway API 增补
+
+新增 REST 端点：
+
+| Method | Path | 用途 |
+| --- | --- | --- |
+| `GET` | `/api/compressed/{cache_id}` | 从 `OutputCompressor` 内存缓存中取回原始工具输出 |
+| `GET` | `/api/files?path=...` | 受 Token + `PermissionManager` 白名单保护的文件内容读取 |
+
+其中 `/api/files` 需要通过 `Authorization: Bearer <token>`（或 `?token=` fallback）鉴权，并执行 `read` 权限校验。
+
+#### 3.16.2 WebSocket 事件协议（向后兼容）
+
+现有事件保持不变：
+
+- `assistant_chunk`
+- `assistant_done`
+- `tool_call_start`
+- `tool_call_result`
+
+M7a 增补点：
+
+- `tool_call_result` 在发生压缩时携带可选字段：
+  - `compressed_meta = { cache_id, original_chars, compressed_chars }`
+- 统一错误事件 envelope：
+  - `{"type":"error","code":"...","message":"...","retryable":bool,"session_id":"..."}`
+
+#### 3.16.3 Core 出口抽象（RichResponse + ChannelAdapter）
+
+新增：
+
+- `core/rich_response.py`: `RichResponse(text, compressed_meta, tool_calls, attachments)`
+- `core/channel_adapter.py`: `ChannelAdapter` Protocol + `WebUIAdapter`
+
+`ChatPipeline` 内部先构造 `RichResponse`，再由 `WebUIAdapter.format()` 转换为当前 WebSocket 消息。该设计保证了当前 WebUI 协议兼容，同时为后续多渠道（非 WebUI）适配预留统一出口。
+
+#### 3.16.4 L2 结构化存储增补：tool_invocations
+
+SQLite 新增 `tool_invocations` 表（含 session/tool/status/duration/error/result_preview），并建立会话、工具名、时间索引。`SkillManager.invoke()` 在 success/error/timeout/blocked 分支均会写入记录。
+
+#### 3.16.5 前端 Chat 渲染组件体系
+
+Chat 消息渲染从单体视图拆分为组件树：
+
+- `MessageBubble`
+- `TextMessage`
+- `CodeBlock`
+- `MarkdownPreview`
+- `MediaMessage`
+- `CompressedMessage`
+- `ToolCallMessage`
+- `FileAttachment`
+
+同时新增统一 `markdownRenderer`（GFM table/task list、KaTeX、Mermaid 懒加载、代码块行号/复制/语言标签），并在 `useChatSocket` 中支持指数退避重连（1s→2s→4s→8s→16s→30s）。
