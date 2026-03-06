@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 from time import perf_counter
@@ -78,11 +79,16 @@ class SkillManager:
         return items
 
     @staticmethod
-    def find_enabled_skills(path: Path | str = "config/skills.yaml") -> set[str]:
-        payload = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
-        if not isinstance(payload, dict):
+    def known_skill_names(path: Path | str = "config/skills.yaml") -> set[str]:
+        payload = SkillManager._load_skills_payload(path)
+        configured_skills = payload.get("skills", {})
+        if not isinstance(configured_skills, dict):
             return set()
+        return {str(name) for name in configured_skills.keys()}
 
+    @staticmethod
+    def find_enabled_skills(path: Path | str = "config/skills.yaml") -> set[str]:
+        payload = SkillManager._load_skills_payload(path)
         configured_skills = payload.get("skills", {})
         if not isinstance(configured_skills, dict):
             return set()
@@ -92,6 +98,14 @@ class SkillManager:
             if isinstance(cfg, dict) and bool(cfg.get("enabled", False)):
                 enabled.add(str(name))
         return enabled
+
+    @staticmethod
+    def _load_skills_payload(path: Path | str) -> dict[str, Any]:
+        config_path = Path(path)
+        if not config_path.exists():
+            return {}
+        payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        return payload if isinstance(payload, dict) else {}
 
     async def invoke(
         self,
@@ -113,7 +127,7 @@ class SkillManager:
                     reason=reason,
                 )
                 blocked = SkillOutput(status="error", error_info=reason)
-                await self._record_tool_invocation(
+                invocation_id = await self._record_tool_invocation(
                     tool_name=tool_name,
                     params=params,
                     session_id=session_id,
@@ -122,6 +136,7 @@ class SkillManager:
                     error_info=reason,
                     duration_ms=self._duration_ms(started_at),
                 )
+                self._attach_invocation_id(blocked, invocation_id)
                 return blocked
 
         skill = self._tool_to_skill.get(tool_name)
@@ -137,7 +152,7 @@ class SkillManager:
                 status=result.status,
                 error=result.error_info,
             )
-            await self._record_tool_invocation(
+            invocation_id = await self._record_tool_invocation(
                 tool_name=tool_name,
                 params=params,
                 session_id=session_id,
@@ -146,6 +161,7 @@ class SkillManager:
                 error_info=result.error_info,
                 duration_ms=self._duration_ms(started_at),
             )
+            self._attach_invocation_id(result, invocation_id)
             return result
 
         if (
@@ -169,7 +185,7 @@ class SkillManager:
                     status="error",
                     error_info=f"Permission denied: {reason}",
                 )
-                await self._record_tool_invocation(
+                invocation_id = await self._record_tool_invocation(
                     tool_name=tool_name,
                     params=params,
                     session_id=session_id,
@@ -178,6 +194,7 @@ class SkillManager:
                     error_info=reason,
                     duration_ms=self._duration_ms(started_at),
                 )
+                self._attach_invocation_id(blocked, invocation_id)
                 return blocked
 
         try:
@@ -199,7 +216,7 @@ class SkillManager:
                 status=result.status,
                 error=result.error_info,
             )
-            await self._record_tool_invocation(
+            invocation_id = await self._record_tool_invocation(
                 tool_name=tool_name,
                 params=params,
                 session_id=session_id,
@@ -208,6 +225,7 @@ class SkillManager:
                 error_info=result.error_info,
                 duration_ms=self._duration_ms(started_at),
             )
+            self._attach_invocation_id(result, invocation_id)
             return result
 
         if not isinstance(result, SkillOutput):
@@ -224,7 +242,7 @@ class SkillManager:
                 status=normalized.status,
                 error=normalized.error_info,
             )
-            await self._record_tool_invocation(
+            invocation_id = await self._record_tool_invocation(
                 tool_name=tool_name,
                 params=params,
                 session_id=session_id,
@@ -233,6 +251,7 @@ class SkillManager:
                 error_info=normalized.error_info,
                 duration_ms=self._duration_ms(started_at),
             )
+            self._attach_invocation_id(normalized, invocation_id)
             return normalized
 
         if self._circuit_breaker is not None:
@@ -252,7 +271,7 @@ class SkillManager:
                 error=result.error_info,
             )
 
-        await self._record_tool_invocation(
+        invocation_id = await self._record_tool_invocation(
             tool_name=tool_name,
             params=params,
             session_id=session_id,
@@ -261,6 +280,7 @@ class SkillManager:
             error_info=result.error_info,
             duration_ms=self._duration_ms(started_at),
         )
+        self._attach_invocation_id(result, invocation_id)
         return result
 
     def _infer_operation(self, tool_name: str) -> Literal["read", "write", "execute"]:
@@ -289,22 +309,26 @@ class SkillManager:
         session_id: str | None,
         status: str,
         result: Any,
-        error_info: str,
+        error_info: str | None,
         duration_ms: float,
-    ) -> None:
+    ) -> int | None:
         if self._structured_store is None or not session_id:
-            return
+            return None
 
         normalized_status = self._normalize_invocation_status(status)
+        skill = self._tool_to_skill.get(tool_name)
+        skill_name = skill.name if skill is not None else None
         try:
-            await self._structured_store.record_tool_invocation(
+            return await self._structured_store.record_tool_invocation(
                 session_id=session_id,
                 tool_name=tool_name,
-                params=self._serialize_for_storage(params),
+                skill_name=skill_name,
+                params_json=self._serialize_for_storage(params),
                 status=normalized_status,
-                result_preview=self._build_result_preview(result, error_info),
+                result_summary=self._build_result_preview(result, error_info),
                 duration_ms=duration_ms,
                 error_info=error_info,
+                compressed_meta_json=None,
             )
         except Exception as exc:  # pragma: no cover - defensive safeguard
             logger.warning(
@@ -313,6 +337,7 @@ class SkillManager:
                 session_id=session_id,
                 error=str(exc),
             )
+            return None
 
     def _normalize_invocation_status(self, status: str) -> str:
         lowered = status.lower()
@@ -320,12 +345,21 @@ class SkillManager:
             return lowered
         return "error"
 
-    def _build_result_preview(self, result: Any, error_info: str) -> str:
+    def _build_result_preview(self, result: Any, error_info: str | None) -> str:
         if result is not None:
             return self._serialize_for_storage(result)[:500]
         if error_info:
             return error_info[:500]
         return ""
+
+    def _attach_invocation_id(
+        self,
+        output: SkillOutput,
+        invocation_id: int | None,
+    ) -> None:
+        if invocation_id is None:
+            return
+        output.metadata["invocation_id"] = invocation_id
 
     def _serialize_for_storage(self, value: Any) -> str:
         try:
@@ -335,3 +369,27 @@ class SkillManager:
 
     def _duration_ms(self, started_at: float) -> float:
         return max((perf_counter() - started_at) * 1000.0, 0.0)
+
+    async def attach_invocation_compressed_meta(
+        self,
+        *,
+        invocation_id: int,
+        compressed_meta: dict[str, Any],
+    ) -> None:
+        if self._structured_store is None:
+            return
+
+        try:
+            payload = self._serialize_for_storage(compressed_meta)
+            result = self._structured_store.update_tool_invocation_compressed_meta(
+                invocation_id,
+                compressed_meta_json=payload,
+            )
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:  # pragma: no cover - defensive safeguard
+            logger.warning(
+                "skill_manager.record_compressed_meta.failed",
+                invocation_id=invocation_id,
+                error=str(exc),
+            )
