@@ -10,7 +10,7 @@ models:
     provider: "volcengine_coding"
     supports_tool_calling: true
     description: "Kimi K2.5 via 火山引擎 Coding Plan (OpenAI compat)"
-    fallback: KimiK2
+    fallback: GLM4
 
   KimiK2:
     litellm_model: "openai/moonshot-v1-32k"
@@ -29,12 +29,12 @@ models:
     fallback: GLM4
 
   GLM4:
-    litellm_model: "zai/glm-4-plus"
-    provider: "zhipu"
+    litellm_model: "openai/glm-4.7"
+    provider: "volcengine_coding"
     supports_tool_calling: true
     context_window: 128000
-    description: "智谱 GLM-4-Plus，原生 function calling"
-    fallback: Gemini3Pro
+    description: "GLM 4.7 via 火山方舟 Coding Plan"
+    fallback: DeepseekV3_2_Core
 
   Gemini3Pro:
     provider: Hiapi
@@ -50,9 +50,16 @@ models:
     fallback: DeepseekV3_2
 
   DeepseekV3_2:
-    provider: Volcengine
-    litellm_model: "openai/ep-20251215171209-4z5qk"
-    fallback: QwenPlus
+    provider: "volcengine_coding"
+    litellm_model: "openai/deepseek-v3.2"
+    description: "DeepSeek V3.2 via 火山方舟 Coding Plan (lightweight)"
+    fallback: KimiK25
+
+  DeepseekV3_2_Core:
+    provider: "volcengine_coding"
+    litellm_model: "openai/deepseek-v3.2"
+    description: "DeepSeek V3.2 via 火山方舟 Coding Plan (fallback terminal)"
+    fallback: null
 
   QwenPlus:
     provider: Dashscope
