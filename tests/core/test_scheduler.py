@@ -87,6 +87,30 @@ def test_scheduler_start_rebuilds_active_reminders() -> None:
     asyncio.run(_run())
 
 
+def test_scheduler_start_skips_invalid_reminder_without_crashing() -> None:
+    async def _run() -> None:
+        reminders = [
+            {
+                "id": 99,
+                "title": "坏提醒",
+                "description": "",
+                "schedule_type": "once",
+                "schedule_value": "+1 minute",
+                "status": "active",
+            }
+        ]
+        service = SchedulerService(
+            structured_store=StubStore(reminders),
+            event_queue=EventQueue(),
+        )
+        await service.start()
+        assert service.is_running is True
+        assert service.has_job(99) is False
+        await service.stop()
+
+    asyncio.run(_run())
+
+
 def test_scheduler_parses_cron_timezone_prefix() -> None:
     expression, timezone = SchedulerService.parse_cron_schedule(
         "CRON_TZ=Asia/Shanghai 0 15 * * *",
@@ -94,6 +118,35 @@ def test_scheduler_parses_cron_timezone_prefix() -> None:
     )
     assert expression == "0 15 * * *"
     assert timezone == "Asia/Shanghai"
+
+
+def test_scheduler_uses_default_timezone_for_naive_once_datetime() -> None:
+    async def _run() -> None:
+        store = StubStore(
+            [
+                {
+                    "id": 30,
+                    "title": "本地时区提醒",
+                    "description": "",
+                    "schedule_type": "once",
+                    "schedule_value": "2099-01-01T08:00:00",
+                    "status": "active",
+                }
+            ]
+        )
+        service = SchedulerService(
+            structured_store=store,
+            event_queue=EventQueue(),
+            default_timezone="Asia/Shanghai",
+        )
+        await service.start()
+        job = service._scheduler.get_job("reminder:30")
+        assert job is not None
+        assert job.next_run_time is not None
+        assert str(job.next_run_time.tzinfo) == "Asia/Shanghai"
+        await service.stop()
+
+    asyncio.run(_run())
 
 
 def test_scheduler_enqueues_reminder_event_on_trigger() -> None:

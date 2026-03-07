@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -81,12 +82,32 @@ def test_create_app_exposes_output_compressor_from_deps(tmp_path: Path) -> None:
 
 def test_reload_config_keeps_pipeline_proactive_callback(tmp_path: Path, monkeypatch) -> None:
     class DummyPipeline:
+        def __init__(self) -> None:
+            self.started = 0
+            self.stopped = 0
+
+        async def start_event_consumer(self) -> None:
+            self.started += 1
+
+        async def stop_event_consumer(self) -> None:
+            self.stopped += 1
+
         async def stream_reply(self, inbound):
             del inbound
             if False:  # pragma: no cover
                 yield {}
 
     class ReloadedPipeline:
+        def __init__(self) -> None:
+            self.started = 0
+            self.stopped = 0
+
+        async def start_event_consumer(self) -> None:
+            self.started += 1
+
+        async def stop_event_consumer(self) -> None:
+            self.stopped += 1
+
         async def stream_reply(self, inbound):
             del inbound
             if False:  # pragma: no cover
@@ -117,5 +138,8 @@ def test_reload_config_keeps_pipeline_proactive_callback(tmp_path: Path, monkeyp
         lambda **kwargs: None,
     )
 
-    app.state.reload_config()
+    previous_pipeline = app.state.pipeline
+    asyncio.run(app.state.reload_config())
     assert getattr(app.state.pipeline, "on_proactive_message", None) is not None
+    assert previous_pipeline.stopped == 1
+    assert app.state.pipeline.started == 1

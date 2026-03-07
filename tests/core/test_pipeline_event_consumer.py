@@ -148,3 +148,43 @@ def test_pipeline_event_consumer_continues_after_append_exception() -> None:
         assert "second" in (memory.appended[0].text or "")
 
     asyncio.run(_run())
+
+
+def test_pipeline_event_consumer_processes_multiple_events() -> None:
+    async def _run() -> None:
+        queue = EventQueue()
+        memory = StubSessionMemory()
+        pushed: list[Message] = []
+
+        async def on_proactive_message(message: Message) -> None:
+            pushed.append(message)
+
+        pipeline = ChatPipeline(
+            router=StubRouter(),
+            chat_model="Gemini3Pro",
+            session_memory=memory,
+            event_queue=queue,
+            on_proactive_message=on_proactive_message,
+        )
+
+        await pipeline.start_event_consumer()
+        for idx in range(3):
+            await queue.put(
+                {
+                    "event_type": "reminder_trigger",
+                    "session_id": "main",
+                    "title": f"event-{idx}",
+                }
+            )
+            await asyncio.sleep(0.05)
+
+        await asyncio.sleep(0.05)
+        await pipeline.stop_event_consumer()
+
+        assert len(memory.appended) == 3
+        assert len(pushed) == 3
+        assert "event-0" in (memory.appended[0].text or "")
+        assert "event-1" in (memory.appended[1].text or "")
+        assert "event-2" in (memory.appended[2].text or "")
+
+    asyncio.run(_run())

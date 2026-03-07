@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 import json
 import re
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from hypo_agent.models import SkillOutput
 from hypo_agent.skills.base import BaseSkill
@@ -42,7 +43,18 @@ class ReminderSkill(BaseSkill):
                             "title": {"type": "string"},
                             "description": {"type": "string"},
                             "schedule_type": {"type": "string", "enum": ["once", "cron"]},
-                            "schedule_value": {"type": "string"},
+                            "schedule_value": {
+                                "type": "string",
+                                "description": (
+                                    'For schedule_type="once": an ISO 8601 datetime string in '
+                                    'the user local timezone (e.g. "2026-03-07T19:51:00"). '
+                                    'Do NOT use relative expressions like "+1 minute" or "+30m"; '
+                                    "calculate an absolute datetime first. "
+                                    'For schedule_type="cron": a standard cron expression, '
+                                    'optionally prefixed with CRON_TZ=<timezone> '
+                                    '(e.g. "CRON_TZ=Asia/Shanghai 30 9 * * *").'
+                                ),
+                            },
                             "channel": {"type": "string", "default": "all"},
                             "heartbeat_config": {"type": "array"},
                             "confirm": {"type": "boolean", "default": False},
@@ -152,7 +164,7 @@ class ReminderSkill(BaseSkill):
         description = str(description_raw).strip() if description_raw is not None else None
         channel = str(params.get("channel") or "all")
         heartbeat_config = self._json_dumps_or_none(params.get("heartbeat_config"))
-        confirm = bool(params.get("confirm", False))
+        confirm = self._parse_confirm(params.get("confirm", False))
 
         if not confirm:
             preview = await self._parse_schedule_preview(
@@ -168,6 +180,18 @@ class ReminderSkill(BaseSkill):
                     "preview": preview,
                 },
             )
+
+        if schedule_type == "once":
+            try:
+                datetime.fromisoformat(schedule_value)
+            except ValueError:
+                return SkillOutput(
+                    status="error",
+                    error_info=(
+                        'For schedule_type="once", schedule_value must be an absolute '
+                        "ISO 8601 datetime."
+                    ),
+                )
 
         reminder_id = await self.structured_store.create_reminder(
             title=title,
@@ -249,7 +273,7 @@ class ReminderSkill(BaseSkill):
         if delta is None:
             return SkillOutput(status="error", error_info="unsupported duration format")
 
-        run_at = datetime.now(UTC) + delta
+        run_at = datetime.now(self._default_timezone()) + delta
         run_at_iso = run_at.isoformat()
 
         await self.scheduler.remove_reminder_job(reminder_id)
@@ -279,7 +303,7 @@ class ReminderSkill(BaseSkill):
                 "schedule_type": schedule_type,
                 "schedule_value": schedule_value,
                 "human_readable": schedule_value,
-                "timezone": "UTC",
+                "timezone": self._default_timezone_name(),
             }
 
         prompt = (
@@ -293,14 +317,26 @@ class ReminderSkill(BaseSkill):
                 "schedule_type": schedule_type,
                 "schedule_value": schedule_value,
                 "human_readable": schedule_value,
-                "timezone": "UTC",
+                "timezone": self._default_timezone_name(),
             }
         return {
             "schedule_type": str(parsed.get("schedule_type") or schedule_type),
             "schedule_value": str(parsed.get("schedule_value") or schedule_value),
             "human_readable": str(parsed.get("human_readable") or schedule_value),
-            "timezone": str(parsed.get("timezone") or "UTC"),
+            "timezone": str(parsed.get("timezone") or self._default_timezone_name()),
         }
+
+    def _parse_confirm(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "y", "ok", "confirm", "confirmed"}:
+                return True
+            return False
+        if isinstance(value, (int, float)):
+            return value != 0
+        return False
 
     def _parse_duration(self, raw: str) -> timedelta | None:
         lowered = raw.strip().lower()
@@ -339,3 +375,16 @@ class ReminderSkill(BaseSkill):
         except (TypeError, ValueError):
             return None
         return value if value > 0 else None
+
+    def _default_timezone_name(self) -> str:
+        value = getattr(self.scheduler, "default_timezone", None)
+        if not isinstance(value, str):
+            return "UTC"
+        cleaned = value.strip()
+        return cleaned if cleaned else "UTC"
+
+    def _default_timezone(self) -> ZoneInfo:
+        try:
+            return ZoneInfo(self._default_timezone_name())
+        except ZoneInfoNotFoundError:
+            return ZoneInfo("UTC")

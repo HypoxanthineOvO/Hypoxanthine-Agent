@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import datetime
+import os
 from pathlib import Path
 from urllib import request as urllib_request
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -23,15 +25,15 @@ class SchedulerService:
         structured_store: Any,
         event_queue: EventQueue,
         default_session_id: str = "main",
-        default_timezone: str = "UTC",
+        default_timezone: str | None = None,
         model_router: Any | None = None,
     ) -> None:
         self.structured_store = structured_store
         self.event_queue = event_queue
         self.default_session_id = default_session_id
-        self.default_timezone = default_timezone
+        self.default_timezone = self._resolve_timezone_name(default_timezone)
         self.model_router = model_router
-        self._scheduler = AsyncIOScheduler(timezone=default_timezone)
+        self._scheduler = AsyncIOScheduler(timezone=self.default_timezone)
         self._running = False
 
     @property
@@ -54,7 +56,15 @@ class SchedulerService:
     async def reload_active_jobs(self) -> None:
         reminders = await self.structured_store.list_reminders(status="active")
         for reminder in reminders:
-            await self.register_reminder_job(reminder)
+            try:
+                await self.register_reminder_job(reminder)
+            except Exception:
+                logger.exception(
+                    "scheduler.restore.failed",
+                    reminder_id=reminder.get("id"),
+                    schedule_type=reminder.get("schedule_type"),
+                    schedule_value=reminder.get("schedule_value"),
+                )
 
     async def register_reminder_job(self, reminder: dict[str, Any]) -> None:
         reminder_id = int(reminder["id"])
@@ -73,6 +83,19 @@ class SchedulerService:
             next_run = getattr(job, "next_run_time", None)
             next_run_iso = next_run.isoformat() if isinstance(next_run, datetime) else None
             await self.structured_store.set_reminder_next_run_at(reminder_id, next_run_iso)
+            logger.info(
+                "scheduler.job_registered",
+                reminder_id=reminder_id,
+                trigger_time=next_run_iso,
+                timezone=str(getattr(next_run, "tzinfo", None) or self.default_timezone),
+            )
+        else:
+            logger.info(
+                "scheduler.job_registered",
+                reminder_id=reminder_id,
+                trigger_time=None,
+                timezone=self.default_timezone,
+            )
 
     async def remove_reminder_job(self, reminder_id: int) -> None:
         self._remove_job_if_exists(self._job_id(reminder_id))
@@ -161,7 +184,7 @@ class SchedulerService:
         if schedule_type == "once":
             run_at = datetime.fromisoformat(schedule_value)
             if run_at.tzinfo is None:
-                run_at = run_at.replace(tzinfo=UTC)
+                run_at = run_at.replace(tzinfo=self._timezone_obj())
             return DateTrigger(run_date=run_at)
         if schedule_type == "cron":
             expression, timezone = self.parse_cron_schedule(
@@ -333,3 +356,30 @@ class SchedulerService:
 
     def _job_id(self, reminder_id: int) -> str:
         return f"reminder:{reminder_id}"
+
+    def _timezone_obj(self) -> ZoneInfo:
+        try:
+            return ZoneInfo(self.default_timezone)
+        except ZoneInfoNotFoundError:
+            return ZoneInfo("UTC")
+
+    def _resolve_timezone_name(self, configured: str | None) -> str:
+        candidates = [
+            configured,
+            os.getenv("HYPO_AGENT_TIMEZONE"),
+            os.getenv("TZ"),
+            "Asia/Shanghai",
+            "UTC",
+        ]
+        for item in candidates:
+            if not item:
+                continue
+            value = str(item).strip()
+            if not value:
+                continue
+            try:
+                ZoneInfo(value)
+            except ZoneInfoNotFoundError:
+                continue
+            return value
+        return "UTC"

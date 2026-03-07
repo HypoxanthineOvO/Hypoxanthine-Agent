@@ -441,10 +441,15 @@ class ChatPipeline:
             await result
 
     async def _consume_event_loop(self) -> None:
+        logger.info("event_consumer.started")
         assert self.event_queue is not None
         while True:
             event: dict[str, Any] = await self.event_queue.get()
             try:
+                logger.info(
+                    "event_consumer.processing",
+                    event_type=event.get("event_type"),
+                )
                 message = self._event_to_message(event)
                 if message is None:
                     continue

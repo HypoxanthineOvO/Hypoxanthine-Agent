@@ -200,6 +200,28 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
     )
 
 
+def _ensure_pipeline_lifecycle_hooks(pipeline_obj: Any) -> None:
+    for method_name in ("start_event_consumer", "stop_event_consumer"):
+        method = getattr(pipeline_obj, method_name, None)
+        if method is None:
+            async def _noop() -> None:
+                return None
+
+            setattr(pipeline_obj, method_name, _noop)
+            continue
+        if inspect.iscoroutinefunction(method):
+            continue
+        if callable(method):
+            bound_method = method
+
+            async def _wrapped(_bound_method=bound_method) -> None:
+                result = _bound_method()
+                if inspect.isawaitable(result):
+                    await result
+
+            setattr(pipeline_obj, method_name, _wrapped)
+
+
 def create_app(
     auth_token: str,
     pipeline: ChatPipeline | None = None,
@@ -230,27 +252,20 @@ def create_app(
         )
 
     pipeline_instance = pipeline or _build_default_pipeline(resolved_deps)
+    _ensure_pipeline_lifecycle_hooks(pipeline_instance)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await resolved_deps.structured_store.init()
-        starter = getattr(pipeline_instance, "start_event_consumer", None)
-        if starter is not None:
-            result = starter()
-            if inspect.isawaitable(result):
-                await result
         if resolved_deps.scheduler is not None:
             await resolved_deps.scheduler.start()
+        await app.state.pipeline.start_event_consumer()
         try:
             yield
         finally:
+            await app.state.pipeline.stop_event_consumer()
             if resolved_deps.scheduler is not None:
                 await resolved_deps.scheduler.stop()
-            stopper = getattr(pipeline_instance, "stop_event_consumer", None)
-            if stopper is not None:
-                result = stopper()
-                if inspect.isawaitable(result):
-                    await result
 
     app = FastAPI(title="Hypo-Agent Gateway", lifespan=lifespan)
     app.add_middleware(
@@ -285,9 +300,10 @@ def create_app(
     app.state.push_ws_message = push_ws_message
     setattr(app.state.pipeline, "on_proactive_message", on_proactive_message)
 
-    def reload_config() -> None:
+    async def reload_config() -> None:
         settings = load_gateway_settings()
         deps = app.state.deps
+        previous_pipeline = app.state.pipeline
         deps.permission_manager = PermissionManager(settings.security.directory_whitelist)
         deps.circuit_breaker = CircuitBreaker(settings.security.circuit_breaker)
         deps.skill_manager = SkillManager(
@@ -303,13 +319,16 @@ def create_app(
         )
 
         deps.output_compressor = None
+        await previous_pipeline.stop_event_consumer()
         app.state.auth_token = settings.auth_token
         app.state.permission_manager = deps.permission_manager
         app.state.circuit_breaker = deps.circuit_breaker
         app.state.skill_manager = deps.skill_manager
         app.state.pipeline = _build_default_pipeline(deps)
+        _ensure_pipeline_lifecycle_hooks(app.state.pipeline)
         setattr(app.state.pipeline, "on_proactive_message", on_proactive_message)
         app.state.output_compressor = deps.output_compressor
+        await app.state.pipeline.start_event_consumer()
 
     resolved_deps.reload_config = reload_config
     app.state.reload_config = reload_config

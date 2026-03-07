@@ -134,6 +134,35 @@ def test_create_reminder_preview_uses_lightweight_parser() -> None:
     asyncio.run(_run())
 
 
+def test_create_reminder_preview_does_not_persist_when_confirm_is_string_false() -> None:
+    async def _run() -> None:
+        router = StubRouter()
+        store = StubStore()
+        scheduler = StubScheduler()
+        skill = ReminderSkill(
+            structured_store=store,
+            scheduler=scheduler,
+            model_router=router,
+        )
+        result = await skill.execute(
+            "create_reminder",
+            {
+                "title": "字符串确认值",
+                "description": "测试",
+                "schedule_type": "once",
+                "schedule_value": "明天下午三点",
+                "confirm": "false",
+            },
+        )
+
+        assert result.status == "success"
+        assert result.result["requires_confirmation"] is True
+        assert store.created == []
+        assert scheduler.registered == []
+
+    asyncio.run(_run())
+
+
 def test_create_reminder_confirm_persists_and_registers_scheduler_job() -> None:
     async def _run() -> None:
         router = StubRouter()
@@ -258,3 +287,14 @@ def test_update_reminder_paused_removes_scheduler_job() -> None:
         assert scheduler.has_job(reminder_id) is False
 
     asyncio.run(_run())
+
+
+def test_create_reminder_tool_schedule_value_description_mentions_iso8601() -> None:
+    skill = ReminderSkill(
+        structured_store=StubStore(),
+        scheduler=StubScheduler(),
+        model_router=StubRouter(),
+    )
+    create_tool = next(tool for tool in skill.tools if tool["function"]["name"] == "create_reminder")
+    description = create_tool["function"]["parameters"]["properties"]["schedule_value"]["description"]
+    assert "ISO 8601" in description
