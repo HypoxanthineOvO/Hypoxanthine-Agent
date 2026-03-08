@@ -182,6 +182,63 @@ def test_pipeline_stream_reply_runs_tool_and_emits_tool_events() -> None:
     assert skills.calls[0][1]["command"] == "echo hi"
 
 
+def test_pipeline_stream_reply_sends_humanized_tool_status_messages() -> None:
+    memory = StubSessionMemory()
+    skills = StubSkillManager()
+    pushed: list[Message] = []
+
+    async def on_proactive_message(message: Message) -> None:
+        pushed.append(message)
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "create_reminder",
+                                "arguments": "{\"title\":\"x\",\"schedule_type\":\"once\",\"schedule_value\":\"2026-03-08T15:00:00+08:00\"}",
+                            },
+                        }
+                    ],
+                }
+            return {"text": "done", "tool_calls": []}
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            del model_name, messages, session_id, tools
+            raise AssertionError("stream should not be called")
+            yield ""  # pragma: no cover
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skills,
+        on_proactive_message=on_proactive_message,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="run", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+    assert events[-1]["type"] == "assistant_done"
+    assert len(pushed) == 2
+    assert pushed[0].text == "🔔 正在创建提醒..."
+    assert pushed[1].text == "✅ 提醒创建成功"
+    assert pushed[0].message_tag == "tool_status"
+    assert pushed[0].metadata["ephemeral"] is True
+
+
 def test_pipeline_stream_reply_respects_max_react_rounds() -> None:
     memory = StubSessionMemory()
     skills = StubSkillManager()

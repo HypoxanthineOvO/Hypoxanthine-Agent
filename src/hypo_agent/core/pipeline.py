@@ -22,6 +22,49 @@ TOOL_USE_SYSTEM_PROMPT = (
     "Always prefer using tools over explaining what you would do."
 )
 
+TOOL_STATUS_TEMPLATES: dict[str, dict[str, str]] = {
+    "create_reminder": {
+        "start": "🔔 正在创建提醒...",
+        "ok": "✅ 提醒创建成功",
+        "fail": "❌ 创建提醒失败：{error}",
+    },
+    "list_reminders": {
+        "start": "📋 正在查询提醒列表...",
+        "ok": "📋 提醒列表已获取",
+        "fail": "❌ 查询提醒失败：{error}",
+    },
+    "delete_reminder": {
+        "start": "🗑️ 正在删除提醒...",
+        "ok": "✅ 提醒已删除",
+        "fail": "❌ 删除提醒失败：{error}",
+    },
+    "update_reminder": {
+        "start": "✏️ 正在更新提醒...",
+        "ok": "✅ 提醒已更新",
+        "fail": "❌ 更新提醒失败：{error}",
+    },
+    "snooze_reminder": {
+        "start": "💤 正在延后提醒...",
+        "ok": "✅ 提醒已延后",
+        "fail": "❌ 延后提醒失败：{error}",
+    },
+    "run_code": {
+        "start": "⚡ 正在执行代码...",
+        "ok": "✅ 代码执行完成",
+        "fail": "❌ 代码执行失败：{error}",
+    },
+    "web_search": {
+        "start": "🔍 正在搜索...",
+        "ok": "🔍 搜索完成",
+        "fail": "❌ 搜索失败：{error}",
+    },
+    "_default": {
+        "start": "⏳ 正在处理...",
+        "ok": "✅ 处理完成",
+        "fail": "❌ 处理失败：{error}",
+    },
+}
+
 
 class ChatModelRouter(Protocol):
     async def call(
@@ -227,6 +270,11 @@ class ChatPipeline:
                     tool_name = self._extract_tool_name(tool_call)
                     tool_call_id = str(tool_call.get("id") or "")
                     arguments = self._parse_tool_arguments(tool_call)
+                    await self._send_tool_status(
+                        tool_name=tool_name,
+                        status="start",
+                        session_id=inbound.session_id,
+                    )
                     yield self._format_event(
                         event_type="tool_call_start",
                         response=RichResponse(
@@ -241,11 +289,34 @@ class ChatPipeline:
                         session_id=inbound.session_id,
                     )
 
-                    output = await self.skill_manager.invoke(
-                        tool_name,
-                        arguments,
-                        session_id=inbound.session_id,
-                    )
+                    try:
+                        output = await self.skill_manager.invoke(
+                            tool_name,
+                            arguments,
+                            session_id=inbound.session_id,
+                        )
+                    except Exception as exc:
+                        await self._send_tool_status(
+                            tool_name=tool_name,
+                            status="fail",
+                            session_id=inbound.session_id,
+                            error=str(exc),
+                        )
+                        raise
+
+                    if output.status == "success":
+                        await self._send_tool_status(
+                            tool_name=tool_name,
+                            status="ok",
+                            session_id=inbound.session_id,
+                        )
+                    else:
+                        await self._send_tool_status(
+                            tool_name=tool_name,
+                            status="fail",
+                            session_id=inbound.session_id,
+                            error=output.error_info,
+                        )
                     serialized_output = json.dumps(
                         output.model_dump(mode="json"),
                         ensure_ascii=False,
@@ -439,6 +510,37 @@ class ChatPipeline:
         )
         if inspect.isawaitable(result):
             await result
+
+    async def _send_tool_status(
+        self,
+        *,
+        tool_name: str,
+        status: str,
+        session_id: str,
+        error: str = "",
+    ) -> None:
+        callback = self.on_proactive_message
+        if callback is None:
+            return
+
+        templates = TOOL_STATUS_TEMPLATES.get(tool_name) or TOOL_STATUS_TEMPLATES["_default"]
+        template = templates.get(status)
+        if not template:
+            return
+        text = template.format(error=error)
+        if not text:
+            return
+
+        status_message = Message(
+            text=text,
+            sender="assistant",
+            session_id=session_id,
+            message_tag="tool_status",
+            metadata={"ephemeral": True},
+        )
+        callback_result = callback(status_message)
+        if inspect.isawaitable(callback_result):
+            await callback_result
 
     async def _consume_event_loop(self) -> None:
         logger.info("event_consumer.started")

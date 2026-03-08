@@ -8,6 +8,7 @@ from urllib import request as urllib_request
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from apscheduler.events import EVENT_JOB_MISSED, JobEvent
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
@@ -27,13 +28,16 @@ class SchedulerService:
         default_session_id: str = "main",
         default_timezone: str | None = None,
         model_router: Any | None = None,
+        misfire_grace_time_seconds: int = 30,
     ) -> None:
         self.structured_store = structured_store
         self.event_queue = event_queue
         self.default_session_id = default_session_id
         self.default_timezone = self._resolve_timezone_name(default_timezone)
         self.model_router = model_router
+        self._misfire_grace_time_seconds = max(1, int(misfire_grace_time_seconds))
         self._scheduler = AsyncIOScheduler(timezone=self.default_timezone)
+        self._scheduler.add_listener(self._on_job_missed, EVENT_JOB_MISSED)
         self._running = False
 
     @property
@@ -46,6 +50,7 @@ class SchedulerService:
         self._scheduler.start()
         self._running = True
         await self.reload_active_jobs()
+        await self._sweep_expired_once_reminders()
 
     async def stop(self) -> None:
         if not self._running:
@@ -77,6 +82,7 @@ class SchedulerService:
             id=job_id,
             replace_existing=True,
             kwargs={"reminder_id": reminder_id},
+            misfire_grace_time=self._misfire_grace_time_seconds,
         )
         job = self._scheduler.get_job(job_id)
         if job is not None and hasattr(self.structured_store, "set_reminder_next_run_at"):
@@ -102,6 +108,27 @@ class SchedulerService:
 
     def has_job(self, reminder_id: int) -> bool:
         return self._scheduler.get_job(self._job_id(reminder_id)) is not None
+
+    async def _sweep_expired_once_reminders(self) -> None:
+        active_reminders = await self.structured_store.list_reminders(status="active")
+        now = datetime.now(tz=self._timezone_obj())
+        for reminder in active_reminders:
+            if str(reminder.get("schedule_type") or "").lower() != "once":
+                continue
+            reminder_id = int(reminder.get("id") or 0)
+            if reminder_id <= 0:
+                continue
+            trigger_time = self._parse_once_schedule(
+                schedule_value=str(reminder.get("schedule_value") or "").strip()
+            )
+            if trigger_time is None:
+                continue
+            if trigger_time < now:
+                await self._mark_reminder_missed(
+                    reminder_id=reminder_id,
+                    trigger_time=trigger_time.isoformat(),
+                    source="expired_sweep",
+                )
 
     @staticmethod
     def parse_cron_schedule(
@@ -182,9 +209,9 @@ class SchedulerService:
         schedule_type = str(reminder.get("schedule_type") or "").lower()
         schedule_value = str(reminder.get("schedule_value") or "").strip()
         if schedule_type == "once":
-            run_at = datetime.fromisoformat(schedule_value)
-            if run_at.tzinfo is None:
-                run_at = run_at.replace(tzinfo=self._timezone_obj())
+            run_at = self._parse_once_schedule(schedule_value=schedule_value)
+            if run_at is None:
+                raise ValueError("Invalid once schedule_value")
             return DateTrigger(run_date=run_at)
         if schedule_type == "cron":
             expression, timezone = self.parse_cron_schedule(
@@ -193,6 +220,25 @@ class SchedulerService:
             )
             return CronTrigger.from_crontab(expression, timezone=timezone)
         raise ValueError(f"Unsupported schedule_type '{schedule_type}'")
+
+    def _on_job_missed(self, event: JobEvent) -> None:
+        reminder_id = self._reminder_id_from_job_id(str(getattr(event, "job_id", "") or ""))
+        if reminder_id is None:
+            return
+
+        logger.warning("scheduler.job_missed_event", reminder_id=reminder_id, job_id=event.job_id)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(
+            self._mark_reminder_missed(
+                reminder_id=reminder_id,
+                trigger_time=None,
+                source="job_missed_event",
+            )
+        )
+        task.add_done_callback(self._log_background_task_error)
 
     async def _run_heartbeat_prechecks(
         self,
@@ -356,6 +402,69 @@ class SchedulerService:
 
     def _job_id(self, reminder_id: int) -> str:
         return f"reminder:{reminder_id}"
+
+    def _reminder_id_from_job_id(self, job_id: str) -> int | None:
+        if not job_id.startswith("reminder:"):
+            return None
+        raw = job_id.split(":", maxsplit=1)[1]
+        try:
+            reminder_id = int(raw)
+        except ValueError:
+            return None
+        return reminder_id if reminder_id > 0 else None
+
+    def _parse_once_schedule(self, *, schedule_value: str) -> datetime | None:
+        if not schedule_value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(schedule_value)
+        except ValueError:
+            logger.warning("scheduler.invalid_once_schedule", schedule_value=schedule_value)
+            return None
+        timezone = self._timezone_obj()
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone)
+        return parsed.astimezone(timezone)
+
+    async def _mark_reminder_missed(
+        self,
+        *,
+        reminder_id: int,
+        trigger_time: str | None,
+        source: str,
+    ) -> None:
+        reminder: dict[str, Any] | None = None
+        if hasattr(self.structured_store, "get_reminder"):
+            reminder = await self.structured_store.get_reminder(reminder_id)
+        if reminder is None:
+            return
+        if str(reminder.get("schedule_type") or "").strip().lower() != "once":
+            return
+        if str(reminder.get("status") or "").strip().lower() != "active":
+            return
+
+        if hasattr(self.structured_store, "update_reminder"):
+            await self.structured_store.update_reminder(
+                reminder_id,
+                status="missed",
+            )
+        if hasattr(self.structured_store, "set_reminder_next_run_at"):
+            await self.structured_store.set_reminder_next_run_at(reminder_id, None)
+        self._remove_job_if_exists(self._job_id(reminder_id))
+        logger.info(
+            "scheduler.expired_sweep",
+            reminder_id=reminder_id,
+            was_scheduled=trigger_time,
+            source=source,
+        )
+
+    def _log_background_task_error(self, task: asyncio.Task[Any]) -> None:
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is None:
+            return
+        logger.exception("scheduler.background_task_failed", error=str(error))
 
     def _timezone_obj(self) -> ZoneInfo:
         try:

@@ -10,3 +10,4 @@ skills:
     enabled: true
   reminder:
     enabled: true
+    auto_confirm: true

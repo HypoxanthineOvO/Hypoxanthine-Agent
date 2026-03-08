@@ -58,6 +58,7 @@ skills:
     assert deps.skill_manager._skills["filesystem"].permission_manager is deps.permission_manager
     assert deps.skill_manager._skills["reminder"].structured_store is deps.structured_store
     assert deps.skill_manager._skills["reminder"].scheduler is deps.scheduler
+    assert deps.skill_manager._skills["reminder"].auto_confirm is True
     assert deps.event_queue is not None
     assert deps.scheduler is not None
 

@@ -49,6 +49,21 @@ def test_message_accepts_optional_message_tag(fixed_timestamp):
     assert restored.message_tag == "reminder"
 
 
+def test_message_accepts_tool_status_tag_and_metadata(fixed_timestamp):
+    message = Message(
+        text="正在创建提醒",
+        sender="assistant",
+        timestamp=fixed_timestamp,
+        session_id="main",
+        message_tag="tool_status",
+        metadata={"ephemeral": True},
+    )
+    payload = message.model_dump_json()
+    restored = Message.model_validate_json(payload)
+    assert restored.message_tag == "tool_status"
+    assert restored.metadata["ephemeral"] is True
+
+
 def test_reminder_models_validate_once_and_heartbeat_checks():
     heartbeat = HeartbeatCheck(
         check_type="http_status",

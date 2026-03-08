@@ -73,8 +73,10 @@ def _register_enabled_skills(
     per_skill = skills_payload.get("skills", {})
     tmux_cfg = per_skill.get("tmux", {}) if isinstance(per_skill, dict) else {}
     code_run_cfg = per_skill.get("code_run", {}) if isinstance(per_skill, dict) else {}
+    reminder_cfg = per_skill.get("reminder", {}) if isinstance(per_skill, dict) else {}
     tmux_timeout = int(tmux_cfg.get("timeout_seconds", default_timeout))
     code_run_timeout = int(code_run_cfg.get("timeout_seconds", default_timeout))
+    auto_confirm = bool(reminder_cfg.get("auto_confirm", True))
 
     if "tmux" in enabled_skills:
         skill_manager.register(TmuxSkill(default_timeout_seconds=tmux_timeout))
@@ -101,6 +103,7 @@ def _register_enabled_skills(
                 structured_store=structured_store,
                 scheduler=scheduler,
                 model_router=model_router,
+                auto_confirm=auto_confirm,
             )
         )
 

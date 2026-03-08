@@ -36,7 +36,7 @@ class SlashStructuredStore(Protocol):
     async def list_reminders(
         self,
         *,
-        status: str | None = "active",
+        status: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
 
@@ -108,7 +108,7 @@ class SlashCommandHandler:
             ),
             SlashCommandEntry(
                 command="/reminders",
-                description="列出当前活跃提醒",
+                description="列出提醒（可选状态：active/paused/completed/missed）",
                 handler=self._handle_reminders,
             ),
         ]
@@ -120,6 +120,8 @@ class SlashCommandHandler:
 
         command = " ".join(raw.split())
         command_lower = command.lower()
+        if command_lower == "/reminders" or command_lower.startswith("/reminders "):
+            return await self._handle_reminders(inbound)
 
         sorted_entries = sorted(
             self._registry,
@@ -313,18 +315,42 @@ class SlashCommandHandler:
         lines.extend(["", f"⚡ Kill Switch: {'开启' if global_kill else '关闭'}"])
         return "\n".join(lines)
 
-    async def _handle_reminders(self, _: Message) -> str:
-        rows = await self.structured_store.list_reminders(status="active")
-        if not rows:
-            return "暂无活跃提醒。"
+    async def _handle_reminders(self, inbound: Message) -> str:
+        status_filter: str | None = None
+        parts = (inbound.text or "").strip().split()
+        if len(parts) >= 2:
+            requested = parts[1].strip().lower()
+            if requested not in {"all", "*"}:
+                status_filter = requested
 
-        lines = ["活跃提醒："]
+        rows = await self.structured_store.list_reminders(status=status_filter)
+        if not rows:
+            if status_filter:
+                return f"暂无状态为 {status_filter} 的提醒。"
+            return "暂无提醒。"
+
+        header = "提醒列表："
+        if status_filter:
+            header = f"提醒列表（{status_filter}）："
+        lines = [header]
         for row in rows:
+            status = str(row.get("status") or "").strip().lower()
+            badge = self._reminder_status_badge(status)
             lines.append(
-                f"- #{row.get('id')} {row.get('title', '')} "
+                f"- #{row.get('id')} {badge} {row.get('title', '')} "
                 f"({row.get('schedule_type', '')}: {row.get('schedule_value', '')})"
             )
         return "\n".join(lines)
+
+    def _reminder_status_badge(self, status: str) -> str:
+        mapping = {
+            "active": "🟢 active",
+            "completed": "✅ completed",
+            "missed": "⏰ missed",
+            "paused": "⏸️ paused",
+            "deleted": "🗑️ deleted",
+        }
+        return mapping.get(status, f"❔ {status or 'unknown'}")
 
     def _format_token(self, value: Any) -> str:
         if value is None:

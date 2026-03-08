@@ -353,15 +353,30 @@ def test_structured_store_list_reminders_filters_status(tmp_path) -> None:
             next_run_at="2026-03-07T09:00:00+00:00",
             heartbeat_config=None,
         )
+        await store.create_reminder(
+            title="C",
+            description="",
+            schedule_type="once",
+            schedule_value="2026-03-07T10:00:00+00:00",
+            channel="all",
+            status="deleted",
+            next_run_at=None,
+            heartbeat_config=None,
+        )
 
         active = await store.list_reminders(status="active")
         paused = await store.list_reminders(status="paused")
         all_rows = await store.list_reminders(status=None)
+        active_upper = await store.list_reminders(status="ACTIVE")
+        all_by_keyword = await store.list_reminders(status="all")
 
         assert len(active) == 1
         assert active[0]["title"] == "A"
         assert len(paused) == 1
         assert paused[0]["title"] == "B"
         assert len(all_rows) == 2
+        assert len(active_upper) == 1
+        assert active_upper[0]["title"] == "A"
+        assert len(all_by_keyword) == 2
 
     asyncio.run(_run())

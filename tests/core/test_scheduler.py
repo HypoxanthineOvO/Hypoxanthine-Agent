@@ -11,6 +11,7 @@ class StubStore:
         self.reminders = reminders or []
         self.list_calls: list[str | None] = []
         self.completed: list[int] = []
+        self.updated: list[tuple[int, dict]] = []
 
     async def list_reminders(self, *, status: str | None = "active") -> list[dict]:
         self.list_calls.append(status)
@@ -29,6 +30,12 @@ class StubStore:
         for item in self.reminders:
             if int(item.get("id", 0)) == int(reminder_id):
                 item["status"] = "completed"
+
+    async def update_reminder(self, reminder_id: int, **kwargs) -> None:
+        self.updated.append((reminder_id, dict(kwargs)))
+        for item in self.reminders:
+            if int(item.get("id", 0)) == int(reminder_id):
+                item.update(kwargs)
 
     async def set_reminder_next_run_at(self, reminder_id: int, next_run_at: str | None) -> None:
         for item in self.reminders:
@@ -78,7 +85,7 @@ def test_scheduler_start_rebuilds_active_reminders() -> None:
         )
         await service.start()
 
-        assert store.list_calls == ["active"]
+        assert store.list_calls == ["active", "active"]
         assert service.has_job(1) is True
         assert service.has_job(2) is True
 
@@ -175,6 +182,72 @@ def test_scheduler_enqueues_reminder_event_on_trigger() -> None:
         assert event["session_id"] == "main"
         assert store.completed == [10]
         assert store.reminders[0]["status"] == "completed"
+
+    asyncio.run(_run())
+
+
+def test_scheduler_marks_past_once_reminders_as_missed_on_start() -> None:
+    async def _run() -> None:
+        store = StubStore(
+            [
+                {
+                    "id": 11,
+                    "title": "过期提醒",
+                    "description": "",
+                    "schedule_type": "once",
+                    "schedule_value": "2000-01-01T00:00:00+08:00",
+                    "status": "active",
+                    "channel": "all",
+                }
+            ]
+        )
+        service = SchedulerService(
+            structured_store=store,
+            event_queue=EventQueue(),
+            default_timezone="Asia/Shanghai",
+        )
+        await service.start()
+
+        row = await store.get_reminder(11)
+        assert row is not None
+        assert row["status"] == "missed"
+        assert service.has_job(11) is False
+
+        await service.stop()
+
+    asyncio.run(_run())
+
+
+def test_scheduler_job_missed_marks_once_reminder_missed() -> None:
+    async def _run() -> None:
+        store = StubStore(
+            [
+                {
+                    "id": 12,
+                    "title": "错过提醒",
+                    "description": "",
+                    "schedule_type": "once",
+                    "schedule_value": "2099-01-01T00:00:00+08:00",
+                    "status": "active",
+                    "channel": "all",
+                }
+            ]
+        )
+        service = SchedulerService(
+            structured_store=store,
+            event_queue=EventQueue(),
+            misfire_grace_time_seconds=1,
+        )
+        await service.start()
+        service._on_job_missed(type("Event", (), {"job_id": "reminder:12"})())
+        await asyncio.sleep(0.05)
+
+        row = await store.get_reminder(12)
+        assert row is not None
+        assert row["status"] == "missed"
+        assert service.has_job(12) is False
+
+        await service.stop()
 
     asyncio.run(_run())
 

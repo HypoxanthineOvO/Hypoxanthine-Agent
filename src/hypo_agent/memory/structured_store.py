@@ -576,7 +576,7 @@ class StructuredStore:
     async def list_reminders(
         self,
         *,
-        status: str | None = "active",
+        status: str | None = None,
     ) -> list[dict[str, Any]]:
         await self.init()
         async with aiosqlite.connect(self.db_path) as db:
@@ -597,9 +597,18 @@ class StructuredStore:
                 FROM reminders
             """
             params: tuple[Any, ...] = ()
-            if status is not None:
-                query += " WHERE status = ?"
-                params = (status,)
+            status_filter = (
+                str(status).strip().lower()
+                if status is not None
+                else None
+            )
+            if status_filter in {"", "all"}:
+                status_filter = None
+            if status_filter is None:
+                query += " WHERE LOWER(TRIM(status)) != 'deleted'"
+            else:
+                query += " WHERE LOWER(TRIM(status)) = ?"
+                params = (status_filter,)
             query += " ORDER BY id DESC"
             async with db.execute(query, params) as cursor:
                 rows = await cursor.fetchall()

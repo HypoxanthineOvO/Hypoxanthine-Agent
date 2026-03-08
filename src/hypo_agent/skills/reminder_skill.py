@@ -21,57 +21,74 @@ class ReminderSkill(BaseSkill):
         structured_store: Any,
         scheduler: Any,
         model_router: Any | None = None,
+        auto_confirm: bool = True,
     ) -> None:
         self.structured_store = structured_store
         self.scheduler = scheduler
         self.model_router = model_router
+        self.auto_confirm = bool(auto_confirm)
 
     @property
     def tools(self) -> list[dict[str, Any]]:
+        create_params: dict[str, Any] = {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "schedule_type": {"type": "string", "enum": ["once", "cron"]},
+                "schedule_value": {
+                    "type": "string",
+                    "description": (
+                        'For schedule_type="once": an ISO 8601 datetime string in '
+                        'the user local timezone (e.g. "2026-03-07T19:51:00"). '
+                        'Do NOT use relative expressions like "+1 minute" or "+30m" - '
+                        "calculate an absolute datetime first. "
+                        'For schedule_type="cron": a standard cron expression, '
+                        'optionally prefixed with CRON_TZ=<timezone> '
+                        '(e.g. "CRON_TZ=Asia/Shanghai 30 9 * * *").'
+                    ),
+                },
+                "channel": {"type": "string", "default": "all"},
+                "heartbeat_config": {"type": "array"},
+            },
+            "required": ["title", "schedule_type", "schedule_value"],
+        }
+        create_description = "Create and schedule a reminder immediately."
+        if not self.auto_confirm:
+            create_params["properties"]["confirm"] = {"type": "boolean", "default": False}
+            create_description = (
+                "Create a reminder. confirm=false returns parsed schedule preview; "
+                "confirm=true persists and schedules it."
+            )
+
         return [
             {
                 "type": "function",
                 "function": {
                     "name": "create_reminder",
-                    "description": (
-                        "Create a reminder. confirm=false returns parsed schedule preview; "
-                        "confirm=true persists and schedules it."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string"},
-                            "description": {"type": "string"},
-                            "schedule_type": {"type": "string", "enum": ["once", "cron"]},
-                            "schedule_value": {
-                                "type": "string",
-                                "description": (
-                                    'For schedule_type="once": an ISO 8601 datetime string in '
-                                    'the user local timezone (e.g. "2026-03-07T19:51:00"). '
-                                    'Do NOT use relative expressions like "+1 minute" or "+30m"; '
-                                    "calculate an absolute datetime first. "
-                                    'For schedule_type="cron": a standard cron expression, '
-                                    'optionally prefixed with CRON_TZ=<timezone> '
-                                    '(e.g. "CRON_TZ=Asia/Shanghai 30 9 * * *").'
-                                ),
-                            },
-                            "channel": {"type": "string", "default": "all"},
-                            "heartbeat_config": {"type": "array"},
-                            "confirm": {"type": "boolean", "default": False},
-                        },
-                        "required": ["title", "schedule_type", "schedule_value"],
-                    },
+                    "description": create_description,
+                    "parameters": create_params,
                 },
             },
             {
                 "type": "function",
                 "function": {
                     "name": "list_reminders",
-                    "description": "List reminders by status.",
+                    "description": (
+                        "List reminders. Default returns all non-deleted reminders "
+                        "(active/completed/missed/paused)."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "status": {"type": "string", "default": "active"},
+                            "status": {
+                                "type": "string",
+                                "description": (
+                                    "Optional status filter: active, paused, completed, missed, "
+                                    "or deleted. Use all/omit to list all non-deleted reminders."
+                                ),
+                                "default": "all",
+                            },
                         },
                     },
                 },
@@ -106,7 +123,7 @@ class ReminderSkill(BaseSkill):
                             "channel": {"type": "string"},
                             "status": {
                                 "type": "string",
-                                "enum": ["active", "paused", "completed", "deleted"],
+                                "enum": ["active", "paused", "completed", "missed", "deleted"],
                             },
                             "next_run_at": {"type": "string"},
                             "heartbeat_config": {"type": "array"},
@@ -166,7 +183,7 @@ class ReminderSkill(BaseSkill):
         heartbeat_config = self._json_dumps_or_none(params.get("heartbeat_config"))
         confirm = self._parse_confirm(params.get("confirm", False))
 
-        if not confirm:
+        if not self.auto_confirm and not confirm:
             preview = await self._parse_schedule_preview(
                 schedule_type=schedule_type,
                 schedule_value=schedule_value,
@@ -215,8 +232,12 @@ class ReminderSkill(BaseSkill):
         )
 
     async def _list_reminders(self, params: dict[str, Any]) -> SkillOutput:
-        status = params.get("status", "active")
-        status_filter = str(status) if status is not None else None
+        status = params.get("status")
+        status_filter: str | None = None
+        if status is not None:
+            cleaned = str(status).strip().lower()
+            if cleaned and cleaned not in {"all", "*"}:
+                status_filter = cleaned
         rows = await self.structured_store.list_reminders(status=status_filter)
         return SkillOutput(status="success", result={"items": rows})
 

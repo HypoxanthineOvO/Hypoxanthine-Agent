@@ -14,7 +14,8 @@ class Message(BaseModel):
     file: str | None = None
     audio: str | None = None
     sender: str
-    message_tag: Literal["reminder", "heartbeat"] | None = None
+    message_tag: Literal["reminder", "heartbeat", "tool_status"] | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     session_id: str
 
@@ -133,7 +134,7 @@ class ReminderUpdate(BaseModel):
     schedule_type: Literal["once", "cron"] | None = None
     schedule_value: str | None = None
     channel: str | None = None
-    status: Literal["active", "paused", "completed", "deleted"] | None = None
+    status: Literal["active", "paused", "completed", "missed", "deleted"] | None = None
     next_run_at: str | None = None
     heartbeat_config: list[HeartbeatCheck] | None = None
 
@@ -147,7 +148,7 @@ class Reminder(BaseModel):
     schedule_type: Literal["once", "cron"]
     schedule_value: str
     channel: str = "all"
-    status: Literal["active", "paused", "completed", "deleted"] = "active"
+    status: Literal["active", "paused", "completed", "missed", "deleted"] = "active"
     created_at: str
     updated_at: str
     next_run_at: str | None = None
