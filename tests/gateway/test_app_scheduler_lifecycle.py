@@ -204,3 +204,43 @@ email_scan:
 
     with TestClient(app):
         assert scheduler.interval_jobs == [("heartbeat", 1)]
+
+
+def test_app_registers_email_scan_interval_job(tmp_path) -> None:
+    scheduler = RecordingScheduler()
+    pipeline = RecordingPipeline()
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "tasks.yaml").write_text(
+        """
+heartbeat:
+  enabled: false
+  interval_minutes: 1
+email_scan:
+  enabled: true
+  interval_minutes: 1
+""".strip(),
+        encoding="utf-8",
+    )
+
+    class DummyEmailScanner:
+        async def scheduled_scan(self) -> None:
+            return None
+
+    class DummySkillManager:
+        def __init__(self) -> None:
+            self._skills = {"email_scanner": DummyEmailScanner()}
+
+    deps = AppDeps(
+        session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+        structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        scheduler=scheduler,
+        event_queue=DummyEventQueue(),
+        skill_manager=DummySkillManager(),
+    )
+    app = create_app(auth_token="test-token", pipeline=pipeline, deps=deps)
+    app.state.config_dir = config_dir
+
+    with TestClient(app):
+        assert ("email_scan", 1) in scheduler.interval_jobs

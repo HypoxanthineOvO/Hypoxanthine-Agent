@@ -106,6 +106,23 @@ skills:
     assert enabled == {"tmux"}
 
 
+def test_skill_manager_loads_enabled_email_scanner_from_yaml(tmp_path) -> None:
+    config = tmp_path / "skills.yaml"
+    config.write_text(
+        """
+default_timeout_seconds: 30
+skills:
+  email_scanner:
+    enabled: true
+  tmux:
+    enabled: false
+""".strip(),
+        encoding="utf-8",
+    )
+    enabled = SkillManager.find_enabled_skills(config)
+    assert enabled == {"email_scanner"}
+
+
 def test_skill_manager_invoke_checks_circuit_breaker_before_execution() -> None:
     class BlockedCircuitBreaker:
         def can_execute(self, tool_name: str, session_id: str | None):

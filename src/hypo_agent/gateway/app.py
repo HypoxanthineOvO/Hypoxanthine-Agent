@@ -35,7 +35,13 @@ from hypo_agent.gateway.ws import broadcast_message, router as ws_router
 from hypo_agent.memory import SessionMemory, StructuredStore
 from hypo_agent.models import Message, SecurityConfig
 from hypo_agent.security import CircuitBreaker, PermissionManager
-from hypo_agent.skills import CodeRunSkill, FileSystemSkill, ReminderSkill, TmuxSkill
+from hypo_agent.skills import (
+    CodeRunSkill,
+    EmailScannerSkill,
+    FileSystemSkill,
+    ReminderSkill,
+    TmuxSkill,
+)
 
 
 @dataclass(slots=True)
@@ -58,6 +64,8 @@ def _register_enabled_skills(
     permission_manager: PermissionManager,
     structured_store: StructuredStore | None = None,
     scheduler: SchedulerService | None = None,
+    heartbeat_service: HeartbeatService | Any | None = None,
+    message_queue: EventQueue | Any | None = None,
     model_router: ModelRouter | None = None,
     skills_config_path: Path = Path("config/skills.yaml"),
 ) -> None:
@@ -110,6 +118,20 @@ def _register_enabled_skills(
             )
         )
 
+    if "email_scanner" in enabled_skills and structured_store is not None:
+        email_skill = EmailScannerSkill(
+            structured_store=structured_store,
+            model_router=model_router,
+            message_queue=message_queue,
+        )
+        skill_manager.register(email_skill)
+        if (
+            heartbeat_service is not None
+            and hasattr(heartbeat_service, "register_event_source")
+            and hasattr(email_skill, "_check_new_emails")
+        ):
+            heartbeat_service.register_event_source("email", email_skill._check_new_emails)
+
 
 def _default_security() -> SecurityConfig:
     return SecurityConfig.model_validate(
@@ -146,6 +168,8 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
         permission_manager=permission_manager,
         structured_store=structured_store,
         scheduler=scheduler,
+        heartbeat_service=heartbeat_service,
+        message_queue=event_queue,
     )
 
     return AppDeps(
@@ -191,6 +215,13 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
     )
     if reminder_skill is not None and hasattr(reminder_skill, "model_router"):
         reminder_skill.model_router = router
+    email_skill = (
+        deps.skill_manager._skills.get("email_scanner")  # type: ignore[attr-defined]
+        if deps.skill_manager is not None and hasattr(deps.skill_manager, "_skills")
+        else None
+    )
+    if email_skill is not None and hasattr(email_skill, "model_router"):
+        email_skill.model_router = router
     if deps.output_compressor is None:
         deps.output_compressor = OutputCompressor(router=router)
     chat_model = router.get_model_for_task("chat")
@@ -298,6 +329,19 @@ def create_app(
                             tasks_cfg.heartbeat.interval_minutes,
                             resolved_deps.heartbeat_service.run,
                         )
+                    if (
+                        tasks_cfg.email_scan.enabled
+                        and resolved_deps.skill_manager is not None
+                        and hasattr(resolved_deps.skill_manager, "_skills")
+                        and hasattr(resolved_deps.scheduler, "register_interval_job")
+                    ):
+                        email_skill = resolved_deps.skill_manager._skills.get("email_scanner")
+                        if email_skill is not None and hasattr(email_skill, "scheduled_scan"):
+                            resolved_deps.scheduler.register_interval_job(
+                                "email_scan",
+                                tasks_cfg.email_scan.interval_minutes,
+                                email_skill.scheduled_scan,
+                            )
         await app.state.pipeline.start_event_consumer()
         try:
             yield
@@ -356,6 +400,8 @@ def create_app(
             permission_manager=deps.permission_manager,
             structured_store=deps.structured_store,
             scheduler=deps.scheduler,
+            heartbeat_service=deps.heartbeat_service,
+            message_queue=deps.event_queue,
         )
 
         deps.output_compressor = None

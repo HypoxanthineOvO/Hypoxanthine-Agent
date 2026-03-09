@@ -364,6 +364,11 @@ class EmailScannerSkill(BaseSkill):
             )
         return result
 
+    async def _check_new_emails(self) -> dict[str, Any]:
+        # Lightweight event source used by HeartbeatService.
+        accounts = self._load_accounts()
+        return {"name": "email", "new_items": 0, "accounts": len(accounts)}
+
     async def bootstrap_rules(self) -> dict[str, Any]:
         yaml_content = (
             "rules:\n"
