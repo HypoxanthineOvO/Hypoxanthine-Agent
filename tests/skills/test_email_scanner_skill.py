@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 
 from hypo_agent.core.event_queue import EventQueue
 from hypo_agent.skills.email_scanner_skill import EmailScannerSkill
@@ -10,6 +14,7 @@ from hypo_agent.skills.email_scanner_skill import EmailScannerSkill
 class StubStore:
     def __init__(self) -> None:
         self._processed: set[tuple[str, str]] = set()
+        self.records: list[dict] = []
 
     async def has_processed_email(self, account_name: str, message_id: str) -> bool:
         return (account_name, message_id) in self._processed
@@ -19,6 +24,7 @@ class StubStore:
         if key in self._processed:
             return False
         self._processed.add(key)
+        self.records.append(dict(kwargs))
         return True
 
 
@@ -152,6 +158,21 @@ def _email_bytes(message_id: str, sender: str, subject: str, body: str) -> bytes
         f"{body}\n"
     )
     return content.encode("utf-8")
+
+
+def _email_with_attachment(message_id: str, sender: str, subject: str, body: str) -> bytes:
+    msg = MIMEMultipart()
+    msg["From"] = sender
+    msg["Message-ID"] = message_id
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain", "utf-8"))
+
+    attachment = MIMEBase("application", "octet-stream")
+    attachment.set_payload(b"invoice-data")
+    encoders.encode_base64(attachment)
+    attachment.add_header("Content-Disposition", "attachment", filename="invoice.txt")
+    msg.attach(attachment)
+    return msg.as_bytes()
 
 
 def test_scan_emails_iterates_accounts_and_isolates_failures(tmp_path: Path) -> None:
@@ -346,3 +367,40 @@ def test_layer3_calls_default_model_for_important_and_system(tmp_path: Path) -> 
     assert outcome["category"] in {"important", "system"}
     assert router.chat_calls == 1
     assert "摘要" in outcome["summary"]
+
+
+def test_email_attachments_saved_under_memory_email_attachments(tmp_path: Path) -> None:
+    rules_path = tmp_path / "email_rules.yaml"
+    secrets_path = tmp_path / "secrets.yaml"
+    attachments_root = tmp_path / "memory" / "email_attachments"
+    _write_rules(rules_path)
+    _write_secrets(secrets_path)
+    store = StubStore()
+    main_imap = FakeImap(
+        [_email_with_attachment("<att-1>", "boss@example.com", "【紧急】附件测试", "请查看附件")]
+    )
+
+    def factory(host: str, port: int):
+        del port
+        if host == "imap.main.local":
+            return main_imap
+        return FakeImap([])
+
+    skill = EmailScannerSkill(
+        structured_store=store,
+        model_router=None,
+        message_queue=None,
+        rules_path=rules_path,
+        secrets_path=secrets_path,
+        imap_client_factory=factory,
+        attachments_root=attachments_root,
+    )
+
+    result = asyncio.run(skill.scan_emails(params={}))
+    assert result["new_emails"] >= 1
+    assert store.records
+    attachment_paths = store.records[0].get("attachment_paths") or []
+    assert attachment_paths
+    assert "memory/email_attachments" in attachment_paths[0].replace("\\", "/")
+    first_attachment = Path(attachment_paths[0])
+    assert first_attachment.exists()

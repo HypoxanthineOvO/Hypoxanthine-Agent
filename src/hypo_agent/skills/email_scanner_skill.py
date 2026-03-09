@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from email import message_from_bytes
 from email.header import decode_header, make_header
 from email.message import Message as EmailMessage
+from email.utils import parsedate_to_datetime
 import imaplib
 import json
 from pathlib import Path
@@ -39,6 +41,7 @@ class EmailScannerSkill(BaseSkill):
         secrets_path: Path | str = "config/secrets.yaml",
         security_config_path: Path | str = "config/security.yaml",
         imap_client_factory: Any | None = None,
+        attachments_root: Path | str = "memory/email_attachments",
     ) -> None:
         self.structured_store = structured_store
         self.model_router = model_router
@@ -47,6 +50,7 @@ class EmailScannerSkill(BaseSkill):
         self.secrets_path = Path(secrets_path)
         self.security_config_path = Path(security_config_path)
         self.imap_client_factory = imap_client_factory or imaplib.IMAP4_SSL
+        self.attachments_root = Path(attachments_root)
         self._rules: list[EmailRule] = self._load_rules()
         self._bootstrap_drafts: dict[str, str] = {}
 
@@ -405,6 +409,11 @@ class EmailScannerSkill(BaseSkill):
 
             classification = await self._classify_email(payload)
             category = str(classification.get("category") or "low_priority")
+            attachment_paths = self._save_attachments(
+                parsed,
+                account_name=account_name,
+                received_at=payload.get("received_at"),
+            )
             item = {
                 "account_name": account_name,
                 "message_id": payload["message_id"],
@@ -412,6 +421,7 @@ class EmailScannerSkill(BaseSkill):
                 "subject": payload["subject"],
                 "category": category,
                 "summary": str(classification.get("summary") or payload["subject"] or "(no subject)"),
+                "attachment_paths": attachment_paths,
             }
             inserted = await self.structured_store.insert_processed_email(
                 account_name=account_name,
@@ -421,7 +431,7 @@ class EmailScannerSkill(BaseSkill):
                 received_at=payload.get("received_at"),
                 category=category,
                 summary=item["summary"],
-                attachment_paths=[],
+                attachment_paths=attachment_paths,
             )
             if inserted:
                 processed_items.append(item)
@@ -471,3 +481,42 @@ class EmailScannerSkill(BaseSkill):
         if isinstance(payload, str):
             return payload
         return ""
+
+    def _save_attachments(
+        self,
+        parsed: EmailMessage,
+        *,
+        account_name: str,
+        received_at: str | None,
+    ) -> list[str]:
+        saved: list[str] = []
+        bucket = self._attachment_date_bucket(received_at)
+        for part in parsed.walk():
+            filename = part.get_filename()
+            if not filename:
+                continue
+            payload = part.get_payload(decode=True)
+            if not isinstance(payload, (bytes, bytearray)):
+                continue
+
+            safe_name = self._sanitize_filename(str(make_header(decode_header(filename))))
+            target_dir = self.attachments_root / account_name / bucket
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / safe_name
+            target.write_bytes(bytes(payload))
+            saved.append(str(target))
+        return saved
+
+    def _attachment_date_bucket(self, received_at: str | None) -> str:
+        if received_at:
+            try:
+                parsed = parsedate_to_datetime(received_at)
+                return parsed.astimezone(UTC).date().isoformat()
+            except Exception:
+                pass
+        return datetime.now(UTC).date().isoformat()
+
+    def _sanitize_filename(self, filename: str) -> str:
+        cleaned = filename.strip().replace("\\", "_").replace("/", "_")
+        cleaned = "".join(ch for ch in cleaned if ch not in {"\0", ":"})
+        return cleaned or "attachment.bin"
