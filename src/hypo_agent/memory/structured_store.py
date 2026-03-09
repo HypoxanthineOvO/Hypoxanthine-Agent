@@ -127,6 +127,29 @@ class StructuredStore:
                     ON reminders(next_run_at)
                     """
                 )
+                await db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS processed_emails (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        account_name TEXT NOT NULL,
+                        message_id TEXT NOT NULL,
+                        subject TEXT,
+                        sender TEXT,
+                        received_at TEXT,
+                        category TEXT,
+                        summary TEXT,
+                        attachment_paths TEXT,
+                        processed_at TEXT NOT NULL,
+                        UNIQUE(account_name, message_id)
+                    )
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_processed_emails_account_message
+                    ON processed_emails(account_name, message_id)
+                    """
+                )
                 async with db.execute("PRAGMA table_info(token_usage)") as cursor:
                     columns = await cursor.fetchall()
                 column_names = {str(column[1]) for column in columns}
@@ -728,3 +751,100 @@ class StructuredStore:
             if isinstance(parsed, list):
                 return [item for item in parsed if isinstance(item, dict)]
         return None
+
+    async def insert_processed_email(
+        self,
+        *,
+        account_name: str,
+        message_id: str,
+        subject: str | None = None,
+        sender: str | None = None,
+        received_at: str | None = None,
+        category: str | None = None,
+        summary: str | None = None,
+        attachment_paths: list[str] | None = None,
+    ) -> bool:
+        await self.init()
+        account = account_name.strip()
+        message = message_id.strip()
+        if not account or not message:
+            return False
+
+        attachments_json = json.dumps(attachment_paths or [], ensure_ascii=False)
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                """
+                INSERT OR IGNORE INTO processed_emails(
+                    account_name,
+                    message_id,
+                    subject,
+                    sender,
+                    received_at,
+                    category,
+                    summary,
+                    attachment_paths,
+                    processed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    account,
+                    message,
+                    subject,
+                    sender,
+                    received_at,
+                    category,
+                    summary,
+                    attachments_json,
+                    _now_iso(),
+                ),
+            )
+            await db.commit()
+            return (cursor.rowcount or 0) > 0
+
+    async def has_processed_email(
+        self,
+        account_name: str,
+        message_id: str,
+    ) -> bool:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """
+                SELECT 1
+                FROM processed_emails
+                WHERE account_name = ? AND message_id = ?
+                LIMIT 1
+                """,
+                (account_name.strip(), message_id.strip()),
+            ) as cursor:
+                row = await cursor.fetchone()
+        return row is not None
+
+    async def list_overdue_pending_reminders(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        await self.init()
+        safe_limit = max(1, int(limit))
+        now_iso = _now_iso()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT
+                    id,
+                    title,
+                    description,
+                    schedule_type,
+                    schedule_value,
+                    status,
+                    next_run_at
+                FROM reminders
+                WHERE LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'pending')
+                  AND next_run_at IS NOT NULL
+                  AND next_run_at <= ?
+                ORDER BY next_run_at ASC, id ASC
+                LIMIT ?
+                """,
+                (now_iso, safe_limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
