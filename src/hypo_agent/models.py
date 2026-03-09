@@ -14,7 +14,7 @@ class Message(BaseModel):
     file: str | None = None
     audio: str | None = None
     sender: str
-    message_tag: Literal["reminder", "heartbeat", "tool_status"] | None = None
+    message_tag: Literal["reminder", "heartbeat", "email_scan", "tool_status"] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     session_id: str
@@ -55,10 +55,49 @@ class ProviderConfig(BaseModel):
     api_key: str
 
 
+class EmailAccountConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    host: str
+    port: int = 993
+    username: str
+    password: str
+    folder: str = "INBOX"
+    use_ssl: bool = True
+
+
+class EmailServiceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    accounts: list[EmailAccountConfig] = Field(default_factory=list)
+
+
+class ServicesConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailServiceConfig | None = None
+
+
 class SecretsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
+    services: ServicesConfig | None = None
+
+
+class TaskScheduleConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    interval_minutes: int = Field(default=15, ge=1)
+
+
+class TasksConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    heartbeat: TaskScheduleConfig = Field(default_factory=TaskScheduleConfig)
+    email_scan: TaskScheduleConfig = Field(default_factory=TaskScheduleConfig)
 
 
 class WhitelistRule(BaseModel):

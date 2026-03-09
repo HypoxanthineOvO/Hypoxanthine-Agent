@@ -64,6 +64,20 @@ def test_message_accepts_tool_status_tag_and_metadata(fixed_timestamp):
     assert restored.metadata["ephemeral"] is True
 
 
+def test_message_accepts_email_scan_tag(fixed_timestamp):
+    message = Message(
+        text="邮件扫描完成",
+        sender="assistant",
+        timestamp=fixed_timestamp,
+        session_id="main",
+        message_tag="email_scan",
+    )
+
+    payload = message.model_dump_json()
+    restored = Message.model_validate_json(payload)
+    assert restored.message_tag == "email_scan"
+
+
 def test_reminder_models_validate_once_and_heartbeat_checks():
     heartbeat = HeartbeatCheck(
         check_type="http_status",
@@ -154,6 +168,31 @@ def test_secrets_config_round_trip():
     restored = SecretsConfig.model_validate(data)
 
     assert restored.providers["Hiapi"].api_base == "https://hiapi.online/v1"
+
+
+def test_secrets_config_accepts_services_email_accounts():
+    config = SecretsConfig.model_validate(
+        {
+            "providers": {},
+            "services": {
+                "email": {
+                    "accounts": [
+                        {
+                            "name": "主邮箱",
+                            "host": "imap.example.com",
+                            "port": 993,
+                            "username": "ops@example.com",
+                            "password": "secret",
+                        }
+                    ]
+                }
+            },
+        }
+    )
+
+    assert config.services is not None
+    assert config.services.email is not None
+    assert config.services.email.accounts[0].name == "主邮箱"
 
 
 def test_security_config_whitelist_and_circuit_breaker():

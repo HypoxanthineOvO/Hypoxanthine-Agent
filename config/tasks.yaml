@@ -7,3 +7,9 @@ retry_policy:
 task_defaults:
   timeout_seconds: 120
   priority: normal
+heartbeat:
+  enabled: false
+  interval_minutes: 30
+email_scan:
+  enabled: false
+  interval_minutes: 15
