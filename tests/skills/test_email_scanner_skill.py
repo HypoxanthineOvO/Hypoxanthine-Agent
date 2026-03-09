@@ -404,3 +404,50 @@ def test_email_attachments_saved_under_memory_email_attachments(tmp_path: Path) 
     assert "memory/email_attachments" in attachment_paths[0].replace("\\", "/")
     first_attachment = Path(attachment_paths[0])
     assert first_attachment.exists()
+
+
+def test_bootstrap_rules_returns_draft_without_writing_file(tmp_path: Path) -> None:
+    rules_path = tmp_path / "email_rules.yaml"
+    rules_path.write_text("rules: []", encoding="utf-8")
+    secrets_path = tmp_path / "secrets.yaml"
+    _write_secrets(secrets_path)
+    skill = EmailScannerSkill(
+        structured_store=StubStore(),
+        model_router=None,
+        message_queue=None,
+        rules_path=rules_path,
+        secrets_path=secrets_path,
+    )
+
+    original = rules_path.read_text(encoding="utf-8")
+    draft = asyncio.run(skill.bootstrap_rules())
+
+    assert draft["draft_id"]
+    assert "rules:" in draft["yaml_content"]
+    assert rules_path.read_text(encoding="utf-8") == original
+
+
+def test_bootstrap_rules_confirm_writes_email_rules_yaml(tmp_path: Path) -> None:
+    rules_path = tmp_path / "email_rules.yaml"
+    rules_path.write_text("rules: []", encoding="utf-8")
+    secrets_path = tmp_path / "secrets.yaml"
+    _write_secrets(secrets_path)
+    skill = EmailScannerSkill(
+        structured_store=StubStore(),
+        model_router=None,
+        message_queue=None,
+        rules_path=rules_path,
+        secrets_path=secrets_path,
+    )
+
+    draft = asyncio.run(skill.bootstrap_rules())
+    result = asyncio.run(
+        skill.scan_emails(
+            params={"bootstrap_confirm": True, "draft_id": draft["draft_id"]}
+        )
+    )
+
+    assert result["bootstrap_confirmed"] is True
+    saved = rules_path.read_text(encoding="utf-8")
+    assert "rules:" in saved
+    assert saved.strip() == draft["yaml_content"].strip()

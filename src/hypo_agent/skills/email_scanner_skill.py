@@ -9,6 +9,7 @@ from email.utils import parsedate_to_datetime
 import imaplib
 import json
 from pathlib import Path
+import secrets
 from typing import Any
 
 import yaml
@@ -277,7 +278,32 @@ class EmailScannerSkill(BaseSkill):
             return ""
 
     async def scan_emails(self, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        del params
+        params = params or {}
+        if self._parse_bool(params.get("bootstrap_confirm")):
+            draft_id = str(params.get("draft_id") or "").strip()
+            if draft_id and draft_id in self._bootstrap_drafts:
+                yaml_content = self._bootstrap_drafts[draft_id]
+                self._write_rules_atomically(yaml_content)
+                self._rules = self._load_rules()
+                return {
+                    "bootstrap_confirmed": True,
+                    "draft_id": draft_id,
+                    "summary": "✅ 已写入 email_rules.yaml",
+                }
+            return {
+                "bootstrap_confirmed": False,
+                "summary": "❌ draft_id 无效或已过期",
+            }
+
+        if not self._rules:
+            draft = await self.bootstrap_rules()
+            return {
+                "requires_confirmation": True,
+                "draft_id": draft["draft_id"],
+                "yaml_content": draft["yaml_content"],
+                "summary": "📂 未检测到有效规则，已生成草稿，确认后写入。",
+            }
+
         accounts = self._load_accounts()
         accounts_scanned = 0
         accounts_failed = 0
@@ -337,6 +363,42 @@ class EmailScannerSkill(BaseSkill):
                 }
             )
         return result
+
+    async def bootstrap_rules(self) -> dict[str, Any]:
+        yaml_content = (
+            "rules:\n"
+            "  - name: system-notice\n"
+            "    from: \"noreply@\"\n"
+            "    category: system\n"
+            "    skip_llm: true\n"
+            "  - name: boss-important\n"
+            "    from: \"boss@\"\n"
+            "    category: important\n"
+            "    skip_llm: true\n"
+            "  - name: newsletter-archive\n"
+            "    subject_contains: \"newsletter\"\n"
+            "    category: archive\n"
+            "    skip_llm: true\n"
+        )
+        if self.model_router is not None and hasattr(self.model_router, "call_lightweight_json"):
+            prompt = (
+                "请根据常见邮件场景生成 email rules YAML 草稿，仅返回 YAML，"
+                "包含 rules 列表，每条规则支持 name/from/subject_contains/category/skip_llm。"
+            )
+            try:
+                payload = await self.model_router.call_lightweight_json(prompt, session_id="main")
+            except TypeError:
+                payload = await self.model_router.call_lightweight_json(prompt)
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict):
+                candidate_yaml = str(payload.get("yaml") or "").strip()
+                if candidate_yaml and "rules" in candidate_yaml:
+                    yaml_content = candidate_yaml
+
+        draft_id = f"draft_{int(datetime.now(UTC).timestamp())}_{secrets.token_hex(3)}"
+        self._bootstrap_drafts[draft_id] = yaml_content
+        return {"draft_id": draft_id, "yaml_content": yaml_content}
 
     def _load_accounts(self) -> list[dict[str, Any]]:
         if not self.secrets_path.exists():
@@ -520,3 +582,18 @@ class EmailScannerSkill(BaseSkill):
         cleaned = filename.strip().replace("\\", "_").replace("/", "_")
         cleaned = "".join(ch for ch in cleaned if ch not in {"\0", ":"})
         return cleaned or "attachment.bin"
+
+    def _parse_bool(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return False
+
+    def _write_rules_atomically(self, yaml_content: str) -> None:
+        self.rules_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.rules_path.with_suffix(".tmp")
+        tmp.write_text(yaml_content, encoding="utf-8")
+        tmp.replace(self.rules_path)
