@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 import yaml
 
 from hypo_agent.gateway.auth import require_api_token
-from hypo_agent.models import ModelConfig, PersonaConfig, SecurityConfig
+from hypo_agent.models import ModelConfig, PersonaConfig, SecurityConfig, TasksConfig
 
 router = APIRouter(prefix="/api")
 
@@ -42,7 +42,7 @@ class SkillsConfigFile(BaseModel):
     skills: dict[str, SkillConfigEntry] = Field(default_factory=dict)
 
 
-class TasksConfigFile(BaseModel):
+class TasksConfigFile(TasksConfig):
     model_config = ConfigDict(extra="allow")
 
 

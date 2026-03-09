@@ -11,9 +11,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import yaml
 
+from hypo_agent.core.config_loader import load_tasks_config
 from hypo_agent.core.channel_adapter import WebUIAdapter
 from hypo_agent.core.config_loader import load_runtime_model_config
 from hypo_agent.core.event_queue import EventQueue
+from hypo_agent.core.heartbeat import HeartbeatService
 from hypo_agent.core.model_router import ModelRouter
 from hypo_agent.core.output_compressor import OutputCompressor
 from hypo_agent.core.pipeline import ChatPipeline
@@ -46,6 +48,7 @@ class AppDeps:
     skill_manager: SkillManager | None = None
     circuit_breaker: CircuitBreaker | None = None
     permission_manager: PermissionManager | None = None
+    heartbeat_service: HeartbeatService | Any | None = None
     reload_config: Any | None = None
 
 
@@ -125,6 +128,12 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
         structured_store=structured_store,
         event_queue=event_queue,
     )
+    heartbeat_service = HeartbeatService(
+        structured_store=structured_store,
+        model_router=None,
+        message_queue=event_queue,
+        scheduler=scheduler,
+    )
     permission_manager = PermissionManager(resolved_security.directory_whitelist)
     circuit_breaker = CircuitBreaker(resolved_security.circuit_breaker)
     skill_manager = SkillManager(
@@ -144,6 +153,7 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
         structured_store=structured_store,
         event_queue=event_queue,
         scheduler=scheduler,
+        heartbeat_service=heartbeat_service,
         skill_manager=skill_manager,
         circuit_breaker=circuit_breaker,
         permission_manager=permission_manager,
@@ -172,6 +182,8 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
     router = ModelRouter(runtime_config, on_stream_success=on_stream_success)
     if deps.scheduler is not None:
         deps.scheduler.model_router = router
+    if deps.heartbeat_service is not None and hasattr(deps.heartbeat_service, "model_router"):
+        deps.heartbeat_service.model_router = router
     reminder_skill = (
         deps.skill_manager._skills.get("reminder")  # type: ignore[attr-defined]
         if deps.skill_manager is not None and hasattr(deps.skill_manager, "_skills")
@@ -239,6 +251,13 @@ def create_app(
             structured_store=resolved_deps.structured_store,
             event_queue=resolved_deps.event_queue,
         )
+    if resolved_deps.heartbeat_service is None:
+        resolved_deps.heartbeat_service = HeartbeatService(
+            structured_store=resolved_deps.structured_store,
+            model_router=None,
+            message_queue=resolved_deps.event_queue,
+            scheduler=resolved_deps.scheduler,
+        )
     if resolved_deps.circuit_breaker is None:
         resolved_deps.circuit_breaker = CircuitBreaker(
             (security or _default_security()).circuit_breaker
@@ -262,6 +281,23 @@ def create_app(
         await resolved_deps.structured_store.init()
         if resolved_deps.scheduler is not None:
             await resolved_deps.scheduler.start()
+            tasks_path = Path(getattr(app.state, "config_dir", Path("config"))) / "tasks.yaml"
+            if tasks_path.exists():
+                try:
+                    tasks_cfg = load_tasks_config(tasks_path)
+                except Exception:
+                    tasks_cfg = None
+                if tasks_cfg is not None:
+                    if (
+                        tasks_cfg.heartbeat.enabled
+                        and resolved_deps.heartbeat_service is not None
+                        and hasattr(resolved_deps.scheduler, "register_interval_job")
+                    ):
+                        resolved_deps.scheduler.register_interval_job(
+                            "heartbeat",
+                            tasks_cfg.heartbeat.interval_minutes,
+                            resolved_deps.heartbeat_service.run,
+                        )
         await app.state.pipeline.start_event_consumer()
         try:
             yield
@@ -292,6 +328,7 @@ def create_app(
     app.state.output_compressor = resolved_deps.output_compressor
     app.state.event_queue = resolved_deps.event_queue
     app.state.scheduler = resolved_deps.scheduler
+    app.state.heartbeat_service = resolved_deps.heartbeat_service
     app.state.pipeline = pipeline_instance
 
     async def push_ws_message(payload: dict[str, object]) -> None:

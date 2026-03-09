@@ -13,12 +13,20 @@ class RecordingScheduler:
     def __init__(self) -> None:
         self.started = 0
         self.stopped = 0
+        self.interval_jobs: list[tuple[str, int]] = []
+        self.is_running = False
 
     async def start(self) -> None:
         self.started += 1
+        self.is_running = True
 
     async def stop(self) -> None:
         self.stopped += 1
+        self.is_running = False
+
+    def register_interval_job(self, job_id: str, minutes: int, coro, *, replace_existing: bool = True):
+        del coro, replace_existing
+        self.interval_jobs.append((job_id, minutes))
 
 
 class RecordingPipeline:
@@ -157,3 +165,42 @@ def test_event_consumer_starts_on_lifespan(tmp_path) -> None:
         task = app.state.pipeline._event_consumer_task
         assert task is not None
         assert task.done() is False
+
+
+def test_app_registers_heartbeat_job_from_tasks_config(tmp_path) -> None:
+    scheduler = RecordingScheduler()
+    pipeline = RecordingPipeline()
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "tasks.yaml").write_text(
+        """
+heartbeat:
+  enabled: true
+  interval_minutes: 1
+email_scan:
+  enabled: false
+  interval_minutes: 5
+""".strip(),
+        encoding="utf-8",
+    )
+
+    class DummyHeartbeatService:
+        def __init__(self) -> None:
+            self.run_calls = 0
+
+        async def run(self) -> None:
+            self.run_calls += 1
+
+    deps = AppDeps(
+        session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+        structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        scheduler=scheduler,
+        event_queue=DummyEventQueue(),
+        heartbeat_service=DummyHeartbeatService(),
+    )
+    app = create_app(auth_token="test-token", pipeline=pipeline, deps=deps)
+    app.state.config_dir = config_dir
+
+    with TestClient(app):
+        assert scheduler.interval_jobs == [("heartbeat", 1)]
