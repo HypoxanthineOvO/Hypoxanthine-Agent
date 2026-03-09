@@ -313,4 +313,62 @@ describe("ChatView", () => {
       compressed_chars: 120,
     });
   });
+
+  it("hides runtime tool events when marked ephemeral", async () => {
+    const wrapper = mount(ChatView, {
+      props: {
+        wsUrl: "ws://localhost:8000/ws",
+        token: "test-token",
+      },
+    });
+    await flushUi();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+    ws.emitMessage(
+      JSON.stringify({
+        type: "tool_call_start",
+        tool_name: "run_code",
+        tool_call_id: "call_1",
+        arguments: { code: "print(1)" },
+        session_id: "session-1",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "tool_call_result",
+        tool_name: "run_code",
+        tool_call_id: "call_1",
+        status: "success",
+        result: { stdout: "1" },
+        error_info: "",
+        metadata: { ephemeral: true },
+        session_id: "session-1",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "assistant_chunk",
+        text: "现在是 10:00",
+        sender: "assistant",
+        session_id: "session-1",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "assistant_done",
+        sender: "assistant",
+        session_id: "session-1",
+      }),
+    );
+
+    await flushUi();
+    await flushUi();
+
+    expect(wrapper.text()).toContain("现在是 10:00");
+    expect(wrapper.text()).not.toContain("🔧 执行了 run_code");
+  });
 });

@@ -177,6 +177,7 @@ def test_pipeline_stream_reply_runs_tool_and_emits_tool_events() -> None:
     assert events[0]["type"] == "tool_call_start"
     assert events[1]["type"] == "tool_call_result"
     assert events[1]["status"] == "success"
+    assert events[1]["metadata"]["ephemeral"] is True
     assert events[-1]["type"] == "assistant_done"
     assert skills.calls[0][0] == "run_command"
     assert skills.calls[0][1]["command"] == "echo hi"

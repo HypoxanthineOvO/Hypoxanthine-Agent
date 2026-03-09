@@ -324,6 +324,7 @@ class ChatPipeline:
                     tool_content = serialized_output
                     tool_result_for_event: Any = output.result
                     tool_metadata_for_event = dict(output.metadata)
+                    tool_metadata_for_event["ephemeral"] = True
                     compressed_meta_for_event: dict[str, Any] | None = None
                     if self.output_compressor is not None:
                         compression_metadata: dict[str, Any] = {
