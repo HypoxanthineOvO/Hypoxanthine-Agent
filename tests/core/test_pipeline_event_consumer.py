@@ -102,6 +102,7 @@ def test_pipeline_event_consumer_writes_heartbeat_without_callback() -> None:
                 "session_id": "main",
                 "title": "服务巡检",
                 "description": "发现异常",
+                "summary": "⚠️ 有 1 条提醒疑似漏触发",
             }
         )
         await asyncio.sleep(0.05)
@@ -109,7 +110,7 @@ def test_pipeline_event_consumer_writes_heartbeat_without_callback() -> None:
 
         assert len(memory.appended) == 1
         assert memory.appended[0].message_tag == "heartbeat"
-        assert "服务巡检" in (memory.appended[0].text or "")
+        assert "漏触发" in (memory.appended[0].text or "")
 
     asyncio.run(_run())
 
@@ -186,5 +187,42 @@ def test_pipeline_event_consumer_processes_multiple_events() -> None:
         assert "event-0" in (memory.appended[0].text or "")
         assert "event-1" in (memory.appended[1].text or "")
         assert "event-2" in (memory.appended[2].text or "")
+
+    asyncio.run(_run())
+
+
+def test_pipeline_event_consumer_writes_email_scan_message() -> None:
+    async def _run() -> None:
+        queue = EventQueue()
+        memory = StubSessionMemory()
+        pushed: list[Message] = []
+
+        async def on_proactive_message(message: Message) -> None:
+            pushed.append(message)
+
+        pipeline = ChatPipeline(
+            router=StubRouter(),
+            chat_model="Gemini3Pro",
+            session_memory=memory,
+            event_queue=queue,
+            on_proactive_message=on_proactive_message,
+        )
+
+        await pipeline.start_event_consumer()
+        await queue.put(
+            {
+                "event_type": "email_scan_trigger",
+                "session_id": "main",
+                "summary": "🔴 1 封重要邮件；⚪ 2 封普通邮件；📂 5 封归档",
+            }
+        )
+        await asyncio.sleep(0.05)
+        await pipeline.stop_event_consumer()
+
+        assert len(memory.appended) == 1
+        assert memory.appended[0].message_tag == "email_scan"
+        assert "🔴" in (memory.appended[0].text or "")
+        assert len(pushed) == 1
+        assert pushed[0].message_tag == "email_scan"
 
     asyncio.run(_run())
