@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 import structlog
@@ -9,6 +10,42 @@ from hypo_agent.models import Message
 
 router = APIRouter()
 logger = structlog.get_logger("hypo_agent.gateway.ws")
+
+
+class WsConnectionManager:
+    def __init__(self) -> None:
+        self._sockets: set[WebSocket] = set()
+        self._lock = asyncio.Lock()
+
+    async def connect(self, ws: WebSocket) -> None:
+        await ws.accept()
+        async with self._lock:
+            self._sockets.add(ws)
+
+    async def disconnect(self, ws: WebSocket) -> None:
+        async with self._lock:
+            self._sockets.discard(ws)
+
+    async def broadcast(self, payload: dict[str, object]) -> None:
+        async with self._lock:
+            sockets = list(self._sockets)
+        stale: list[WebSocket] = []
+        for ws in sockets:
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                stale.append(ws)
+        if stale:
+            async with self._lock:
+                for ws in stale:
+                    self._sockets.discard(ws)
+
+
+connection_manager = WsConnectionManager()
+
+
+async def broadcast_message(payload: dict[str, object]) -> None:
+    await connection_manager.broadcast(payload)
 
 
 def _build_error_event(session_id: str, exc: Exception) -> dict[str, object]:
@@ -54,7 +91,7 @@ async def _send_error_and_close(ws: WebSocket, session_id: str, exc: Exception) 
 
 @router.websocket("/ws")
 async def websocket_chat(ws: WebSocket) -> None:
-    await ws.accept()
+    await connection_manager.connect(ws)
     session_id = ""
     try:
         while True:
@@ -72,3 +109,5 @@ async def websocket_chat(ws: WebSocket) -> None:
         return
     except Exception as exc:  # pragma: no cover - defensive fallback
         await _send_error_and_close(ws, session_id=session_id, exc=exc)
+    finally:
+        await connection_manager.disconnect(ws)

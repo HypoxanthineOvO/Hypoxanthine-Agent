@@ -213,6 +213,28 @@ def test_slash_commands_session_list_returns_sessions(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
+def test_slash_commands_reminders_lists_active_reminders(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, store, _ = await _build_handler(tmp_path)
+        await store.create_reminder(
+            title="喝水",
+            description="每小时提醒",
+            schedule_type="cron",
+            schedule_value="0 * * * *",
+            channel="all",
+            status="active",
+            next_run_at="2026-03-07T09:00:00+00:00",
+            heartbeat_config=None,
+        )
+
+        text = await handler.try_handle(Message(text="/reminders", sender="user", session_id="s1"))
+        assert text is not None
+        assert "活跃提醒" in text
+        assert "喝水" in text
+
+    asyncio.run(_run())
+
+
 def test_slash_commands_token_and_token_total_use_store_stats(tmp_path: Path) -> None:
     async def _run() -> None:
         handler, _, store, _ = await _build_handler(tmp_path)

@@ -165,6 +165,32 @@ describe("useChatSocket", () => {
     expect(socket.messages.value[0]?.text).toBe("old");
   });
 
+  it("keeps message_tag from proactive server message", () => {
+    const socket = useChatSocket({
+      url: "ws://localhost:8000/ws",
+      token: "abc123",
+      sessionId: ref("s1"),
+    });
+    socket.connect();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+    ws.emitMessage(
+      JSON.stringify({
+        text: "提醒：喝水",
+        sender: "assistant",
+        session_id: "s1",
+        message_tag: "reminder",
+      }),
+    );
+
+    expect(socket.messages.value).toHaveLength(1);
+    expect(socket.messages.value[0]?.message_tag).toBe("reminder");
+  });
+
   it("schedules reconnect with exponential backoff after unexpected close", () => {
     vi.useFakeTimers();
     const socket = useChatSocket({

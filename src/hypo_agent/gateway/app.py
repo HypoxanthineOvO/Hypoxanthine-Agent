@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -12,9 +13,11 @@ import yaml
 
 from hypo_agent.core.channel_adapter import WebUIAdapter
 from hypo_agent.core.config_loader import load_runtime_model_config
+from hypo_agent.core.event_queue import EventQueue
 from hypo_agent.core.model_router import ModelRouter
 from hypo_agent.core.output_compressor import OutputCompressor
 from hypo_agent.core.pipeline import ChatPipeline
+from hypo_agent.core.scheduler import SchedulerService
 from hypo_agent.core.slash_commands import SlashCommandHandler
 from hypo_agent.core.skill_manager import SkillManager
 from hypo_agent.gateway.config_api import router as config_api_router
@@ -26,17 +29,19 @@ from hypo_agent.gateway.memory_api import router as memory_api_router
 from hypo_agent.gateway.sessions_api import router as sessions_api_router
 from hypo_agent.gateway.middleware import WsTokenAuthMiddleware
 from hypo_agent.gateway.settings import load_gateway_settings
-from hypo_agent.gateway.ws import router as ws_router
+from hypo_agent.gateway.ws import broadcast_message, router as ws_router
 from hypo_agent.memory import SessionMemory, StructuredStore
-from hypo_agent.models import SecurityConfig
+from hypo_agent.models import Message, SecurityConfig
 from hypo_agent.security import CircuitBreaker, PermissionManager
-from hypo_agent.skills import CodeRunSkill, FileSystemSkill, TmuxSkill
+from hypo_agent.skills import CodeRunSkill, FileSystemSkill, ReminderSkill, TmuxSkill
 
 
 @dataclass(slots=True)
 class AppDeps:
     session_memory: SessionMemory
     structured_store: StructuredStore
+    event_queue: EventQueue | None = None
+    scheduler: SchedulerService | None = None
     output_compressor: OutputCompressor | None = None
     skill_manager: SkillManager | None = None
     circuit_breaker: CircuitBreaker | None = None
@@ -48,6 +53,9 @@ def _register_enabled_skills(
     *,
     skill_manager: SkillManager,
     permission_manager: PermissionManager,
+    structured_store: StructuredStore | None = None,
+    scheduler: SchedulerService | None = None,
+    model_router: ModelRouter | None = None,
     skills_config_path: Path = Path("config/skills.yaml"),
 ) -> None:
     skills_payload: dict[str, Any] = {}
@@ -87,6 +95,15 @@ def _register_enabled_skills(
             )
         )
 
+    if "reminder" in enabled_skills and structured_store is not None and scheduler is not None:
+        skill_manager.register(
+            ReminderSkill(
+                structured_store=structured_store,
+                scheduler=scheduler,
+                model_router=model_router,
+            )
+        )
+
 
 def _default_security() -> SecurityConfig:
     return SecurityConfig.model_validate(
@@ -100,6 +117,11 @@ def _default_security() -> SecurityConfig:
 def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
     resolved_security = security or _default_security()
     structured_store = StructuredStore(db_path="memory/hypo.db")
+    event_queue = EventQueue()
+    scheduler = SchedulerService(
+        structured_store=structured_store,
+        event_queue=event_queue,
+    )
     permission_manager = PermissionManager(resolved_security.directory_whitelist)
     circuit_breaker = CircuitBreaker(resolved_security.circuit_breaker)
     skill_manager = SkillManager(
@@ -110,11 +132,15 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
     _register_enabled_skills(
         skill_manager=skill_manager,
         permission_manager=permission_manager,
+        structured_store=structured_store,
+        scheduler=scheduler,
     )
 
     return AppDeps(
         session_memory=SessionMemory(sessions_dir="memory/sessions", buffer_limit=20),
         structured_store=structured_store,
+        event_queue=event_queue,
+        scheduler=scheduler,
         skill_manager=skill_manager,
         circuit_breaker=circuit_breaker,
         permission_manager=permission_manager,
@@ -141,6 +167,15 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
 
     runtime_config = load_runtime_model_config()
     router = ModelRouter(runtime_config, on_stream_success=on_stream_success)
+    if deps.scheduler is not None:
+        deps.scheduler.model_router = router
+    reminder_skill = (
+        deps.skill_manager._skills.get("reminder")  # type: ignore[attr-defined]
+        if deps.skill_manager is not None and hasattr(deps.skill_manager, "_skills")
+        else None
+    )
+    if reminder_skill is not None and hasattr(reminder_skill, "model_router"):
+        reminder_skill.model_router = router
     if deps.output_compressor is None:
         deps.output_compressor = OutputCompressor(router=router)
     chat_model = router.get_model_for_task("chat")
@@ -161,6 +196,7 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
         slash_commands=slash_commands,
         output_compressor=deps.output_compressor,
         channel_adapter=WebUIAdapter(),
+        event_queue=deps.event_queue,
     )
 
 
@@ -171,6 +207,13 @@ def create_app(
     security: SecurityConfig | None = None,
 ) -> FastAPI:
     resolved_deps = deps or _build_default_deps(security)
+    if resolved_deps.event_queue is None:
+        resolved_deps.event_queue = EventQueue()
+    if resolved_deps.scheduler is None:
+        resolved_deps.scheduler = SchedulerService(
+            structured_store=resolved_deps.structured_store,
+            event_queue=resolved_deps.event_queue,
+        )
     if resolved_deps.circuit_breaker is None:
         resolved_deps.circuit_breaker = CircuitBreaker(
             (security or _default_security()).circuit_breaker
@@ -186,10 +229,28 @@ def create_app(
             structured_store=resolved_deps.structured_store,
         )
 
+    pipeline_instance = pipeline or _build_default_pipeline(resolved_deps)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await resolved_deps.structured_store.init()
-        yield
+        starter = getattr(pipeline_instance, "start_event_consumer", None)
+        if starter is not None:
+            result = starter()
+            if inspect.isawaitable(result):
+                await result
+        if resolved_deps.scheduler is not None:
+            await resolved_deps.scheduler.start()
+        try:
+            yield
+        finally:
+            if resolved_deps.scheduler is not None:
+                await resolved_deps.scheduler.stop()
+            stopper = getattr(pipeline_instance, "stop_event_consumer", None)
+            if stopper is not None:
+                result = stopper()
+                if inspect.isawaitable(result):
+                    await result
 
     app = FastAPI(title="Hypo-Agent Gateway", lifespan=lifespan)
     app.add_middleware(
@@ -199,7 +260,6 @@ def create_app(
         allow_headers=["*"],
     )
     app.add_middleware(WsTokenAuthMiddleware, auth_token=auth_token)
-    pipeline_instance = pipeline or _build_default_pipeline(resolved_deps)
 
     app.state.auth_token = auth_token
     app.state.started_at = datetime.now(UTC)
@@ -212,7 +272,18 @@ def create_app(
     app.state.circuit_breaker = resolved_deps.circuit_breaker
     app.state.permission_manager = resolved_deps.permission_manager
     app.state.output_compressor = resolved_deps.output_compressor
+    app.state.event_queue = resolved_deps.event_queue
+    app.state.scheduler = resolved_deps.scheduler
     app.state.pipeline = pipeline_instance
+
+    async def push_ws_message(payload: dict[str, object]) -> None:
+        await broadcast_message(payload)
+
+    async def on_proactive_message(message: Message) -> None:
+        await push_ws_message(message.model_dump(mode="json"))
+
+    app.state.push_ws_message = push_ws_message
+    setattr(app.state.pipeline, "on_proactive_message", on_proactive_message)
 
     def reload_config() -> None:
         settings = load_gateway_settings()
@@ -227,6 +298,8 @@ def create_app(
         _register_enabled_skills(
             skill_manager=deps.skill_manager,
             permission_manager=deps.permission_manager,
+            structured_store=deps.structured_store,
+            scheduler=deps.scheduler,
         )
 
         deps.output_compressor = None
@@ -235,6 +308,7 @@ def create_app(
         app.state.circuit_breaker = deps.circuit_breaker
         app.state.skill_manager = deps.skill_manager
         app.state.pipeline = _build_default_pipeline(deps)
+        setattr(app.state.pipeline, "on_proactive_message", on_proactive_message)
         app.state.output_compressor = deps.output_compressor
 
     resolved_deps.reload_config = reload_config

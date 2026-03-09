@@ -14,6 +14,7 @@ class Message(BaseModel):
     file: str | None = None
     audio: str | None = None
     sender: str
+    message_tag: Literal["reminder", "heartbeat"] | None = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     session_id: str
 
@@ -96,3 +97,58 @@ class PersonaConfig(BaseModel):
     aliases: list[str] = Field(default_factory=list)
     personality: list[str] = Field(default_factory=list)
     speaking_style: dict[str, Any] = Field(default_factory=dict)
+
+
+class HeartbeatCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    check_type: Literal[
+        "file_exists",
+        "process_running",
+        "http_status",
+        "custom_command",
+    ]
+    target: str
+    expected: str | int | None = None
+    timeout_seconds: int = 10
+
+
+class ReminderCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    description: str | None = None
+    schedule_type: Literal["once", "cron"]
+    schedule_value: str
+    channel: str = "all"
+    heartbeat_config: list[HeartbeatCheck] | None = None
+    confirm: bool = False
+
+
+class ReminderUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = None
+    description: str | None = None
+    schedule_type: Literal["once", "cron"] | None = None
+    schedule_value: str | None = None
+    channel: str | None = None
+    status: Literal["active", "paused", "completed", "deleted"] | None = None
+    next_run_at: str | None = None
+    heartbeat_config: list[HeartbeatCheck] | None = None
+
+
+class Reminder(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    title: str
+    description: str | None = None
+    schedule_type: Literal["once", "cron"]
+    schedule_value: str
+    channel: str = "all"
+    status: Literal["active", "paused", "completed", "deleted"] = "active"
+    created_at: str
+    updated_at: str
+    next_run_at: str | None = None
+    heartbeat_config: list[HeartbeatCheck] | None = None

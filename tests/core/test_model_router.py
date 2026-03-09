@@ -155,6 +155,30 @@ def test_model_router_stream_yields_chunks(runtime_config: RuntimeModelConfig) -
     assert chunks == ["He", "llo"]
 
 
+def test_model_router_call_lightweight_json(runtime_config: RuntimeModelConfig) -> None:
+    called_models: list[str] = []
+
+    async def fake_acompletion(**kwargs):
+        called_models.append(kwargs["model"])
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content='{"schedule_type":"once","timezone":"Asia/Shanghai"}'
+                    )
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=2, completion_tokens=2, total_tokens=4),
+        )
+
+    router = ModelRouter(runtime_config, acompletion_fn=fake_acompletion)
+    result = asyncio.run(router.call_lightweight_json("parse this", session_id="s1"))
+
+    assert called_models == ["openai/ep-20251215171209-4z5qk"]
+    assert result["schedule_type"] == "once"
+    assert result["timezone"] == "Asia/Shanghai"
+
+
 def test_model_router_stream_fallback_before_first_chunk(
     runtime_config: RuntimeModelConfig,
 ) -> None:

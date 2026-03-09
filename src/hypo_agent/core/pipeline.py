@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 import inspect
 import json
@@ -86,6 +87,8 @@ class ChatPipeline:
         slash_commands: SlashCommands | None = None,
         output_compressor: ChatOutputCompressor | None = None,
         channel_adapter: ChannelAdapter | None = None,
+        event_queue: Any | None = None,
+        on_proactive_message: Any | None = None,
     ) -> None:
         self.router = router
         self.chat_model = chat_model
@@ -96,6 +99,27 @@ class ChatPipeline:
         self.slash_commands = slash_commands
         self.output_compressor = output_compressor
         self.channel_adapter = channel_adapter or WebUIAdapter()
+        self.event_queue = event_queue
+        self.on_proactive_message = on_proactive_message
+        self._event_consumer_task: asyncio.Task[None] | None = None
+
+    async def start_event_consumer(self) -> None:
+        if self.event_queue is None:
+            return
+        if self._event_consumer_task is not None and not self._event_consumer_task.done():
+            return
+        self._event_consumer_task = asyncio.create_task(self._consume_event_loop())
+
+    async def stop_event_consumer(self) -> None:
+        task = self._event_consumer_task
+        if task is None:
+            return
+        self._event_consumer_task = None
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     async def run_once(self, inbound: Message) -> Message:
         slash_result = await self._try_handle_slash(inbound)
@@ -415,3 +439,53 @@ class ChatPipeline:
         )
         if inspect.isawaitable(result):
             await result
+
+    async def _consume_event_loop(self) -> None:
+        assert self.event_queue is not None
+        while True:
+            event: dict[str, Any] = await self.event_queue.get()
+            try:
+                message = self._event_to_message(event)
+                if message is None:
+                    continue
+                self.session_memory.append(message)
+                if self.on_proactive_message is not None:
+                    callback_result = self.on_proactive_message(message)
+                    if inspect.isawaitable(callback_result):
+                        await callback_result
+            except Exception:
+                logger.exception("pipeline.event_consumer.failed", queue_event=event)
+            finally:
+                task_done = getattr(self.event_queue, "task_done", None)
+                if callable(task_done):
+                    task_done()
+
+    def _event_to_message(self, event: dict[str, Any]) -> Message | None:
+        event_type = str(event.get("event_type") or "").strip().lower()
+        session_id = str(event.get("session_id") or "main")
+        title = str(event.get("title") or "").strip()
+        description = str(event.get("description") or "").strip()
+
+        if event_type == "reminder_trigger":
+            text = f"🔔 提醒：{title}" if title else "🔔 提醒"
+            if description:
+                text += f"\n{description}"
+            return Message(
+                text=text,
+                sender="assistant",
+                session_id=session_id,
+                message_tag="reminder",
+            )
+
+        if event_type == "heartbeat_trigger":
+            text = f"🔔 Heartbeat 异常：{title}" if title else "🔔 Heartbeat 异常"
+            if description:
+                text += f"\n{description}"
+            return Message(
+                text=text,
+                sender="assistant",
+                session_id=session_id,
+                message_tag="heartbeat",
+            )
+
+        return None

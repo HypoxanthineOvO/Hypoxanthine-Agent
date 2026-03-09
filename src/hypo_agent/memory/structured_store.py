@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+import json
 from pathlib import Path
 from typing import Any
 
@@ -95,6 +96,35 @@ class StructuredStore:
                     """
                     CREATE INDEX IF NOT EXISTS idx_tool_invocations_created
                     ON tool_invocations(created_at)
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS reminders (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        title TEXT NOT NULL,
+                        description TEXT,
+                        schedule_type TEXT NOT NULL,
+                        schedule_value TEXT NOT NULL,
+                        channel TEXT NOT NULL DEFAULT 'all',
+                        status TEXT NOT NULL DEFAULT 'active',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        next_run_at TEXT,
+                        heartbeat_config TEXT
+                    )
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_reminders_status
+                    ON reminders(status)
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_reminders_next_run
+                    ON reminders(next_run_at)
                     """
                 )
                 async with db.execute("PRAGMA table_info(token_usage)") as cursor:
@@ -462,3 +492,230 @@ class StructuredStore:
                 (session_id,),
             )
             await db.commit()
+
+    async def create_reminder(
+        self,
+        *,
+        title: str,
+        description: str | None,
+        schedule_type: str,
+        schedule_value: str,
+        channel: str = "all",
+        status: str = "active",
+        next_run_at: str | None = None,
+        heartbeat_config: str | None = None,
+    ) -> int:
+        await self.init()
+        now = _now_iso()
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO reminders(
+                    title,
+                    description,
+                    schedule_type,
+                    schedule_value,
+                    channel,
+                    status,
+                    created_at,
+                    updated_at,
+                    next_run_at,
+                    heartbeat_config
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    title,
+                    description,
+                    schedule_type,
+                    schedule_value,
+                    channel,
+                    status,
+                    now,
+                    now,
+                    next_run_at,
+                    heartbeat_config,
+                ),
+            )
+            await db.commit()
+            return int(cursor.lastrowid or 0)
+
+    async def get_reminder(self, reminder_id: int) -> dict[str, Any] | None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT
+                    id,
+                    title,
+                    description,
+                    schedule_type,
+                    schedule_value,
+                    channel,
+                    status,
+                    created_at,
+                    updated_at,
+                    next_run_at,
+                    heartbeat_config
+                FROM reminders
+                WHERE id = ?
+                """,
+                (reminder_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+
+        if row is None:
+            return None
+        payload = dict(row)
+        payload["heartbeat_config"] = self._normalize_heartbeat_config(
+            payload.get("heartbeat_config")
+        )
+        return payload
+
+    async def list_reminders(
+        self,
+        *,
+        status: str | None = "active",
+    ) -> list[dict[str, Any]]:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            query = """
+                SELECT
+                    id,
+                    title,
+                    description,
+                    schedule_type,
+                    schedule_value,
+                    channel,
+                    status,
+                    created_at,
+                    updated_at,
+                    next_run_at,
+                    heartbeat_config
+                FROM reminders
+            """
+            params: tuple[Any, ...] = ()
+            if status is not None:
+                query += " WHERE status = ?"
+                params = (status,)
+            query += " ORDER BY id DESC"
+            async with db.execute(query, params) as cursor:
+                rows = await cursor.fetchall()
+
+        payloads: list[dict[str, Any]] = []
+        for row in rows:
+            payload = dict(row)
+            payload["heartbeat_config"] = self._normalize_heartbeat_config(
+                payload.get("heartbeat_config")
+            )
+            payloads.append(payload)
+        return payloads
+
+    async def update_reminder(
+        self,
+        reminder_id: int,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        schedule_type: str | None = None,
+        schedule_value: str | None = None,
+        channel: str | None = None,
+        status: str | None = None,
+        next_run_at: str | None = None,
+        heartbeat_config: str | None = None,
+    ) -> None:
+        await self.init()
+        fields: list[str] = []
+        params: list[Any] = []
+
+        if title is not None:
+            fields.append("title = ?")
+            params.append(title)
+        if description is not None:
+            fields.append("description = ?")
+            params.append(description)
+        if schedule_type is not None:
+            fields.append("schedule_type = ?")
+            params.append(schedule_type)
+        if schedule_value is not None:
+            fields.append("schedule_value = ?")
+            params.append(schedule_value)
+        if channel is not None:
+            fields.append("channel = ?")
+            params.append(channel)
+        if status is not None:
+            fields.append("status = ?")
+            params.append(status)
+        if next_run_at is not None:
+            fields.append("next_run_at = ?")
+            params.append(next_run_at)
+        if heartbeat_config is not None:
+            fields.append("heartbeat_config = ?")
+            params.append(heartbeat_config)
+
+        fields.append("updated_at = ?")
+        params.append(_now_iso())
+        params.append(reminder_id)
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                f"""
+                UPDATE reminders
+                SET {", ".join(fields)}
+                WHERE id = ?
+                """,
+                tuple(params),
+            )
+            await db.commit()
+
+    async def delete_reminder(self, reminder_id: int) -> None:
+        await self.update_reminder(reminder_id, status="deleted")
+
+    async def mark_reminder_completed(self, reminder_id: int) -> None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE reminders
+                SET status = 'completed', next_run_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (_now_iso(), reminder_id),
+            )
+            await db.commit()
+
+    async def set_reminder_next_run_at(
+        self,
+        reminder_id: int,
+        next_run_at: str | None,
+    ) -> None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE reminders
+                SET next_run_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (next_run_at, _now_iso(), reminder_id),
+            )
+            await db.commit()
+
+    def _normalize_heartbeat_config(
+        self,
+        value: Any,
+    ) -> list[dict[str, Any]] | None:
+        if value in (None, ""):
+            return None
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return None
+            if isinstance(parsed, list):
+                return [item for item in parsed if isinstance(item, dict)]
+        return None

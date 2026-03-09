@@ -33,6 +33,12 @@ class SlashStructuredStore(Protocol):
 
     async def summarize_latency_by_model(self) -> list[dict[str, Any]]: ...
 
+    async def list_reminders(
+        self,
+        *,
+        status: str | None = "active",
+    ) -> list[dict[str, Any]]: ...
+
 
 @dataclass
 class SlashCommandEntry:
@@ -99,6 +105,11 @@ class SlashCommandHandler:
                 command="/skills",
                 description="查看已注册技能及熔断状态",
                 handler=self._handle_skills_status,
+            ),
+            SlashCommandEntry(
+                command="/reminders",
+                description="列出当前活跃提醒",
+                handler=self._handle_reminders,
             ),
         ]
 
@@ -300,6 +311,19 @@ class SlashCommandHandler:
             )
 
         lines.extend(["", f"⚡ Kill Switch: {'开启' if global_kill else '关闭'}"])
+        return "\n".join(lines)
+
+    async def _handle_reminders(self, _: Message) -> str:
+        rows = await self.structured_store.list_reminders(status="active")
+        if not rows:
+            return "暂无活跃提醒。"
+
+        lines = ["活跃提醒："]
+        for row in rows:
+            lines.append(
+                f"- #{row.get('id')} {row.get('title', '')} "
+                f"({row.get('schedule_type', '')}: {row.get('schedule_value', '')})"
+            )
         return "\n".join(lines)
 
     def _format_token(self, value: Any) -> str:

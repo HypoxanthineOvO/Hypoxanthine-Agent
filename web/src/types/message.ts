@@ -8,6 +8,7 @@ export interface Message {
   session_id: string;
   senderName?: string;
   senderAvatar?: string;
+  message_tag?: "reminder" | "heartbeat";
   channel?: string;
   event_type?: "tool_call_start" | "tool_call_result";
   tool_name?: string;
