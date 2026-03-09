@@ -181,6 +181,10 @@ class HeartbeatService:
             should_push = True
         if should_push is None:
             should_push = fallback_should_push
+        # Safety-first: if deterministic signals already indicate abnormality,
+        # do not allow model judgment to suppress the proactive push.
+        if fallback_should_push and not bool(should_push):
+            should_push = True
 
         return {
             "should_push": bool(should_push),

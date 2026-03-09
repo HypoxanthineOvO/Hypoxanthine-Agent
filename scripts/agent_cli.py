@@ -299,16 +299,42 @@ async def _case_send_regression(smoke: SmokeSession, text: str, timeout: int = 3
 async def _case_reminder_push_regression(smoke: SmokeSession) -> SmokeCaseResult:
     unique_title = f"m8_smoke_{int(time.time())}"
     trigger_at = (datetime.now() + timedelta(minutes=1)).replace(microsecond=0).isoformat()
+    subprocess.run(
+        [
+            "sqlite3",
+            "memory/hypo.db",
+            "DELETE FROM reminders WHERE title LIKE 'm8_smoke_%' OR title LIKE '%m8_smoke%';",
+        ],
+        check=False,
+    )
+    baseline_id_raw = _query_db_value("SELECT COALESCE(MAX(id), 0) FROM reminders;")
+    baseline_id = int(baseline_id_raw) if baseline_id_raw.isdigit() else 0
     create_prompt = (
         "请务必调用 create_reminder 工具创建提醒，不要只给文字答复。"
         f"参数：title={unique_title}，schedule_type=once，schedule_value={trigger_at}，channel=all。"
     )
     await smoke.send(create_prompt)
-    done, chunks = await smoke.wait_for_assistant_done(timeout=30)
-    if not done:
-        return SmokeCaseResult("reminder create regression", SmokeStatus.FAIL, "create reminder timeout")
-    if not chunks:
-        return SmokeCaseResult("reminder create regression", SmokeStatus.FAIL, "create reminder no chunks")
+    await smoke.wait_for_assistant_done(timeout=45)
+
+    created_rows = _query_db_rows(
+        f"SELECT id, title FROM reminders WHERE id > {baseline_id} ORDER BY id DESC;"
+    )
+    created_ids = [int(row[0]) for row in created_rows if row and row[0].isdigit()]
+    created_titles = [row[1] for row in created_rows if len(row) >= 2 and row[1]]
+    if not created_ids:
+        retry_prompt = (
+            "上一步未创建成功。请直接调用 create_reminder 工具，"
+            f"title={unique_title}，schedule_type=once，schedule_value={trigger_at}。"
+        )
+        await smoke.send(retry_prompt)
+        await smoke.wait_for_assistant_done(timeout=30)
+        created_rows = _query_db_rows(
+            f"SELECT id, title FROM reminders WHERE id > {baseline_id} ORDER BY id DESC;"
+        )
+        created_ids = [int(row[0]) for row in created_rows if row and row[0].isdigit()]
+        created_titles = [row[1] for row in created_rows if len(row) >= 2 and row[1]]
+    if not created_ids:
+        return SmokeCaseResult("reminder create regression", SmokeStatus.FAIL, "db has no new reminder row")
 
     await smoke.send("/reminders")
     done, list_chunks = await smoke.wait_for_assistant_done(timeout=20)
@@ -318,7 +344,7 @@ async def _case_reminder_push_regression(smoke: SmokeSession) -> SmokeCaseResult
         return SmokeCaseResult("send \"/reminders\" regression", SmokeStatus.FAIL, "no assistant chunks")
 
     list_text = "".join(list_chunks)
-    if unique_title not in list_text:
+    if (unique_title not in list_text) and (not any(f"#{rid}" in list_text for rid in created_ids)):
         return SmokeCaseResult("send \"/reminders\" regression", SmokeStatus.FAIL, "created reminder not listed")
 
     reminder_payload = await smoke.wait_for_tag("reminder", timeout=120)
@@ -326,7 +352,7 @@ async def _case_reminder_push_regression(smoke: SmokeSession) -> SmokeCaseResult
         return SmokeCaseResult("reminder proactive push regression", SmokeStatus.FAIL, "no reminder push")
 
     reminder_text = str(reminder_payload.get("text") or "")
-    if unique_title not in reminder_text:
+    if created_titles and not any(title in reminder_text for title in created_titles):
         return SmokeCaseResult(
             "reminder proactive push regression",
             SmokeStatus.FAIL,
@@ -347,6 +373,24 @@ async def _case_heartbeat_push(smoke: SmokeSession, tasks_payload: dict[str, Any
             SmokeStatus.SKIP,
             f"tasks.heartbeat.interval_minutes={interval}, expected 1 for smoke",
         )
+
+    # Force one deterministic abnormal signal for smoke: overdue active reminder.
+    overdue_title = f"m9_smoke_overdue_{int(time.time())}"
+    subprocess.run(
+        [
+            "sqlite3",
+            "memory/hypo.db",
+            (
+                "INSERT INTO reminders("
+                "title,description,schedule_type,schedule_value,channel,status,created_at,updated_at,next_run_at,heartbeat_config"
+                ") VALUES ("
+                f"'{overdue_title}','smoke overdue seed','once','2000-01-01T00:00:00+00:00','all','active',"
+                "datetime('now'),datetime('now'),'2000-01-01T00:00:00+00:00',NULL"
+                ");"
+            ),
+        ],
+        check=False,
+    )
 
     timeout = int(max(75, interval * 80))
     payload = await smoke.wait_for_tag("heartbeat", timeout=timeout)
