@@ -434,23 +434,17 @@ async def _case_email_scan_trigger(smoke: SmokeSession, tasks_payload: dict[str,
         ).get("email_scan_trigger_cmd")
         or ""
     ).strip()
-    if not trigger_cmd:
-        return SmokeCaseResult(
-            "email_scan scheduled trigger",
-            SmokeStatus.SKIP,
-            "no smoke.email_scan_trigger_cmd configured",
-        )
-
-    run_result = subprocess.run(trigger_cmd, shell=True, capture_output=True, text=True, check=False)
-    if run_result.returncode != 0:
-        detail = (run_result.stderr or run_result.stdout or "").strip()
-        if len(detail) > 120:
-            detail = detail[:120] + "..."
-        return SmokeCaseResult(
-            "email_scan scheduled trigger",
-            SmokeStatus.FAIL,
-            f"trigger command failed: {detail or run_result.returncode}",
-        )
+    if trigger_cmd:
+        run_result = subprocess.run(trigger_cmd, shell=True, capture_output=True, text=True, check=False)
+        if run_result.returncode != 0:
+            detail = (run_result.stderr or run_result.stdout or "").strip()
+            if len(detail) > 120:
+                detail = detail[:120] + "..."
+            return SmokeCaseResult(
+                "email_scan scheduled trigger",
+                SmokeStatus.FAIL,
+                f"trigger command failed: {detail or run_result.returncode}",
+            )
 
     payload = await smoke.wait_for_tag("email_scan", timeout=max(90, interval * 90))
     if payload is None:
