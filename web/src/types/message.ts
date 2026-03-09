@@ -1,3 +1,10 @@
+export type MessageTag =
+  | "reminder"
+  | "heartbeat"
+  | "email_scan"
+  | "tool_status"
+  | string;
+
 export interface Message {
   text?: string | null;
   image?: string | null;
@@ -8,7 +15,7 @@ export interface Message {
   session_id: string;
   senderName?: string;
   senderAvatar?: string;
-  message_tag?: "reminder" | "heartbeat";
+  message_tag?: MessageTag;
   channel?: string;
   event_type?: "tool_call_start" | "tool_call_result";
   tool_name?: string;

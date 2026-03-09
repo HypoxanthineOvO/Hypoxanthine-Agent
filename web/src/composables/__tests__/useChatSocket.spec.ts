@@ -186,9 +186,18 @@ describe("useChatSocket", () => {
         message_tag: "reminder",
       }),
     );
+    ws.emitMessage(
+      JSON.stringify({
+        text: "邮件扫描完成",
+        sender: "assistant",
+        session_id: "s1",
+        message_tag: "email_scan",
+      }),
+    );
 
-    expect(socket.messages.value).toHaveLength(1);
+    expect(socket.messages.value).toHaveLength(2);
     expect(socket.messages.value[0]?.message_tag).toBe("reminder");
+    expect(socket.messages.value[1]?.message_tag).toBe("email_scan");
   });
 
   it("schedules reconnect with exponential backoff after unexpected close", () => {
