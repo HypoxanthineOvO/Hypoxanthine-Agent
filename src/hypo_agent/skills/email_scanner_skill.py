@@ -171,13 +171,106 @@ class EmailScannerSkill(BaseSkill):
                 "category": layer1["category"],
                 "skip_llm": True,
                 "reason": f"matched rule {layer1['rule_name']}",
+                "summary": str(email_payload.get("subject") or ""),
+            }
+
+        # Layer 2: lightweight classification for unmatched or non-skip rules.
+        layer2 = await self._layer2_classify(email_payload, layer1)
+        category = str(layer2.get("category") or layer1["category"] or "low_priority")
+        if category not in {"important", "system", "low_priority", "archive"}:
+            category = "low_priority"
+
+        # Layer 3: strong model summary for high-priority categories.
+        summary = str(email_payload.get("subject") or "").strip() or "(no subject)"
+        if category in {"important", "system"}:
+            generated_summary = await self._layer3_summarize(email_payload)
+            if generated_summary:
+                summary = generated_summary
+
+        return {
+            "layer": "llm",
+            "category": category,
+            "skip_llm": False,
+            "reason": str(layer2.get("reason") or f"matched={layer1['matched']}"),
+            "confidence": layer2.get("confidence"),
+            "summary": summary,
+        }
+
+    async def _layer2_classify(
+        self,
+        email_payload: dict[str, Any],
+        layer1: dict[str, Any],
+    ) -> dict[str, Any]:
+        fallback_category = str(layer1.get("category") or "low_priority")
+        if not (
+            self.model_router is not None
+            and hasattr(self.model_router, "call_lightweight_json")
+        ):
+            return {
+                "category": fallback_category,
+                "confidence": None,
+                "reason": "router_unavailable",
+            }
+
+        prompt = (
+            "你是邮件分类器。只输出 JSON，字段包含 category/confidence/reason。"
+            "category 只能是 important/system/low_priority/archive。"
+            f"\nfrom={email_payload.get('from', '')}"
+            f"\nsubject={email_payload.get('subject', '')}"
+            f"\nbody={str(email_payload.get('body', ''))[:600]}"
+        )
+        try:
+            result = await self.model_router.call_lightweight_json(prompt)
+        except TypeError:
+            result = await self.model_router.call_lightweight_json(
+                prompt,
+                session_id="main",
+            )
+        except Exception:
+            return {
+                "category": fallback_category,
+                "confidence": None,
+                "reason": "layer2_failed",
+            }
+        if not isinstance(result, dict):
+            return {
+                "category": fallback_category,
+                "confidence": None,
+                "reason": "layer2_invalid_payload",
             }
         return {
-            "layer": "rule_fallback",
-            "category": layer1["category"],
-            "skip_llm": False,
-            "reason": f"matched={layer1['matched']}",
+            "category": str(result.get("category") or fallback_category),
+            "confidence": result.get("confidence"),
+            "reason": str(result.get("reason") or ""),
         }
+
+    async def _layer3_summarize(self, email_payload: dict[str, Any]) -> str:
+        if not (self.model_router is not None and hasattr(self.model_router, "call")):
+            return ""
+        prompt = (
+            "请用中文输出 1-2 句邮件摘要，突出行动项。"
+            f"\n发件人: {email_payload.get('from', '')}"
+            f"\n标题: {email_payload.get('subject', '')}"
+            f"\n正文: {str(email_payload.get('body', ''))[:1000]}"
+        )
+        messages = [{"role": "user", "content": prompt}]
+        model_name = "chat"
+        if hasattr(self.model_router, "get_model_for_task"):
+            try:
+                model_name = str(self.model_router.get_model_for_task("chat") or "chat")
+            except Exception:
+                model_name = "chat"
+
+        try:
+            return str(
+                await self.model_router.call(
+                    model_name,
+                    messages,
+                    session_id="main",
+                )
+            ).strip()
+        except Exception:
+            return ""
 
     async def scan_emails(self, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
         del params

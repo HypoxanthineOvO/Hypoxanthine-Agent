@@ -269,3 +269,80 @@ def test_scheduled_scan_enqueues_email_scan_event(tmp_path: Path) -> None:
         assert "summary" in event
 
     asyncio.run(_run())
+
+
+class LlmRouterStub:
+    def __init__(self) -> None:
+        self.lightweight_calls = 0
+        self.chat_calls = 0
+
+    async def call_lightweight_json(self, prompt: str, *, session_id: str | None = None) -> dict:
+        del prompt, session_id
+        self.lightweight_calls += 1
+        return {"category": "important", "confidence": 0.92, "reason": "contains bill keyword"}
+
+    async def call(self, model_name: str, messages: list[dict], *, session_id: str | None = None, tools=None):
+        del model_name, messages, session_id, tools
+        self.chat_calls += 1
+        return "这是重点邮件摘要"
+
+
+def test_layer2_calls_lightweight_json_for_unmatched_mail(tmp_path: Path) -> None:
+    rules_path = tmp_path / "email_rules.yaml"
+    rules_path.write_text("rules: []", encoding="utf-8")
+    secrets_path = tmp_path / "secrets.yaml"
+    _write_secrets(secrets_path)
+    router = LlmRouterStub()
+    skill = EmailScannerSkill(
+        structured_store=StubStore(),
+        model_router=router,
+        message_queue=None,
+        rules_path=rules_path,
+        secrets_path=secrets_path,
+    )
+
+    outcome = asyncio.run(
+        skill._classify_email(
+            {
+                "account_name": "main",
+                "message_id": "<layer2-1>",
+                "from": "finance@example.com",
+                "subject": "Monthly invoice",
+                "body": "Please pay before Friday",
+            }
+        )
+    )
+
+    assert router.lightweight_calls == 1
+    assert outcome["category"] == "important"
+
+
+def test_layer3_calls_default_model_for_important_and_system(tmp_path: Path) -> None:
+    rules_path = tmp_path / "email_rules.yaml"
+    rules_path.write_text("rules: []", encoding="utf-8")
+    secrets_path = tmp_path / "secrets.yaml"
+    _write_secrets(secrets_path)
+    router = LlmRouterStub()
+    skill = EmailScannerSkill(
+        structured_store=StubStore(),
+        model_router=router,
+        message_queue=None,
+        rules_path=rules_path,
+        secrets_path=secrets_path,
+    )
+
+    outcome = asyncio.run(
+        skill._classify_email(
+            {
+                "account_name": "main",
+                "message_id": "<layer3-1>",
+                "from": "finance@example.com",
+                "subject": "Monthly invoice",
+                "body": "Please pay before Friday",
+            }
+        )
+    )
+
+    assert outcome["category"] in {"important", "system"}
+    assert router.chat_calls == 1
+    assert "摘要" in outcome["summary"]
