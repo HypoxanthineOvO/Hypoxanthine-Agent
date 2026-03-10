@@ -542,7 +542,8 @@ async def cmd_smoke(*, port: int, session_id: str) -> int:
     async with websockets.connect(uri) as ws:
         smoke = SmokeSession(ws=ws, session_id=session_id)
         print("[CASE 1] base dialogue regression")
-        results.append(await _case_send_regression(smoke, "你好", timeout=30))
+        # Some providers can be slow or cold-start; keep smoke robust.
+        results.append(await _case_send_regression(smoke, "你好", timeout=90))
         print("[CASE 2] reminder regression and proactive push")
         results.append(await _case_reminder_push_regression(smoke))
         print("[CASE 3] heartbeat proactive push")
