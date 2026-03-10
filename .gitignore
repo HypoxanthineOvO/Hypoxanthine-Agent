@@ -9,6 +9,7 @@ __pycache__/
 .codex/
 .vscode/
 .playwright/
+.worktrees/
 
 web/node_modules/
 web/dist/
