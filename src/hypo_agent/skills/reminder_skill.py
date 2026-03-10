@@ -40,7 +40,10 @@ class ReminderSkill(BaseSkill):
                     "type": "string",
                     "description": (
                         'For schedule_type="once": an ISO 8601 datetime string in '
-                        'the user local timezone (e.g. "2026-03-07T19:51:00"). '
+                        'the user local timezone (e.g. "2026-03-07T19:51:00+08:00"). '
+                        "MUST be in the future. Refer to the current server time in "
+                        "[System Context] for accuracy. "
+                        'Example: "2026-03-10T08:30:00+08:00". '
                         'Do NOT use relative expressions like "+1 minute" or "+30m" - '
                         "calculate an absolute datetime first. "
                         'For schedule_type="cron": a standard cron expression, '
@@ -200,13 +203,24 @@ class ReminderSkill(BaseSkill):
 
         if schedule_type == "once":
             try:
-                datetime.fromisoformat(schedule_value)
+                parsed = datetime.fromisoformat(schedule_value)
             except ValueError:
                 return SkillOutput(
                     status="error",
                     error_info=(
                         'For schedule_type="once", schedule_value must be an absolute '
                         "ISO 8601 datetime."
+                    ),
+                )
+            parsed = self._ensure_timezone(parsed)
+            now = datetime.now(parsed.tzinfo or self._default_timezone())
+            if parsed < now - timedelta(seconds=30):
+                return SkillOutput(
+                    status="error",
+                    error_info=(
+                        f"trigger_time '{schedule_value}' is in the past. "
+                        f"Current server time: {now.isoformat()}. "
+                        "Please provide a future time."
                     ),
                 )
 
@@ -378,6 +392,11 @@ class ReminderSkill(BaseSkill):
         if unit in {"d", "day", "days", "天"}:
             return timedelta(days=amount)
         return None
+
+    def _ensure_timezone(self, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=self._default_timezone())
+        return value
 
     def _json_dumps_or_none(self, value: Any) -> str | None:
         if value is None:

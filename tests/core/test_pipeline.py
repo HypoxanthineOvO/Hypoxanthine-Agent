@@ -35,7 +35,9 @@ def test_pipeline_injects_recent_history_before_inbound() -> None:
     class StubRouter:
         async def call(self, model_name, messages):
             assert model_name == "Gemini3Pro"
-            assert messages == [
+            assert messages[0]["role"] == "system"
+            assert "当前时间:" in messages[0]["content"]
+            assert messages[1:] == [
                 {"role": "user", "content": "旧问题"},
                 {"role": "assistant", "content": "旧回答"},
                 {"role": "user", "content": "新问题"},
@@ -66,7 +68,9 @@ def test_pipeline_stream_reply_emits_chunk_and_done_events_and_persists() -> Non
     class StubRouter:
         async def stream(self, model_name, messages, *, session_id=None):
             assert model_name == "Gemini3Pro"
-            assert messages == [{"role": "user", "content": "hello"}]
+            assert messages[0]["role"] == "system"
+            assert "当前时间:" in messages[0]["content"]
+            assert messages[1:] == [{"role": "user", "content": "hello"}]
             assert session_id == "s1"
             yield "He"
             yield "llo"
@@ -231,3 +235,43 @@ def test_pipeline_stream_stops_when_kill_triggered() -> None:
 
     assert "Kill Switch" in text
     assert "llo" not in text
+
+
+def test_system_prompt_contains_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    import hypo_agent.core.pipeline as pipeline_module
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    fixed = datetime(2026, 3, 10, 0, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return fixed
+            return fixed.astimezone(tz)
+
+    monkeypatch.setattr(pipeline_module, "datetime", FixedDatetime)
+
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        async def call(self, model_name, messages):
+            return "unused"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+    )
+
+    messages = pipeline._build_llm_messages(Message(text="hi", sender="user", session_id="s1"))
+    system_messages = [item for item in messages if item["role"] == "system"]
+    assert len(system_messages) == 1
+    content = system_messages[0]["content"]
+    assert "当前时间:" in content
+    assert "2026-03-10T00:15:00+08:00" in content
+    assert "(" in content and ")" in content
+    tz_name = content.split("(")[-1].split(")")[0].strip()
+    assert tz_name

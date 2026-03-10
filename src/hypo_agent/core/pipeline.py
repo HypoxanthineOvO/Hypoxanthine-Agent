@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import datetime
 import inspect
 import json
 from typing import Any, Protocol
@@ -572,6 +573,7 @@ class ChatPipeline:
         llm_messages: list[dict[str, str]] = []
         if use_tools:
             llm_messages.append({"role": "system", "content": TOOL_USE_SYSTEM_PROMPT})
+        llm_messages.append({"role": "system", "content": self._system_time_context()})
 
         history = self.session_memory.get_recent_messages(
             inbound.session_id,
@@ -597,6 +599,18 @@ class ChatPipeline:
         else:
             return None
         return {"role": role, "content": text}
+
+    def _system_time_context(self) -> str:
+        now = datetime.now().astimezone()
+        tzinfo = now.tzinfo
+        tz_name = None
+        if tzinfo is not None:
+            tz_name = getattr(tzinfo, "key", None)
+            if not tz_name:
+                tz_name = tzinfo.tzname(now)
+        if not tz_name:
+            tz_name = "local"
+        return f"[System Context]\n当前时间: {now.isoformat()} ({tz_name})"
 
     def _kill_switch_active(self) -> bool:
         return bool(
