@@ -28,6 +28,13 @@ class FailingPipeline:
         raise RuntimeError("fallback chain exhausted")
 
 
+class TimeoutPipeline:
+    async def stream_reply(self, inbound):
+        if False:  # pragma: no cover
+            yield {}
+        raise TimeoutError("llm timeout")
+
+
 class ToolEventPipeline:
     async def stream_reply(self, inbound):
         yield {
@@ -115,7 +122,26 @@ def test_ws_sends_error_event_on_pipeline_runtime_error() -> None:
             event = ws.receive_json()
             assert event == {
                 "type": "error",
+                "code": "LLM_RUNTIME_ERROR",
                 "message": "LLM 调用失败，请检查配置或稍后重试",
+                "retryable": True,
+                "session_id": "s1",
+            }
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                ws.receive_json()
+            assert exc_info.value.code == 1011
+
+
+def test_ws_sends_retryable_timeout_error_event() -> None:
+    with _client(pipeline=TimeoutPipeline()) as client:
+        with client.websocket_connect("/ws?token=test-token") as ws:
+            ws.send_json({"text": "hello", "sender": "user", "session_id": "s1"})
+            event = ws.receive_json()
+            assert event == {
+                "type": "error",
+                "code": "LLM_TIMEOUT",
+                "message": "LLM 调用超时，请稍后重试",
+                "retryable": True,
                 "session_id": "s1",
             }
             with pytest.raises(WebSocketDisconnect) as exc_info:

@@ -11,19 +11,44 @@ router = APIRouter()
 logger = structlog.get_logger("hypo_agent.gateway.ws")
 
 
-async def _send_error_and_close(ws: WebSocket, session_id: str, exc: Exception) -> None:
-    logger.exception(
-        "ws_pipeline_failed",
-        session_id=session_id,
-        error=str(exc),
-    )
-    await ws.send_json(
-        {
+def _build_error_event(session_id: str, exc: Exception) -> dict[str, object]:
+    if isinstance(exc, TimeoutError):
+        return {
             "type": "error",
-            "message": "LLM 调用失败，请检查配置或稍后重试",
+            "code": "LLM_TIMEOUT",
+            "message": "LLM 调用超时，请稍后重试",
+            "retryable": True,
             "session_id": session_id,
         }
+
+    if isinstance(exc, RuntimeError):
+        return {
+            "type": "error",
+            "code": "LLM_RUNTIME_ERROR",
+            "message": "LLM 调用失败，请检查配置或稍后重试",
+            "retryable": True,
+            "session_id": session_id,
+        }
+
+    return {
+        "type": "error",
+        "code": "INTERNAL_ERROR",
+        "message": "服务内部错误，请稍后重试",
+        "retryable": False,
+        "session_id": session_id,
+    }
+
+
+async def _send_error_and_close(ws: WebSocket, session_id: str, exc: Exception) -> None:
+    event = _build_error_event(session_id, exc)
+    logger.exception(
+        "ws.error.failed",
+        session_id=session_id,
+        code=event.get("code"),
+        retryable=event.get("retryable"),
+        error=str(exc),
     )
+    await ws.send_json(event)
     await ws.close(code=1011)
 
 

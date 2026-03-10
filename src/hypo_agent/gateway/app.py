@@ -9,12 +9,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import yaml
 
+from hypo_agent.core.channel_adapter import WebUIAdapter
 from hypo_agent.core.config_loader import load_runtime_model_config
 from hypo_agent.core.model_router import ModelRouter
 from hypo_agent.core.output_compressor import OutputCompressor
 from hypo_agent.core.pipeline import ChatPipeline
 from hypo_agent.core.slash_commands import SlashCommandHandler
 from hypo_agent.core.skill_manager import SkillManager
+from hypo_agent.gateway.compressed_api import router as compressed_api_router
+from hypo_agent.gateway.files_api import router as files_api_router
 from hypo_agent.gateway.kill_switch_api import router as kill_switch_api_router
 from hypo_agent.gateway.sessions_api import router as sessions_api_router
 from hypo_agent.gateway.middleware import WsTokenAuthMiddleware
@@ -46,11 +49,13 @@ def _default_security() -> SecurityConfig:
 
 def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
     resolved_security = security or _default_security()
+    structured_store = StructuredStore(db_path="memory/hypo.db")
     permission_manager = PermissionManager(resolved_security.directory_whitelist)
     circuit_breaker = CircuitBreaker(resolved_security.circuit_breaker)
     skill_manager = SkillManager(
         circuit_breaker=circuit_breaker,
         permission_manager=permission_manager,
+        structured_store=structured_store,
     )
 
     skills_config_path = Path("config/skills.yaml")
@@ -95,7 +100,7 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
 
     return AppDeps(
         session_memory=SessionMemory(sessions_dir="memory/sessions", buffer_limit=20),
-        structured_store=StructuredStore(db_path="memory/hypo.db"),
+        structured_store=structured_store,
         skill_manager=skill_manager,
         circuit_breaker=circuit_breaker,
         permission_manager=permission_manager,
@@ -141,6 +146,7 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
         max_react_rounds=5,
         slash_commands=slash_commands,
         output_compressor=deps.output_compressor,
+        channel_adapter=WebUIAdapter(),
     )
 
 
@@ -163,6 +169,7 @@ def create_app(
         resolved_deps.skill_manager = SkillManager(
             circuit_breaker=resolved_deps.circuit_breaker,
             permission_manager=resolved_deps.permission_manager,
+            structured_store=resolved_deps.structured_store,
         )
 
     @asynccontextmanager
@@ -180,6 +187,7 @@ def create_app(
     app.add_middleware(WsTokenAuthMiddleware, auth_token=auth_token)
     pipeline_instance = pipeline or _build_default_pipeline(resolved_deps)
 
+    app.state.auth_token = auth_token
     app.state.deps = resolved_deps
     app.state.session_memory = resolved_deps.session_memory
     app.state.structured_store = resolved_deps.structured_store
@@ -191,5 +199,7 @@ def create_app(
 
     app.include_router(ws_router)
     app.include_router(sessions_api_router)
+    app.include_router(compressed_api_router)
+    app.include_router(files_api_router)
     app.include_router(kill_switch_api_router)
     return app

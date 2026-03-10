@@ -1,8 +1,17 @@
 <script setup lang="ts">
-import MarkdownIt from "markdown-it";
-import { computed, onMounted, ref } from "vue";
+import { useNotification } from "naive-ui";
+import { computed, h, nextTick, onMounted, ref, watch } from "vue";
 
+import CompressedMessage from "../components/chat/CompressedMessage.vue";
+import FileAttachment from "../components/chat/FileAttachment.vue";
+import MarkdownPreview from "../components/chat/MarkdownPreview.vue";
+import MediaMessage from "../components/chat/MediaMessage.vue";
+import MessageBubble from "../components/chat/MessageBubble.vue";
+import TextMessage from "../components/chat/TextMessage.vue";
+import ToolCallMessage from "../components/chat/ToolCallMessage.vue";
 import ConnectionStatus from "../components/ConnectionStatus.vue";
+import ReconnectBanner from "../components/layout/ReconnectBanner.vue";
+import { useHotkey } from "../composables/useHotkey";
 import { useChatSocket } from "../composables/useChatSocket";
 import type { Message, SessionSummary } from "../types/message";
 
@@ -19,13 +28,10 @@ const props = withDefaults(
   },
 );
 
-const markdown = new MarkdownIt({
-  html: false,
-  linkify: true,
-  breaks: true,
-});
-
 const draft = ref("");
+const composerExpanded = ref(false);
+const composerRef = ref<HTMLTextAreaElement | null>(null);
+const messagesRef = ref<HTMLElement | null>(null);
 const sessions = ref<SessionSummary[]>([]);
 const activeSessionId = ref(props.sessionId);
 
@@ -44,15 +50,36 @@ const normalizedApiBase = computed(() => {
   }
 });
 
-const { connect, disconnect, messages, replaceMessages, sendText, status } =
+const {
+  connect,
+  disconnect,
+  lastError,
+  messages,
+  reconnectDelayMs,
+  reconnectNow,
+  replaceMessages,
+  sendText,
+  status,
+} =
   useChatSocket({
   url: props.wsUrl,
   token: props.token,
   sessionId: activeSessionId,
 });
 
+const notification = (() => {
+  try {
+    return useNotification();
+  } catch {
+    return null;
+  }
+})();
+
 const canSend = computed(
   () => status.value === "connected" && draft.value.trim().length > 0,
+);
+const showReconnectBanner = computed(
+  () => status.value === "reconnecting" || reconnectDelayMs.value !== null,
 );
 
 const makeApiUrl = (path: string): string =>
@@ -148,8 +175,95 @@ const newSession = (): void => {
   replaceMessages([]);
 };
 
-const renderMarkdown = (message: Message): string =>
-  markdown.render(message.text ?? "");
+const clearCurrentConversation = (): void => {
+  replaceMessages([]);
+  const existing = sessions.value.find((item) => item.session_id === activeSessionId.value);
+  if (existing) {
+    existing.message_count = 0;
+    existing.updated_at = new Date().toISOString();
+  }
+};
+
+const adjustComposerHeight = (): void => {
+  const input = composerRef.value;
+  if (!input) {
+    return;
+  }
+  input.style.height = "auto";
+  const maxHeight = 200;
+  const nextHeight = Math.min(input.scrollHeight, maxHeight);
+  input.style.height = `${nextHeight}px`;
+  input.style.overflowY = input.scrollHeight > maxHeight ? "auto" : "hidden";
+};
+
+const toggleComposerExpanded = (): void => {
+  composerExpanded.value = !composerExpanded.value;
+  void nextTick(() => {
+    adjustComposerHeight();
+    composerRef.value?.focus();
+  });
+};
+
+const hasMarkdownPreview = (message: Message): boolean =>
+  Boolean(
+    message.file?.toLowerCase().endsWith(".md") &&
+      typeof message.text === "string" &&
+      message.text.length > 0,
+  );
+
+const codeFilePreviewExt = /\.(py|ya?ml|json|ts|js|sh|toml|ini)$/i;
+
+const resolveAssetUrl = (rawPath: string | null | undefined): string => {
+  if (!rawPath) {
+    return "";
+  }
+  if (/^https?:\/\//i.test(rawPath)) {
+    return rawPath;
+  }
+  return makeApiUrl(
+    `files?path=${encodeURIComponent(rawPath)}&token=${encodeURIComponent(props.token)}`,
+  );
+};
+
+const mediaSource = (message: Message): string =>
+  resolveAssetUrl(message.image ?? message.file ?? "");
+
+const hasMedia = (message: Message): boolean => {
+  const source = message.image ?? message.file ?? "";
+  return /\.(png|jpe?g|gif|svg|webp|mp4|webm)$/i.test(source);
+};
+
+const hasCodeFilePreview = (message: Message): boolean =>
+  Boolean(
+    message.file &&
+      codeFilePreviewExt.test(message.file) &&
+      typeof message.text === "string" &&
+      message.text.length > 0,
+  );
+
+const hasFileAttachment = (message: Message): boolean =>
+  Boolean(
+    message.file &&
+      !hasMarkdownPreview(message) &&
+      !hasMedia(message) &&
+      !hasCodeFilePreview(message),
+  );
+
+const isToolCall = (message: Message): boolean =>
+  message.event_type === "tool_call_start" || message.event_type === "tool_call_result";
+
+const isCompressedToolResult = (message: Message): boolean =>
+  message.event_type === "tool_call_result" &&
+  Boolean(message.compressed_meta) &&
+  typeof message.result === "string";
+
+const resolveCompressedFilePath = (message: Message): string => {
+  const params = message.arguments;
+  if (params && typeof params.path === "string") {
+    return params.path;
+  }
+  return "";
+};
 
 const onSubmit = (): void => {
   if (!sendText(draft.value)) {
@@ -157,11 +271,118 @@ const onSubmit = (): void => {
   }
   ensureSessionPresent(activeSessionId.value);
   draft.value = "";
+  void nextTick(() => {
+    adjustComposerHeight();
+  });
+};
+
+const scrollToBottom = (): void => {
+  const element = messagesRef.value;
+  if (!element) {
+    return;
+  }
+  element.scrollTop = element.scrollHeight;
 };
 
 onMounted(() => {
   void loadSessions();
+  connect();
+  void nextTick(() => {
+    adjustComposerHeight();
+  });
 });
+
+watch(draft, () => {
+  adjustComposerHeight();
+});
+
+watch(
+  () => messages.value.length,
+  () => {
+    void nextTick(() => {
+      scrollToBottom();
+    });
+  },
+);
+
+watch(
+  () => {
+    const last = messages.value[messages.value.length - 1];
+    return last?.text?.length ?? 0;
+  },
+  () => {
+    void nextTick(() => {
+      scrollToBottom();
+    });
+  },
+);
+
+watch(lastError, (error) => {
+  if (!error || error.session_id !== activeSessionId.value || notification === null) {
+    return;
+  }
+
+  notification.error({
+    title: `连接异常 · ${error.code}`,
+    content: error.message,
+    duration: 4000,
+    action: error.retryable
+      ? () =>
+          h(
+            "button",
+            {
+              class: "retry-action",
+              onClick: () => reconnectNow(),
+              type: "button",
+            },
+            "立即重试",
+          )
+      : undefined,
+  });
+});
+
+useHotkey([
+  {
+    combo: "ctrlOrMeta+enter",
+    handler: () => {
+      onSubmit();
+    },
+  },
+  {
+    combo: "escape",
+    handler: () => {
+      if (composerExpanded.value) {
+        composerExpanded.value = false;
+        return;
+      }
+      window.dispatchEvent(new Event("hypo:sidebar-collapse"));
+    },
+  },
+  {
+    combo: "ctrlOrMeta+l",
+    handler: () => {
+      clearCurrentConversation();
+    },
+  },
+  {
+    combo: "ctrlOrMeta+n",
+    handler: () => {
+      newSession();
+    },
+  },
+  {
+    combo: "ctrlOrMeta+d",
+    handler: () => {
+      window.dispatchEvent(new Event("hypo:theme-toggle"));
+    },
+  },
+  {
+    combo: "ctrlOrMeta+k",
+    handler: () => {
+      // Reserved for M7b command palette.
+    },
+  },
+]);
 </script>
 
 <template>
@@ -216,30 +437,76 @@ onMounted(() => {
         </div>
       </header>
 
-      <main class="messages" aria-live="polite">
-        <article
+      <ReconnectBanner
+        :visible="showReconnectBanner"
+        :retry-after-ms="reconnectDelayMs"
+        @retry="reconnectNow"
+      />
+
+      <main ref="messagesRef" class="messages" aria-live="polite">
+        <MessageBubble
           v-for="(message, index) in messages"
           :key="`${message.session_id}-${message.sender}-${index}`"
-          class="bubble"
-          :data-sender="message.sender"
+          :message="message"
         >
-          <header class="bubble-head">{{ message.sender }}</header>
-          <div class="bubble-body markdown-body" v-html="renderMarkdown(message)" />
-        </article>
+          <CompressedMessage
+            v-if="isCompressedToolResult(message)"
+            :summary="String(message.result ?? '')"
+            :compressed-meta="message.compressed_meta"
+            :api-base="normalizedApiBase"
+            :token="token"
+            :tool-name="message.tool_name"
+            :file-path="resolveCompressedFilePath(message)"
+          />
+          <ToolCallMessage
+            v-else-if="isToolCall(message)"
+            :tool-name="message.tool_name ?? ''"
+            :status="message.status"
+            :params="message.arguments"
+            :result="message.result"
+          />
+          <MarkdownPreview
+            v-else-if="hasMarkdownPreview(message)"
+            :content="message.text ?? ''"
+          />
+          <MediaMessage
+            v-else-if="hasMedia(message)"
+            :src="mediaSource(message)"
+          />
+          <FileAttachment
+            v-else-if="hasCodeFilePreview(message)"
+            :path="message.file ?? ''"
+            :content="message.text ?? ''"
+          />
+          <FileAttachment
+            v-else-if="hasFileAttachment(message)"
+            :path="resolveAssetUrl(message.file)"
+          />
+          <TextMessage
+            v-else
+            :text="message.text ?? ''"
+          />
+        </MessageBubble>
         <p v-if="messages.length === 0" class="empty-tip">
           No messages yet. Connect and send your first line.
         </p>
       </main>
 
-      <form class="composer" @submit.prevent="onSubmit">
-        <input
+      <form class="composer" :data-expanded="composerExpanded" @submit.prevent="onSubmit">
+        <textarea
+          ref="composerRef"
           v-model="draft"
-          type="text"
           name="message"
           autocomplete="off"
-          placeholder="Type a message and press Enter..."
+          placeholder="输入消息（Ctrl/Cmd+Enter 发送，Enter 换行）"
+          class="composer-input"
         />
-        <button type="submit" :disabled="!canSend">Send</button>
+        <div class="composer-actions">
+          <button type="button" class="ghost-button" @click="toggleComposerExpanded">
+            {{ composerExpanded ? "收起输入框" : "展开输入框" }}
+          </button>
+          <button type="submit" :disabled="!canSend">Send</button>
+        </div>
       </form>
     </div>
   </section>
@@ -258,7 +525,9 @@ onMounted(() => {
   display: grid;
   gap: 1rem;
   grid-template-columns: 260px 1fr;
+  height: 100%;
   margin: 0 auto;
+  min-height: 0;
   max-width: 1040px;
   padding: 1.2rem;
 }
@@ -269,6 +538,8 @@ onMounted(() => {
   border-radius: 0.95rem;
   display: grid;
   gap: 0.75rem;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
   padding: 0.8rem;
 }
 
@@ -281,7 +552,7 @@ onMounted(() => {
 .session-list {
   display: grid;
   gap: 0.5rem;
-  max-height: 60vh;
+  min-height: 0;
   overflow-y: auto;
 }
 
@@ -317,6 +588,8 @@ onMounted(() => {
 .chat-main {
   display: grid;
   gap: 1rem;
+  grid-template-rows: auto auto 1fr auto;
+  min-height: 0;
 }
 
 .chat-header {
@@ -361,6 +634,17 @@ onMounted(() => {
   transform: translateY(-1px);
 }
 
+.retry-action {
+  background: color-mix(in srgb, var(--error) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--error) 56%, transparent);
+  border-radius: 0.45rem;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-weight: 600;
+  padding: 0.15rem 0.45rem;
+}
+
 .messages {
   background: color-mix(in srgb, var(--surface) 90%, transparent);
   border: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
@@ -368,7 +652,7 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
-  max-height: 56vh;
+  min-height: 0;
   overflow-y: auto;
   padding: 1rem;
 }
@@ -413,22 +697,42 @@ onMounted(() => {
 }
 
 .composer {
-  display: grid;
+  align-items: flex-end;
+  display: flex;
+  flex-direction: column;
   gap: 0.7rem;
-  grid-template-columns: 1fr auto;
 }
 
-.composer input {
+.composer[data-expanded="true"] {
+  min-height: 42vh;
+}
+
+.composer-input {
   background: color-mix(in srgb, var(--surface) 82%, transparent);
   border: 1px solid var(--panel-edge);
   border-radius: 0.85rem;
   color: var(--text);
   font-family: inherit;
   font-size: 1rem;
+  min-height: 2.8rem;
+  resize: none;
+  width: 100%;
   padding: 0.75rem 0.9rem;
 }
 
-.composer button {
+.composer[data-expanded="true"] .composer-input {
+  flex: 1;
+  max-height: 60vh;
+}
+
+.composer-actions {
+  display: flex;
+  gap: 0.55rem;
+  justify-content: flex-end;
+  width: 100%;
+}
+
+.composer-actions button {
   background: linear-gradient(125deg, var(--brand), var(--brand-2));
   border: 0;
   border-radius: 0.85rem;
@@ -439,7 +743,13 @@ onMounted(() => {
   min-width: 5.3rem;
 }
 
-.composer button:disabled {
+.composer-actions .ghost-button {
+  background: transparent;
+  border: 1px solid var(--panel-edge);
+  color: var(--text);
+}
+
+.composer-actions button:disabled {
   cursor: not-allowed;
   filter: grayscale(0.8);
   opacity: 0.6;
@@ -449,15 +759,16 @@ onMounted(() => {
   margin: 0;
 }
 
-@media (max-width: 860px) {
+@media (max-width: 1023px) {
   .chat-shell {
     border-radius: 0.9rem;
     grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
     padding: 0.85rem;
   }
 
-  .session-list {
-    max-height: 22vh;
+  .session-sidebar {
+    max-height: clamp(8rem, 24vh, 12rem);
   }
 
   .chat-header {
@@ -466,7 +777,7 @@ onMounted(() => {
   }
 
   .composer {
-    grid-template-columns: 1fr;
+    align-items: stretch;
   }
 }
 </style>

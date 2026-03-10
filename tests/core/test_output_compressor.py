@@ -141,3 +141,31 @@ def test_compression_marker_chinese() -> None:
         )
 
     asyncio.run(_run())
+
+
+def test_output_compressor_writes_compressed_meta_to_input_metadata() -> None:
+    router = StubRouter(lambda **_: "summary")
+    compressor = OutputCompressor(router=router)
+
+    async def _run() -> None:
+        metadata: dict[str, object] = {"session_id": "s1", "tool_name": "run_command"}
+        output, compressed = await compressor.compress_if_needed(
+            "z" * 3000,
+            metadata=metadata,
+        )
+
+        assert compressed is True
+        assert len(output) <= 2500
+        compressed_meta = metadata.get("compressed_meta")
+        assert isinstance(compressed_meta, dict)
+        assert set(compressed_meta.keys()) == {
+            "cache_id",
+            "original_chars",
+            "compressed_chars",
+        }
+        assert int(compressed_meta["original_chars"]) == 3000
+        assert int(compressed_meta["compressed_chars"]) == len(output)
+        cache_id = str(compressed_meta["cache_id"])
+        assert compressor.get_original_output(cache_id) == "z" * 3000
+
+    asyncio.run(_run())

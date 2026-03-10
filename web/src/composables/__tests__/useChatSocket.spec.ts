@@ -1,10 +1,14 @@
-import { describe, expect, it, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ref } from "vue";
 
 import { useChatSocket } from "../useChatSocket";
 
 class MockWebSocket {
   static instances: MockWebSocket[] = [];
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSING = 2;
+  static CLOSED = 3;
 
   readonly url: string;
   onopen: ((event: Event) => void) | null = null;
@@ -12,6 +16,7 @@ class MockWebSocket {
   onerror: ((event: Event) => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
   sent: string[] = [];
+  readyState = MockWebSocket.CONNECTING;
 
   constructor(url: string) {
     this.url = url;
@@ -23,15 +28,22 @@ class MockWebSocket {
   }
 
   close(): void {
+    this.readyState = MockWebSocket.CLOSED;
     this.onclose?.({} as CloseEvent);
   }
 
   emitOpen(): void {
+    this.readyState = MockWebSocket.OPEN;
     this.onopen?.(new Event("open"));
   }
 
   emitMessage(data: string): void {
     this.onmessage?.({ data } as MessageEvent);
+  }
+
+  emitClose(): void {
+    this.readyState = MockWebSocket.CLOSED;
+    this.onclose?.({} as CloseEvent);
   }
 }
 
@@ -151,5 +163,30 @@ describe("useChatSocket", () => {
     ]);
     expect(socket.messages.value).toHaveLength(2);
     expect(socket.messages.value[0]?.text).toBe("old");
+  });
+
+  it("schedules reconnect with exponential backoff after unexpected close", () => {
+    vi.useFakeTimers();
+    const socket = useChatSocket({
+      url: "ws://localhost:8000/ws",
+      token: "abc123",
+      sessionId: ref("s1"),
+    });
+
+    socket.connect();
+    const first = MockWebSocket.instances[0];
+    if (!first) {
+      throw new Error("WebSocket was not created");
+    }
+    first.emitOpen();
+    first.emitClose();
+
+    expect(socket.status.value).toBe("reconnecting");
+    expect(socket.reconnectDelayMs.value).toBe(1000);
+
+    vi.advanceTimersByTime(1000);
+    expect(MockWebSocket.instances).toHaveLength(2);
+
+    vi.useRealTimers();
   });
 });

@@ -115,3 +115,31 @@ def test_structured_store_summarizes_token_and_latency_by_model(tmp_path) -> Non
         assert session_summary["rows"][0]["resolved_model"] == "Gemini3Pro"
 
     asyncio.run(_run())
+
+
+def test_structured_store_records_tool_invocations(tmp_path) -> None:
+    db_path = tmp_path / "hypo.db"
+
+    async def _run() -> None:
+        store = StructuredStore(db_path=db_path)
+        await store.init()
+        await store.record_tool_invocation(
+            session_id="s1",
+            tool_name="run_command",
+            params='{"command":"echo hi"}',
+            status="success",
+            result_preview="ok",
+            duration_ms=12.5,
+            error_info="",
+        )
+
+        rows = await store.list_tool_invocations(session_id="s1")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["session_id"] == "s1"
+        assert row["tool_name"] == "run_command"
+        assert row["status"] == "success"
+        assert row["result_preview"] == "ok"
+        assert row["duration_ms"] == 12.5
+
+    asyncio.run(_run())

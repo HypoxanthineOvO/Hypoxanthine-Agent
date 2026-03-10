@@ -256,3 +256,59 @@ def test_skill_manager_infers_scan_directory_as_write_operation() -> None:
     manager = SkillManager()
     assert manager._infer_operation("scan_directory") == "write"
     assert manager._infer_operation("update_directory_description") == "read"
+
+
+def test_skill_manager_records_tool_invocations() -> None:
+    class RecordingStructuredStore:
+        def __init__(self) -> None:
+            self.records: list[dict] = []
+
+        async def record_tool_invocation(self, **kwargs) -> None:
+            self.records.append(kwargs)
+
+    store = RecordingStructuredStore()
+    manager = SkillManager(structured_store=store)
+    manager.register(EchoSkill())
+
+    output = asyncio.run(manager.invoke("echo", {"text": "hello"}, session_id="s1"))
+    assert output.status == "success"
+
+    assert len(store.records) == 1
+    record = store.records[0]
+    assert record["session_id"] == "s1"
+    assert record["tool_name"] == "echo"
+    assert record["status"] == "success"
+    assert record["duration_ms"] >= 0
+    assert isinstance(record["result_preview"], str)
+
+
+def test_skill_manager_records_blocked_tool_invocations() -> None:
+    class BlockedCircuitBreaker:
+        def can_execute(self, tool_name: str, session_id: str | None):
+            return False, "blocked for test"
+
+        def record_success(self, tool_name: str, session_id: str | None) -> None:
+            raise AssertionError("record_success should not be called")
+
+        def record_failure(self, tool_name: str, session_id: str | None) -> None:
+            raise AssertionError("record_failure should not be called")
+
+    class RecordingStructuredStore:
+        def __init__(self) -> None:
+            self.records: list[dict] = []
+
+        async def record_tool_invocation(self, **kwargs) -> None:
+            self.records.append(kwargs)
+
+    store = RecordingStructuredStore()
+    manager = SkillManager(circuit_breaker=BlockedCircuitBreaker(), structured_store=store)
+    manager.register(EchoSkill())
+
+    output = asyncio.run(manager.invoke("echo", {"text": "hello"}, session_id="s1"))
+    assert output.status == "error"
+    assert "blocked" in output.error_info
+
+    assert len(store.records) == 1
+    record = store.records[0]
+    assert record["status"] == "blocked"
+    assert record["error_info"] == "blocked for test"

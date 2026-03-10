@@ -62,6 +62,39 @@ class StructuredStore:
                     )
                     """
                 )
+                await db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS tool_invocations (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL,
+                        tool_name TEXT NOT NULL,
+                        params TEXT,
+                        status TEXT NOT NULL,
+                        result_preview TEXT,
+                        duration_ms REAL,
+                        error_info TEXT,
+                        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                    )
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_tool_invocations_session
+                    ON tool_invocations(session_id)
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_tool_invocations_tool
+                    ON tool_invocations(tool_name)
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_tool_invocations_created
+                    ON tool_invocations(created_at)
+                    """
+                )
                 async with db.execute("PRAGMA table_info(token_usage)") as cursor:
                     columns = await cursor.fetchall()
                 column_names = {str(column[1]) for column in columns}
@@ -266,5 +299,83 @@ class StructuredStore:
                 ORDER BY calls DESC, resolved_model ASC
                 """
             ) as cursor:
+                rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def record_tool_invocation(
+        self,
+        *,
+        session_id: str,
+        tool_name: str,
+        params: str | None,
+        status: str,
+        result_preview: str | None,
+        duration_ms: float | None,
+        error_info: str | None,
+    ) -> None:
+        await self.init()
+        await self.upsert_session(session_id)
+        preview = result_preview[:500] if isinstance(result_preview, str) else None
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO tool_invocations(
+                    session_id,
+                    tool_name,
+                    params,
+                    status,
+                    result_preview,
+                    duration_ms,
+                    error_info
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    tool_name,
+                    params,
+                    status,
+                    preview,
+                    duration_ms,
+                    error_info,
+                ),
+            )
+            await db.commit()
+
+    async def list_tool_invocations(
+        self,
+        session_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            clauses: list[str] = []
+            params: list[Any] = []
+            if session_id is not None:
+                clauses.append("session_id = ?")
+                params.append(session_id)
+
+            query = """
+                SELECT
+                    id,
+                    session_id,
+                    tool_name,
+                    params,
+                    status,
+                    result_preview,
+                    duration_ms,
+                    error_info,
+                    created_at
+                FROM tool_invocations
+            """
+            if clauses:
+                query += f" WHERE {' AND '.join(clauses)}"
+            query += " ORDER BY id DESC"
+            if limit is not None and limit > 0:
+                query += " LIMIT ?"
+                params.append(limit)
+
+            async with db.execute(query, tuple(params)) as cursor:
                 rows = await cursor.fetchall()
         return [dict(row) for row in rows]
