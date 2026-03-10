@@ -1,17 +1,25 @@
 auth_token: dev-token-change-me
 directory_whitelist:
-  read:
-    - ./docs
-    - ./config
-    - ./memory
-    - ./src
-    - ./tests
-  write:
-    - ./memory/sessions
-    - ./memory/knowledge
-    - ./logs
-  execute:
-    - ./workflows
+  rules:
+    - path: ./docs
+      permissions: [read]
+    - path: ./config
+      permissions: [read]
+    - path: ./memory
+      permissions: [read]
+    - path: ./src
+      permissions: [read]
+    - path: ./tests
+      permissions: [read]
+    - path: ./memory/sessions
+      permissions: [read, write]
+    - path: ./memory/knowledge
+      permissions: [read, write]
+    - path: ./logs
+      permissions: [read, write]
+    - path: ./workflows
+      permissions: [read, execute]
+  default_policy: readonly
 circuit_breaker:
   tool_level_max_failures: 3
   session_level_max_failures: 5

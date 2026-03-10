@@ -36,6 +36,38 @@ class EchoSkill(BaseSkill):
         return SkillOutput(status="success", result={"echo": params["text"]})
 
 
+class FileReadSkill(BaseSkill):
+    name = "filesystem"
+    description = "Read files"
+    required_permissions = ["filesystem"]
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    @property
+    def tools(self) -> list[dict]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                        },
+                        "required": ["path"],
+                    },
+                },
+            }
+        ]
+
+    async def execute(self, tool_name: str, params: dict) -> SkillOutput:
+        self.calls += 1
+        return SkillOutput(status="success", result={"path": params["path"]})
+
+
 def test_skill_manager_registers_tools_schema() -> None:
     manager = SkillManager()
     manager.register(EchoSkill())
@@ -145,3 +177,82 @@ def test_skill_manager_respects_global_kill_switch() -> None:
 
     assert output.status == "error"
     assert "kill switch" in output.error_info.lower()
+
+
+def test_skill_manager_blocks_when_permission_denied() -> None:
+    class AllowBreaker:
+        def can_execute(self, tool_name: str, session_id: str | None):
+            return True, ""
+
+        def record_success(self, tool_name: str, session_id: str | None) -> None:
+            return None
+
+        def record_failure(self, tool_name: str, session_id: str | None) -> None:
+            return None
+
+    class DeniedPermissionManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def check_permission(self, path: str, operation: str):
+            self.calls.append((path, operation))
+            return False, "permission denied for test"
+
+    pm = DeniedPermissionManager()
+    skill = FileReadSkill()
+    manager = SkillManager(circuit_breaker=AllowBreaker(), permission_manager=pm)
+    manager.register(skill)
+
+    output = asyncio.run(manager.invoke("read_file", {"path": "/tmp/test.txt"}, session_id="s1"))
+    assert output.status == "error"
+    assert "permission" in output.error_info.lower()
+    assert skill.calls == 0
+    assert pm.calls == [("/tmp/test.txt", "read")]
+
+
+def test_skill_manager_allows_when_permission_granted() -> None:
+    class AllowBreaker:
+        def can_execute(self, tool_name: str, session_id: str | None):
+            return True, ""
+
+        def record_success(self, tool_name: str, session_id: str | None) -> None:
+            return None
+
+        def record_failure(self, tool_name: str, session_id: str | None) -> None:
+            return None
+
+    class AllowedPermissionManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def check_permission(self, path: str, operation: str):
+            self.calls.append((path, operation))
+            return True, ""
+
+    pm = AllowedPermissionManager()
+    skill = FileReadSkill()
+    manager = SkillManager(circuit_breaker=AllowBreaker(), permission_manager=pm)
+    manager.register(skill)
+
+    output = asyncio.run(manager.invoke("read_file", {"path": "/tmp/test.txt"}, session_id="s1"))
+    assert output.status == "success"
+    assert skill.calls == 1
+    assert pm.calls == [("/tmp/test.txt", "read")]
+
+
+def test_skill_manager_skips_permission_check_for_skills_without_permissions() -> None:
+    class PermissionManagerThatMustNotBeCalled:
+        def check_permission(self, path: str, operation: str):
+            raise AssertionError("check_permission should not be called")
+
+    manager = SkillManager(permission_manager=PermissionManagerThatMustNotBeCalled())
+    manager.register(EchoSkill())
+
+    output = asyncio.run(manager.invoke("echo", {"text": "ok"}, session_id="s1"))
+    assert output.status == "success"
+
+
+def test_skill_manager_infers_scan_directory_as_write_operation() -> None:
+    manager = SkillManager()
+    assert manager._infer_operation("scan_directory") == "write"
+    assert manager._infer_operation("update_directory_description") == "read"

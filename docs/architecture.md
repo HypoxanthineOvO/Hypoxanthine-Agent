@@ -199,18 +199,19 @@ class BaseSkill:
     async def execute(tool_name, params) -> Result
 ```
 
-**M4 内置 Skills**：
+**M5 内置 Skills**：
 
 | Skill | 职责 | 权限 |
 | --- | --- | --- |
-| **TmuxSkill** | 在 tmux 会话中执行命令，支持超时与输出截断保护 | M4 暂不做权限校验 |
-| **CodeRunSkill** | 将 Python / shell 代码写入沙箱并执行，复用 TmuxSkill 返回结果 | M4 暂不做权限校验 |
+| **TmuxSkill** | 在 tmux 会话中执行命令，支持超时与输出截断保护 | `required_permissions=[]`（M5 暂不做 PM 校验） |
+| **CodeRunSkill** | 将 Python / shell 代码写入临时文件后执行，优先使用 bwrap 沙箱，缺失时 fallback 直执并告警 | `required_permissions=[]`（通过 PM 白名单生成 bwrap rw 绑定） |
+| **FileSystemSkill** | 智能文件读取/写入/目录列表 + 目录树索引（`directory_index.yaml`） | `required_permissions=["filesystem"]` |
 
-**M4 Tool Calling 执行路径**：
+**M5 Tool Calling 执行路径**：
 
 1. Router 以 `tools` 参数调用 LLM（LiteLLM function calling）
 2. Pipeline 进入 ReAct 循环，解析 `tool_calls`
-3. SkillManager 统一分发工具调用，并集成 Circuit Breaker
+3. SkillManager 统一分发工具调用，执行链路为 `CircuitBreaker.can_execute -> PermissionManager.check(按需) -> skill.execute -> record_success/failure`
 4. 工具结果回灌到 ReAct messages，直到模型结束或触发最大轮次限制
 
 **后期扩展**：
@@ -233,8 +234,22 @@ graph TD
 ```
 
 - **Permission Manager**：根据 Skill 声明的权限和全局安全策略（`security.yaml`）进行校验。
-- **Directory Whitelist**：配置文件中定义各目录的读/写/执行权限。
+- **Directory Whitelist**：配置文件使用 `rules + default_policy` schema（白名单外默认只读）。
 - **System Config Guard**：修改系统配置类操作需用户显式确认 + 密码。
+
+M5 实际落地细节：
+
+1. `PermissionManager.check_permission(path, operation)` 使用 `Path.resolve(strict=False)`，跟随 symlink 并消除 `..`，防止路径穿越。
+2. `CodeRunSkill` 通过 bwrap 构建隔离执行环境：
+   - `--ro-bind / /`
+   - 对白名单中具 `write` 权限目录添加 `--bind <path> <path>`
+   - `/tmp/hypo-agent-sandbox` 固定 rw
+   - `--dev /dev --proc /proc --unshare-all --share-net`
+3. bwrap 缺失时不阻塞：记录 `code_run.bwrap.fallback` 警告并退回 `bash -lc` 直接执行。
+4. 观测事件已接入：
+   - `permission.check.allowed` / `permission.check.denied`
+   - `fs.read` / `fs.write` / `fs.list` / `fs.scan` / `fs.index.update`
+   - `code_run.bwrap.exec` / `code_run.bwrap.fallback`
 
 ### 3.7 WebUI 架构
 

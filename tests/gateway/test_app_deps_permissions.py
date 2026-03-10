@@ -1,0 +1,51 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from hypo_agent.gateway.app import _build_default_deps
+from hypo_agent.models import SecurityConfig
+
+
+def test_build_default_deps_injects_permission_manager_into_skills(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "skills.yaml").write_text(
+        """
+default_timeout_seconds: 30
+skills:
+  tmux:
+    enabled: false
+  code_run:
+    enabled: true
+  filesystem:
+    enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    security = SecurityConfig.model_validate(
+        {
+            "directory_whitelist": {
+                "rules": [
+                    {
+                        "path": str(tmp_path),
+                        "permissions": ["read", "write", "execute"],
+                    }
+                ],
+                "default_policy": "readonly",
+            },
+            "circuit_breaker": {},
+        }
+    )
+
+    monkeypatch.chdir(tmp_path)
+    deps = _build_default_deps(security)
+
+    assert deps.permission_manager is not None
+    assert deps.skill_manager is not None
+    assert deps.skill_manager._permission_manager is deps.permission_manager
+    assert deps.skill_manager._skills["code_run"].permission_manager is deps.permission_manager
+    assert deps.skill_manager._skills["filesystem"].permission_manager is deps.permission_manager

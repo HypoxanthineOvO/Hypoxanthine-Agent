@@ -19,8 +19,8 @@ from hypo_agent.gateway.middleware import WsTokenAuthMiddleware
 from hypo_agent.gateway.ws import router as ws_router
 from hypo_agent.memory import SessionMemory, StructuredStore
 from hypo_agent.models import SecurityConfig
-from hypo_agent.security import CircuitBreaker
-from hypo_agent.skills import CodeRunSkill, TmuxSkill
+from hypo_agent.security import CircuitBreaker, PermissionManager
+from hypo_agent.skills import CodeRunSkill, FileSystemSkill, TmuxSkill
 
 
 @dataclass(slots=True)
@@ -29,12 +29,13 @@ class AppDeps:
     structured_store: StructuredStore
     skill_manager: SkillManager | None = None
     circuit_breaker: CircuitBreaker | None = None
+    permission_manager: PermissionManager | None = None
 
 
 def _default_security() -> SecurityConfig:
     return SecurityConfig.model_validate(
         {
-            "directory_whitelist": {"read": [], "write": [], "execute": []},
+            "directory_whitelist": {"rules": [], "default_policy": "readonly"},
             "circuit_breaker": {},
         }
     )
@@ -42,8 +43,12 @@ def _default_security() -> SecurityConfig:
 
 def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
     resolved_security = security or _default_security()
+    permission_manager = PermissionManager(resolved_security.directory_whitelist)
     circuit_breaker = CircuitBreaker(resolved_security.circuit_breaker)
-    skill_manager = SkillManager(circuit_breaker=circuit_breaker)
+    skill_manager = SkillManager(
+        circuit_breaker=circuit_breaker,
+        permission_manager=permission_manager,
+    )
 
     skills_config_path = Path("config/skills.yaml")
     skills_payload: dict[str, Any] = {}
@@ -60,7 +65,9 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
     )
     per_skill = skills_payload.get("skills", {})
     tmux_cfg = per_skill.get("tmux", {}) if isinstance(per_skill, dict) else {}
+    code_run_cfg = per_skill.get("code_run", {}) if isinstance(per_skill, dict) else {}
     tmux_timeout = int(tmux_cfg.get("timeout_seconds", default_timeout))
+    code_run_timeout = int(code_run_cfg.get("timeout_seconds", default_timeout))
 
     tmux_skill: TmuxSkill | None = None
     if "tmux" in enabled_skills:
@@ -68,15 +75,27 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
         skill_manager.register(tmux_skill)
 
     if "code_run" in enabled_skills:
-        if tmux_skill is None:
-            tmux_skill = TmuxSkill(default_timeout_seconds=tmux_timeout)
-        skill_manager.register(CodeRunSkill(tmux_skill=tmux_skill))
+        skill_manager.register(
+            CodeRunSkill(
+                permission_manager=permission_manager,
+                default_timeout_seconds=code_run_timeout,
+            )
+        )
+
+    if "filesystem" in enabled_skills:
+        skill_manager.register(
+            FileSystemSkill(
+                permission_manager=permission_manager,
+                index_file="memory/knowledge/directory_index.yaml",
+            )
+        )
 
     return AppDeps(
         session_memory=SessionMemory(sessions_dir="memory/sessions", buffer_limit=20),
         structured_store=StructuredStore(db_path="memory/hypo.db"),
         skill_manager=skill_manager,
         circuit_breaker=circuit_breaker,
+        permission_manager=permission_manager,
     )
 
 
@@ -121,9 +140,14 @@ def create_app(
         resolved_deps.circuit_breaker = CircuitBreaker(
             (security or _default_security()).circuit_breaker
         )
+    if resolved_deps.permission_manager is None:
+        resolved_deps.permission_manager = PermissionManager(
+            (security or _default_security()).directory_whitelist
+        )
     if resolved_deps.skill_manager is None:
         resolved_deps.skill_manager = SkillManager(
-            circuit_breaker=resolved_deps.circuit_breaker
+            circuit_breaker=resolved_deps.circuit_breaker,
+            permission_manager=resolved_deps.permission_manager,
         )
 
     @asynccontextmanager
@@ -144,6 +168,7 @@ def create_app(
     app.state.structured_store = resolved_deps.structured_store
     app.state.skill_manager = resolved_deps.skill_manager
     app.state.circuit_breaker = resolved_deps.circuit_breaker
+    app.state.permission_manager = resolved_deps.permission_manager
     app.state.pipeline = pipeline or _build_default_pipeline(resolved_deps)
 
     app.include_router(ws_router)
