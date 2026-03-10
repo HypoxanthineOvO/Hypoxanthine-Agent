@@ -7,9 +7,13 @@ from hypo_agent.gateway.app import create_app
 from hypo_agent.gateway.settings import load_gateway_settings
 
 
-def run(host: str = "0.0.0.0", port: int | None = None) -> None:
+def build_app():
     settings = load_gateway_settings()
-    app = create_app(auth_token=settings.auth_token, security=settings.security)
+    return create_app(auth_token=settings.auth_token, security=settings.security)
+
+
+def run(host: str = "0.0.0.0", port: int | None = None) -> None:
+    app = build_app()
     resolved_port = int(port) if port is not None else get_port()
     uvicorn.run(app, host=host, port=resolved_port, log_level="info")
 
