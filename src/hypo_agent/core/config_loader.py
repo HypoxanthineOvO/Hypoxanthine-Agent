@@ -121,3 +121,14 @@ def load_tasks_config(
 ) -> TasksConfig:
     tasks_payload = _load_yaml(Path(tasks_path))
     return TasksConfig.model_validate(tasks_payload)
+
+
+def get_memory_dir() -> Path:
+    """Return the configured memory directory (defaults to ./memory).
+
+    This is intentionally resolved at call time so tests / processes can
+    override it via HYPO_MEMORY_DIR.
+    """
+
+    raw = os.getenv("HYPO_MEMORY_DIR", "").strip() or "./memory"
+    return Path(raw).expanduser().resolve(strict=False)

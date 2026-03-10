@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from hypo_agent.core.config_loader import load_runtime_model_config, load_tasks_config
+from hypo_agent.core.config_loader import (
+    get_memory_dir,
+    load_runtime_model_config,
+    load_tasks_config,
+)
 
 
 def test_load_runtime_model_config_merges_models_and_secrets(tmp_path: Path) -> None:
@@ -178,3 +182,14 @@ email_scan:
     assert tasks.heartbeat.interval_minutes == 1
     assert tasks.email_scan.enabled is True
     assert tasks.email_scan.interval_minutes == 5
+
+
+def test_memory_dir_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HYPO_MEMORY_DIR", raising=False)
+    assert get_memory_dir() == (Path.cwd() / "memory").resolve(strict=False)
+
+
+def test_memory_dir_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tmp_path / "mem-root"
+    monkeypatch.setenv("HYPO_MEMORY_DIR", str(target))
+    assert get_memory_dir() == target.resolve(strict=False)

@@ -17,7 +17,11 @@ web/.vite/
 
 config/secrets.yaml
 
+# Runtime memory (defaults to ./memory; override via HYPO_MEMORY_DIR)
+memory/
+!memory/
 memory/*
+!memory/.gitkeep
 !memory/knowledge/
 memory/knowledge/*
 !memory/knowledge/.gitkeep

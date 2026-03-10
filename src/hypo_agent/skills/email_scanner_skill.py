@@ -14,6 +14,7 @@ from typing import Any
 
 import yaml
 
+from hypo_agent.core.config_loader import get_memory_dir
 from hypo_agent.models import SkillOutput
 from hypo_agent.skills.base import BaseSkill
 
@@ -42,7 +43,7 @@ class EmailScannerSkill(BaseSkill):
         secrets_path: Path | str = "config/secrets.yaml",
         security_config_path: Path | str = "config/security.yaml",
         imap_client_factory: Any | None = None,
-        attachments_root: Path | str = "memory/email_attachments",
+        attachments_root: Path | str | None = None,
     ) -> None:
         self.structured_store = structured_store
         self.model_router = model_router
@@ -51,6 +52,9 @@ class EmailScannerSkill(BaseSkill):
         self.secrets_path = Path(secrets_path)
         self.security_config_path = Path(security_config_path)
         self.imap_client_factory = imap_client_factory or imaplib.IMAP4_SSL
+
+        if attachments_root is None:
+            attachments_root = get_memory_dir() / "email_attachments"
         self.attachments_root = Path(attachments_root)
         self._rules: list[EmailRule] = self._load_rules()
         self._bootstrap_drafts: dict[str, str] = {}

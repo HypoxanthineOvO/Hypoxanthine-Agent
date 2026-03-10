@@ -9,13 +9,18 @@ from typing import Any
 
 import aiosqlite
 
+from hypo_agent.core.config_loader import get_memory_dir
+
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
 class StructuredStore:
-    def __init__(self, db_path: Path | str = "memory/hypo.db") -> None:
+    def __init__(self, db_path: Path | str | None = None) -> None:
+        if db_path is None:
+            db_path = get_memory_dir() / "hypo.db"
+
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         # TODO(M9+): consider connection reuse/pooling to reduce per-call connects.
