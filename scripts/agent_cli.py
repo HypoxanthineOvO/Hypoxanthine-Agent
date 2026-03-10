@@ -17,6 +17,11 @@ from typing import Any
 
 import yaml
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+SRC_DIR = ROOT_DIR / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 try:
     import websockets
 except ImportError:  # pragma: no cover - runtime dependency hint
@@ -450,6 +455,78 @@ async def _case_email_scan_trigger(smoke: SmokeSession, tasks_payload: dict[str,
     if payload is None:
         return SmokeCaseResult("email_scan scheduled trigger", SmokeStatus.FAIL, "no email_scan push in time window")
     return SmokeCaseResult("email_scan scheduled trigger", SmokeStatus.PASS, 'message_tag="email_scan" received')
+
+
+async def _case_qq_non_whitelist_user_mock_async() -> SmokeCaseResult:
+    class _DummyPipeline:
+        def __init__(self) -> None:
+            self.called = False
+
+        async def enqueue_user_message(self, inbound, *, emit) -> None:
+            del inbound, emit
+            self.called = True
+
+    from hypo_agent.channels.qq_channel import QQChannelService
+
+    service = QQChannelService(
+        napcat_http_url="http://localhost:3000",
+        bot_qq="123456789",
+        allowed_users={"10001"},
+    )
+
+    pipeline = _DummyPipeline()
+    accepted = await service.handle_onebot_event(
+        {
+            "post_type": "message",
+            "message_type": "private",
+            "user_id": "10002",
+            "message": "hello",
+        },
+        pipeline=pipeline,
+    )
+
+    if accepted:
+        return SmokeCaseResult("qq mock non-whitelist reject", SmokeStatus.FAIL, "unexpectedly accepted")
+    if pipeline.called:
+        return SmokeCaseResult(
+            "qq mock non-whitelist reject",
+            SmokeStatus.FAIL,
+            "pipeline should not be called",
+        )
+    return SmokeCaseResult("qq mock non-whitelist reject", SmokeStatus.PASS)
+
+
+def _case_qq_non_whitelist_user_mock() -> SmokeCaseResult:
+    return asyncio.run(_case_qq_non_whitelist_user_mock_async())
+
+
+async def _case_qq_send_private_api_mock_async() -> SmokeCaseResult:
+    from hypo_agent.channels.qq_adapter import QQAdapter
+
+    adapter = QQAdapter(napcat_http_url="http://localhost:3000")
+    captured: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_post_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        captured.append((path, payload))
+        return {"status": "ok", "data": {"message_id": 1}}
+
+    adapter._post_json = fake_post_json  # type: ignore[method-assign]
+    sent = await adapter.send_private_text(user_id="10001", text="hello")
+    if not sent:
+        return SmokeCaseResult("qq mock send_private_msg api", SmokeStatus.FAIL, "adapter returned false")
+    if not captured:
+        return SmokeCaseResult("qq mock send_private_msg api", SmokeStatus.FAIL, "api not called")
+    if captured[0][0] != "/send_private_msg":
+        return SmokeCaseResult(
+            "qq mock send_private_msg api",
+            SmokeStatus.FAIL,
+            f"unexpected path={captured[0][0]}",
+        )
+    return SmokeCaseResult("qq mock send_private_msg api", SmokeStatus.PASS)
+
+
+def _case_qq_send_private_api_mock() -> SmokeCaseResult:
+    return asyncio.run(_case_qq_send_private_api_mock_async())
 
 
 async def cmd_smoke(*, port: int, session_id: str) -> int:
