@@ -1,0 +1,11 @@
+default_timeout_seconds: 30
+skills:
+  shell:
+    enabled: true
+    timeout_seconds: 60
+  memory_lookup:
+    enabled: true
+    timeout_seconds: 10
+  web_search:
+    enabled: false
+    timeout_seconds: 20
