@@ -319,7 +319,13 @@ async def _case_reminder_push_regression(smoke: SmokeSession) -> SmokeCaseResult
         f"参数：title={unique_title}，schedule_type=once，schedule_value={trigger_at}，channel=all。"
     )
     await smoke.send(create_prompt)
-    await smoke.wait_for_assistant_done(timeout=45)
+    done, _ = await smoke.wait_for_assistant_done(timeout=90)
+    if not done:
+        return SmokeCaseResult(
+            "reminder create regression",
+            SmokeStatus.FAIL,
+            "assistant_done timeout",
+        )
 
     created_rows = _query_db_rows(
         f"SELECT id, title FROM reminders WHERE id > {baseline_id} ORDER BY id DESC;"
@@ -332,7 +338,13 @@ async def _case_reminder_push_regression(smoke: SmokeSession) -> SmokeCaseResult
             f"title={unique_title}，schedule_type=once，schedule_value={trigger_at}。"
         )
         await smoke.send(retry_prompt)
-        await smoke.wait_for_assistant_done(timeout=30)
+        done, _ = await smoke.wait_for_assistant_done(timeout=90)
+        if not done:
+            return SmokeCaseResult(
+                "reminder create regression",
+                SmokeStatus.FAIL,
+                "assistant_done timeout (retry)",
+            )
         created_rows = _query_db_rows(
             f"SELECT id, title FROM reminders WHERE id > {baseline_id} ORDER BY id DESC;"
         )
@@ -342,7 +354,7 @@ async def _case_reminder_push_regression(smoke: SmokeSession) -> SmokeCaseResult
         return SmokeCaseResult("reminder create regression", SmokeStatus.FAIL, "db has no new reminder row")
 
     await smoke.send("/reminders")
-    done, list_chunks = await smoke.wait_for_assistant_done(timeout=20)
+    done, list_chunks = await smoke.wait_for_assistant_done(timeout=60)
     if not done:
         return SmokeCaseResult("send \"/reminders\" regression", SmokeStatus.FAIL, "assistant_done timeout")
     if not list_chunks:
@@ -542,7 +554,8 @@ async def cmd_smoke(*, port: int, session_id: str) -> int:
     async with websockets.connect(uri) as ws:
         smoke = SmokeSession(ws=ws, session_id=session_id)
         print("[CASE 1] base dialogue regression")
-        results.append(await _case_send_regression(smoke, "你好", timeout=30))
+        # Some providers can be slow or cold-start; keep smoke robust.
+        results.append(await _case_send_regression(smoke, "你好", timeout=90))
         print("[CASE 2] reminder regression and proactive push")
         results.append(await _case_reminder_push_regression(smoke))
         print("[CASE 3] heartbeat proactive push")
@@ -567,8 +580,15 @@ async def cmd_smoke(*, port: int, session_id: str) -> int:
 
 
 def main() -> None:
+    from hypo_agent.core.config_loader import get_port
+
     parser = argparse.ArgumentParser(description="Hypo-Agent CLI")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Gateway port (default: $HYPO_PORT or 8765)",
+    )
     parser.add_argument("--session-id", default="main")
 
     sub = parser.add_subparsers(dest="command", required=True)
@@ -586,13 +606,14 @@ def main() -> None:
     sub.add_parser("smoke", help="run m8_smoke test")
 
     args = parser.parse_args()
+    port = args.port if args.port is not None else get_port()
 
     if args.command == "send":
         raise SystemExit(
             asyncio.run(
                 cmd_send(
                     args.text,
-                    port=args.port,
+                    port=port,
                     session_id=args.session_id,
                     wait=args.wait,
                 )
@@ -603,7 +624,7 @@ def main() -> None:
             asyncio.run(
                 cmd_listen(
                     args.duration,
-                    port=args.port,
+                    port=port,
                     session_id=args.session_id,
                 )
             )
@@ -611,7 +632,7 @@ def main() -> None:
     if args.command == "check-db":
         raise SystemExit(cmd_check_db(args.query))
     if args.command == "smoke":
-        raise SystemExit(asyncio.run(cmd_smoke(port=args.port, session_id=args.session_id)))
+        raise SystemExit(asyncio.run(cmd_smoke(port=port, session_id=args.session_id)))
 
 
 if __name__ == "__main__":

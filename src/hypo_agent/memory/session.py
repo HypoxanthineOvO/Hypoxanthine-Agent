@@ -4,17 +4,21 @@ from collections import deque
 from pathlib import Path
 from urllib.parse import quote
 
+from hypo_agent.core.config_loader import get_memory_dir
 from hypo_agent.models import Message
 
 
 class SessionMemory:
     def __init__(
         self,
-        sessions_dir: Path | str = "memory/sessions",
+        sessions_dir: Path | str | None = None,
         buffer_limit: int = 20,
     ) -> None:
         if buffer_limit <= 0:
             raise ValueError("buffer_limit must be greater than 0")
+
+        if sessions_dir is None:
+            sessions_dir = get_memory_dir() / "sessions"
 
         self.sessions_dir = Path(sessions_dir)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
