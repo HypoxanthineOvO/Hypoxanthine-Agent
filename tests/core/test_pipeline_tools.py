@@ -233,11 +233,11 @@ def test_pipeline_stream_reply_sends_humanized_tool_status_messages() -> None:
 
     events = asyncio.run(_collect())
     assert events[-1]["type"] == "assistant_done"
-    assert len(pushed) == 2
-    assert pushed[0].text == "🔔 正在创建提醒..."
-    assert pushed[1].text == "✅ 提醒创建成功"
-    assert pushed[0].message_tag == "tool_status"
-    assert pushed[0].metadata["ephemeral"] is True
+    tool_status = [item for item in pushed if item.message_tag == "tool_status"]
+    assert len(tool_status) == 2
+    assert tool_status[0].text == "🔔 正在创建提醒..."
+    assert tool_status[1].text == "✅ 提醒创建成功"
+    assert tool_status[0].metadata["ephemeral"] is True
 
 
 def test_pipeline_stream_reply_respects_max_react_rounds() -> None:

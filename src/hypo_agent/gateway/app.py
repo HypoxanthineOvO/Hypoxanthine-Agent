@@ -423,10 +423,14 @@ def create_app(
         service = _build_qq_channel_service(config_dir)
         app.state.qq_channel_service = service
         if service is not None:
-            app.state.channel_dispatcher.register("qq", service.push_proactive)
+            app.state.channel_dispatcher.register("qq", service.send_message)
 
-    async def on_proactive_message(message: Message) -> None:
-        await app.state.channel_dispatcher.broadcast(message)
+    async def on_proactive_message(
+        message: Message,
+        *,
+        exclude_channels: set[str] | None = None,
+    ) -> None:
+        await app.state.channel_dispatcher.broadcast(message, exclude_channels=exclude_channels)
 
     app.state.push_ws_message = push_ws_message
     setattr(app.state.pipeline, "on_proactive_message", on_proactive_message)

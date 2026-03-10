@@ -189,11 +189,15 @@ class ChatPipeline:
     async def run_once(self, inbound: Message) -> Message:
         slash_result = await self._try_handle_slash(inbound)
         if slash_result is not None:
-            return Message(
+            outbound = Message(
                 text=slash_result,
                 sender="assistant",
                 session_id=inbound.session_id,
+                channel=inbound.channel,
+                sender_id=inbound.sender_id,
             )
+            await self._broadcast_message(outbound, origin_channel=inbound.channel)
+            return outbound
 
         if self._kill_switch_active():
             self.session_memory.append(inbound)
@@ -201,8 +205,11 @@ class ChatPipeline:
                 text=KILL_SWITCH_MESSAGE,
                 sender="assistant",
                 session_id=inbound.session_id,
+                channel=inbound.channel,
+                sender_id=inbound.sender_id,
             )
             self.session_memory.append(outbound)
+            await self._broadcast_message(outbound, origin_channel=inbound.channel)
             return outbound
 
         llm_messages = self._build_llm_messages(inbound)
@@ -216,6 +223,7 @@ class ChatPipeline:
             sender_id=inbound.sender_id,
         )
         self.session_memory.append(outbound)
+        await self._broadcast_message(outbound, origin_channel=inbound.channel)
         return outbound
 
     async def stream_reply(self, inbound: Message) -> AsyncIterator[dict[str, Any]]:
@@ -226,6 +234,14 @@ class ChatPipeline:
                 response=RichResponse(text=slash_result),
                 session_id=inbound.session_id,
             )
+            outbound = Message(
+                text=slash_result,
+                sender="assistant",
+                session_id=inbound.session_id,
+                channel=inbound.channel,
+                sender_id=inbound.sender_id,
+            )
+            await self._broadcast_message(outbound, origin_channel=inbound.channel)
             yield self._format_event(
                 event_type="assistant_done",
                 response=RichResponse(),
@@ -249,6 +265,7 @@ class ChatPipeline:
                 sender_id=inbound.sender_id,
             )
             self.session_memory.append(outbound)
+            await self._broadcast_message(outbound, origin_channel=inbound.channel)
             yield self._format_event(
                 event_type="assistant_done",
                 response=RichResponse(),
@@ -504,6 +521,7 @@ class ChatPipeline:
                 sender_id=inbound.sender_id,
             )
             self.session_memory.append(outbound)
+            await self._broadcast_message(outbound, origin_channel=inbound.channel)
             yield self._format_event(
                 event_type="assistant_done",
                 response=RichResponse(),
@@ -520,6 +538,7 @@ class ChatPipeline:
                 sender_id=inbound.sender_id,
             )
             self.session_memory.append(outbound)
+            await self._broadcast_message(outbound, origin_channel=inbound.channel)
             yield self._format_event(
                 event_type="assistant_done",
                 response=RichResponse(),
@@ -535,6 +554,7 @@ class ChatPipeline:
             sender_id=inbound.sender_id,
         )
         self.session_memory.append(outbound)
+        await self._broadcast_message(outbound, origin_channel=inbound.channel)
         yield self._format_event(
             event_type="assistant_done",
             response=RichResponse(),
@@ -599,6 +619,26 @@ class ChatPipeline:
         else:
             return None
         return {"role": role, "content": text}
+
+    async def _broadcast_message(
+        self,
+        message: Message,
+        *,
+        origin_channel: str | None,
+    ) -> None:
+        callback = self.on_proactive_message
+        if callback is None:
+            return
+        exclude_channels: set[str] | None = None
+        channel = str(origin_channel or "").strip().lower()
+        if channel == "webui":
+            exclude_channels = {"webui"}
+        try:
+            result = callback(message, exclude_channels=exclude_channels)
+        except TypeError:
+            result = callback(message)
+        if inspect.isawaitable(result):
+            await result
 
     def _system_time_context(self) -> str:
         now = datetime.now().astimezone()
@@ -780,6 +820,7 @@ class ChatPipeline:
                 sender="assistant",
                 session_id=session_id,
                 message_tag="reminder",
+                channel="system",
             )
 
         if event_type == "heartbeat_trigger":
@@ -794,6 +835,7 @@ class ChatPipeline:
                 sender="assistant",
                 session_id=session_id,
                 message_tag="heartbeat",
+                channel="system",
             )
 
         if event_type == "email_scan_trigger":
@@ -805,6 +847,7 @@ class ChatPipeline:
                 sender="assistant",
                 session_id=session_id,
                 message_tag="email_scan",
+                channel="system",
             )
 
         return None

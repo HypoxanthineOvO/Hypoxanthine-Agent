@@ -275,3 +275,99 @@ def test_system_prompt_contains_time(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "(" in content and ")" in content
     tz_name = content.split("(")[-1].split(")")[0].strip()
     assert tz_name
+
+
+def test_pipeline_broadcasts_reply_for_qq_channel() -> None:
+    memory = StubSessionMemory()
+    from hypo_agent.core.channel_dispatcher import ChannelDispatcher
+
+    dispatcher = ChannelDispatcher()
+    webui_received: list[Message] = []
+    qq_received: list[Message] = []
+
+    async def webui_sink(message: Message) -> None:
+        webui_received.append(message)
+
+    async def qq_sink(message: Message) -> None:
+        qq_received.append(message)
+
+    dispatcher.register("webui", webui_sink)
+    dispatcher.register("qq", qq_sink)
+
+    class StubRouter:
+        async def stream(self, model_name, messages, *, session_id=None):
+            yield "Hi"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        on_proactive_message=dispatcher.broadcast,
+    )
+
+    async def _collect() -> None:
+        inbound = Message(
+            text="hello",
+            sender="user",
+            session_id="s1",
+            channel="qq",
+            sender_id="10001",
+        )
+        async for _ in pipeline.stream_reply(inbound):
+            pass
+
+    asyncio.run(_collect())
+
+    assert len(webui_received) == 1
+    assert len(qq_received) == 1
+    assert webui_received[0].text == "Hi"
+    assert webui_received[0].channel == "qq"
+    assert qq_received[0].channel == "qq"
+
+
+def test_pipeline_broadcasts_reply_excluding_webui() -> None:
+    memory = StubSessionMemory()
+    from hypo_agent.core.channel_dispatcher import ChannelDispatcher
+
+    dispatcher = ChannelDispatcher()
+    webui_received: list[Message] = []
+    qq_received: list[Message] = []
+
+    async def webui_sink(message: Message) -> None:
+        webui_received.append(message)
+
+    async def qq_sink(message: Message) -> None:
+        qq_received.append(message)
+
+    dispatcher.register("webui", webui_sink)
+    dispatcher.register("qq", qq_sink)
+
+    class StubRouter:
+        async def stream(self, model_name, messages, *, session_id=None):
+            yield "OK"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        on_proactive_message=dispatcher.broadcast,
+    )
+
+    async def _collect() -> None:
+        inbound = Message(
+            text="hello",
+            sender="user",
+            session_id="s1",
+            channel="webui",
+        )
+        async for _ in pipeline.stream_reply(inbound):
+            pass
+
+    asyncio.run(_collect())
+
+    assert webui_received == []
+    assert len(qq_received) == 1
+    assert qq_received[0].text == "OK"
+    assert qq_received[0].channel == "webui"
