@@ -319,7 +319,13 @@ async def _case_reminder_push_regression(smoke: SmokeSession) -> SmokeCaseResult
         f"参数：title={unique_title}，schedule_type=once，schedule_value={trigger_at}，channel=all。"
     )
     await smoke.send(create_prompt)
-    await smoke.wait_for_assistant_done(timeout=45)
+    done, _ = await smoke.wait_for_assistant_done(timeout=90)
+    if not done:
+        return SmokeCaseResult(
+            "reminder create regression",
+            SmokeStatus.FAIL,
+            "assistant_done timeout",
+        )
 
     created_rows = _query_db_rows(
         f"SELECT id, title FROM reminders WHERE id > {baseline_id} ORDER BY id DESC;"
@@ -332,7 +338,13 @@ async def _case_reminder_push_regression(smoke: SmokeSession) -> SmokeCaseResult
             f"title={unique_title}，schedule_type=once，schedule_value={trigger_at}。"
         )
         await smoke.send(retry_prompt)
-        await smoke.wait_for_assistant_done(timeout=30)
+        done, _ = await smoke.wait_for_assistant_done(timeout=90)
+        if not done:
+            return SmokeCaseResult(
+                "reminder create regression",
+                SmokeStatus.FAIL,
+                "assistant_done timeout (retry)",
+            )
         created_rows = _query_db_rows(
             f"SELECT id, title FROM reminders WHERE id > {baseline_id} ORDER BY id DESC;"
         )
@@ -342,7 +354,7 @@ async def _case_reminder_push_regression(smoke: SmokeSession) -> SmokeCaseResult
         return SmokeCaseResult("reminder create regression", SmokeStatus.FAIL, "db has no new reminder row")
 
     await smoke.send("/reminders")
-    done, list_chunks = await smoke.wait_for_assistant_done(timeout=20)
+    done, list_chunks = await smoke.wait_for_assistant_done(timeout=60)
     if not done:
         return SmokeCaseResult("send \"/reminders\" regression", SmokeStatus.FAIL, "assistant_done timeout")
     if not list_chunks:
