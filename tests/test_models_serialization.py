@@ -30,6 +30,8 @@ def test_message_round_trip_serialization(fixed_timestamp):
     assert restored.file is None
     assert restored.audio is None
     assert restored.message_tag is None
+    assert restored.channel == "webui"
+    assert restored.sender_id is None
     assert restored.sender == "user"
     assert restored.timestamp == fixed_timestamp
     assert restored.session_id == "session-1"
@@ -76,6 +78,23 @@ def test_message_accepts_email_scan_tag(fixed_timestamp):
     payload = message.model_dump_json()
     restored = Message.model_validate_json(payload)
     assert restored.message_tag == "email_scan"
+
+
+def test_message_accepts_qq_channel_and_sender_id(fixed_timestamp):
+    message = Message(
+        text="你好",
+        sender="user",
+        timestamp=fixed_timestamp,
+        session_id="main",
+        channel="qq",
+        sender_id="123456",
+    )
+
+    payload = message.model_dump_json()
+    restored = Message.model_validate_json(payload)
+
+    assert restored.channel == "qq"
+    assert restored.sender_id == "123456"
 
 
 def test_reminder_models_validate_once_and_heartbeat_checks():
@@ -195,6 +214,29 @@ def test_secrets_config_accepts_services_email_accounts():
     assert config.services.email.accounts[0].name == "主邮箱"
 
 
+def test_secrets_config_accepts_services_qq():
+    config = SecretsConfig.model_validate(
+        {
+            "providers": {},
+            "services": {
+                "qq": {
+                    "napcat_ws_url": "ws://localhost:3001",
+                    "napcat_http_url": "http://localhost:3000",
+                    "napcat_http_token": "token-abc",
+                    "bot_qq": "123456789",
+                    "allowed_users": ["10001"],
+                }
+            },
+        }
+    )
+
+    assert config.services is not None
+    assert config.services.qq is not None
+    assert config.services.qq.bot_qq == "123456789"
+    assert config.services.qq.napcat_http_token == "token-abc"
+    assert config.services.qq.allowed_users == ["10001"]
+
+
 def test_security_config_whitelist_and_circuit_breaker():
     security = SecurityConfig.model_validate(
         {
@@ -205,6 +247,7 @@ def test_security_config_whitelist_and_circuit_breaker():
                     {"path": "./workflows", "permissions": ["execute"]},
                 ],
                 "default_policy": "readonly",
+                "blocked_paths": ["/etc/passwd"],
             },
             "circuit_breaker": {
                 "tool_level_max_failures": 3,
@@ -219,6 +262,7 @@ def test_security_config_whitelist_and_circuit_breaker():
     assert security.directory_whitelist.rules[0].path == "./docs"
     assert security.directory_whitelist.rules[0].permissions == ["read"]
     assert security.directory_whitelist.rules[1].permissions == ["read", "write"]
+    assert security.directory_whitelist.blocked_paths == ["/etc/passwd"]
     assert security.circuit_breaker.tool_level_max_failures == 3
     assert security.circuit_breaker.session_level_max_failures == 5
     assert security.circuit_breaker.cooldown_seconds == 120

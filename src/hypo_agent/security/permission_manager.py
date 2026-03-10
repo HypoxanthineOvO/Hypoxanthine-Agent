@@ -22,6 +22,19 @@ class PermissionManager:
 
         self._resolved_rules.sort(key=lambda item: len(str(item[0])), reverse=True)
 
+        self._blocked_paths: list[Path] = []
+        seen_blocked: set[Path] = set()
+        for path in whitelist.blocked_paths:
+            try:
+                resolved = self._resolve_path(path)
+            except (OSError, RuntimeError):
+                continue
+            if resolved in seen_blocked:
+                continue
+            self._blocked_paths.append(resolved)
+            seen_blocked.add(resolved)
+        self._blocked_paths.sort(key=lambda item: len(str(item)), reverse=True)
+
     def check_permission(
         self,
         path: str,
@@ -38,6 +51,19 @@ class PermissionManager:
                 path=path,
                 resolved_path="",
                 operation=operation,
+                reason=reason,
+            )
+            return False, reason
+
+        blocked_path = self._find_blocked_path(resolved_path)
+        if blocked_path is not None:
+            reason = f"Path '{resolved_path}' is blocked by '{blocked_path}'"
+            logger.warning(
+                "permission.blocked",
+                path=path,
+                resolved_path=str(resolved_path),
+                operation=operation,
+                blocked_path=str(blocked_path),
                 reason=reason,
             )
             return False, reason
@@ -105,6 +131,9 @@ class PermissionManager:
     def writable_paths(self) -> list[Path]:
         return self.paths_for_operation("write")
 
+    def blocked_paths(self) -> list[Path]:
+        return list(self._blocked_paths)
+
     def paths_for_operation(self, operation: Operation) -> list[Path]:
         paths: list[Path] = []
         seen: set[Path] = set()
@@ -113,6 +142,12 @@ class PermissionManager:
                 paths.append(resolved_path)
                 seen.add(resolved_path)
         return paths
+
+    def _find_blocked_path(self, resolved_path: Path) -> Path | None:
+        for blocked_path in self._blocked_paths:
+            if self._is_within(resolved_path, blocked_path):
+                return blocked_path
+        return None
 
     def _find_matching_rule(
         self,

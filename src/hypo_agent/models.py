@@ -18,6 +18,8 @@ class Message(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     session_id: str
+    channel: str = "webui"
+    sender_id: str | None = None
 
 
 class SkillOutput(BaseModel):
@@ -73,10 +75,21 @@ class EmailServiceConfig(BaseModel):
     accounts: list[EmailAccountConfig] = Field(default_factory=list)
 
 
+class QQServiceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    napcat_ws_url: str
+    napcat_http_url: str
+    napcat_http_token: str | None = None
+    bot_qq: str
+    allowed_users: list[str] = Field(default_factory=list)
+
+
 class ServicesConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     email: EmailServiceConfig | None = None
+    qq: QQServiceConfig | None = None
 
 
 class SecretsConfig(BaseModel):
@@ -112,6 +125,7 @@ class DirectoryWhitelist(BaseModel):
 
     rules: list[WhitelistRule] = Field(default_factory=list)
     default_policy: Literal["readonly"] = "readonly"
+    blocked_paths: list[str] = Field(default_factory=list)
 
 
 class CircuitBreakerConfig(BaseModel):

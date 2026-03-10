@@ -59,6 +59,22 @@ def test_build_bwrap_command_includes_rw_overrides(tmp_path: Path) -> None:
     assert bwrap_cmd[-3:] == ["bash", "-lc", command]
 
 
+def test_build_bwrap_command_masks_blocked_paths(tmp_path: Path) -> None:
+    manager = PermissionManager(
+        DirectoryWhitelist(
+            rules=[WhitelistRule(path=str(tmp_path), permissions=["read", "write", "execute"])],
+            default_policy="readonly",
+            blocked_paths=["/etc/passwd"],
+        )
+    )
+    skill = CodeRunSkill(permission_manager=manager, sandbox_dir=tmp_path / "sandbox")
+
+    command = "python /tmp/hypo-agent-sandbox/run.py"
+    bwrap_cmd = " ".join(skill._build_bwrap_command(command))
+
+    assert "--tmpfs /etc/passwd" in bwrap_cmd
+
+
 def test_code_run_skill_executes_with_bwrap_when_available(tmp_path: Path, monkeypatch) -> None:
     manager = _permission_manager(tmp_path)
     calls: list[tuple[str, ...]] = []
