@@ -1,15 +1,36 @@
-default_model: gpt-4o-mini
+default_model: DeepseekV3_2
+
+task_routing:
+  chat: DeepseekV3_2
+  lightweight: DeepseekV3_2
+
 models:
-  gpt-4o-mini:
-    provider: openai
-    temperature: 0.2
-    max_tokens: 2048
-  gpt-4.1:
-    provider: openai
-    temperature: 0.1
-    max_tokens: 4096
-task_type_to_model:
-  chat: gpt-4o-mini
-  summarize: gpt-4o-mini
-  plan: gpt-4.1
-  code: gpt-4.1
+  Gemini3Pro:
+    provider: Hiapi
+    litellm_model: "openai/gemini-2.5-pro"
+    fallback: DeepseekV3_2
+
+  DeepseekV3_1:
+    provider: Volcengine
+    litellm_model: "openai/ep-20250828163824-jxmm7"
+    fallback: DeepseekV3_2
+
+  DeepseekV3_2:
+    provider: Volcengine
+    litellm_model: "openai/ep-20251215171209-4z5qk"
+    fallback: QwenPlus
+
+  QwenPlus:
+    provider: Dashscope
+    litellm_model: "openai/qwen-plus"
+    fallback: null
+
+  ClaudeSonnet:
+    provider: null
+    litellm_model: null
+    fallback: Gemini3Pro
+
+  Gpt4o:
+    provider: null
+    litellm_model: null
+    fallback: Gemini3Pro

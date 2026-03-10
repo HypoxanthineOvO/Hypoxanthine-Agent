@@ -1,7 +1,15 @@
 from pydantic import ValidationError
 
 from hypo_agent.core.logging import configure_logging
-from hypo_agent.models import Message, ModelConfig, PersonaConfig, SecurityConfig, SkillOutput
+from hypo_agent.models import (
+    Message,
+    ModelConfig,
+    PersonaConfig,
+    ProviderConfig,
+    SecretsConfig,
+    SecurityConfig,
+    SkillOutput,
+)
 
 
 def test_message_round_trip_serialization(fixed_timestamp):
@@ -38,16 +46,58 @@ def test_skill_output_status_validation():
 
 def test_model_config_defaults_and_mapping():
     config = ModelConfig(
-        default_model="gpt-4o-mini",
-        task_type_to_model={"chat": "gpt-4o-mini", "code": "gpt-4.1"},
+        default_model="Gemini3Pro",
+        task_routing={"chat": "Gemini3Pro", "lightweight": "DeepseekV3_2"},
+        models={
+            "Gemini3Pro": {
+                "provider": "Hiapi",
+                "litellm_model": "openai/gemini-2.5-pro",
+                "fallback": "DeepseekV3_2",
+            },
+            "ClaudeSonnet": {
+                "provider": None,
+                "litellm_model": None,
+                "fallback": "Gemini3Pro",
+            },
+        },
     )
 
     data = config.model_dump()
     restored = ModelConfig.model_validate(data)
 
-    assert restored.default_model == "gpt-4o-mini"
-    assert restored.task_type_to_model["chat"] == "gpt-4o-mini"
-    assert restored.task_type_to_model["code"] == "gpt-4.1"
+    assert restored.default_model == "Gemini3Pro"
+    assert restored.task_routing["chat"] == "Gemini3Pro"
+    assert restored.task_routing["lightweight"] == "DeepseekV3_2"
+    assert restored.models["ClaudeSonnet"].provider is None
+
+
+def test_provider_config_round_trip():
+    provider = ProviderConfig(
+        api_base="https://hiapi.online/v1",
+        api_key="sk-test",
+    )
+
+    data = provider.model_dump()
+    restored = ProviderConfig.model_validate(data)
+
+    assert restored.api_base == "https://hiapi.online/v1"
+    assert restored.api_key == "sk-test"
+
+
+def test_secrets_config_round_trip():
+    config = SecretsConfig(
+        providers={
+            "Hiapi": {
+                "api_base": "https://hiapi.online/v1",
+                "api_key": "sk-hiapi",
+            }
+        }
+    )
+
+    data = config.model_dump()
+    restored = SecretsConfig.model_validate(data)
+
+    assert restored.providers["Hiapi"].api_base == "https://hiapi.online/v1"
 
 
 def test_security_config_whitelist_and_circuit_breaker():

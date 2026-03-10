@@ -5,4 +5,5 @@ dependencies:
   - python=3.12
   - pip
   - pip:
+      - uvicorn[standard]>=0.30.0,<1.0.0
       - -e .[dev]

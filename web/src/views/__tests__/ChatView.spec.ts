@@ -65,7 +65,23 @@ describe("ChatView", () => {
     ws.emitOpen();
     ws.emitMessage(
       JSON.stringify({
-        text: "**bold**",
+        type: "assistant_chunk",
+        text: "**bo",
+        sender: "assistant",
+        session_id: "session-1",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "assistant_chunk",
+        text: "ld**",
+        sender: "assistant",
+        session_id: "session-1",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "assistant_done",
         sender: "assistant",
         session_id: "session-1",
       }),

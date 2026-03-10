@@ -81,12 +81,38 @@ describe("useChatSocket", () => {
 
     ws.emitMessage(
       JSON.stringify({
-        text: "**ok**",
+        type: "assistant_chunk",
+        text: "**",
         sender: "assistant",
         session_id: "session-1",
       }),
     );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "assistant_chunk",
+        text: "ok",
+        sender: "assistant",
+        session_id: "session-1",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "assistant_chunk",
+        text: "**",
+        sender: "assistant",
+        session_id: "session-1",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "assistant_done",
+        sender: "assistant",
+        session_id: "session-1",
+      }),
+    );
+
     expect(socket.messages.value[0]?.text).toBe("hello");
     expect(socket.messages.value[1]?.text).toBe("**ok**");
+    expect(socket.messages.value).toHaveLength(2);
   });
 });
