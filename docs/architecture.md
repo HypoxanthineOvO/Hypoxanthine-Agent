@@ -184,6 +184,10 @@ graph TD
 - 定时任务配置在 `tasks.yaml` 中，用户可通过 WebUI 编辑。
 - 触发时将任务以内部消息格式插入 Message Queue，与用户消息使用同一套 Pipeline 处理。
 - **V1 采用串行队列**：Heartbeat 任务与用户对话排队执行，避免并发复杂性。
+- **M8 更新**：
+  - 调度器与 Pipeline 通过中心 `asyncio.Queue`（`reminder_trigger` / `heartbeat_trigger`）集成；
+  - APScheduler 使用 MemoryJobStore，启动时由 L2 `reminders` 表重建 active 任务；
+  - Heartbeat 触发链为“代码预检 -> lightweight 模型综合判断 -> 异常才通知（正常静默）”。
 
 **相对 OpenClaw 的简化**：OpenClaw 支持 Webhook、邮件触发、语音唤醒等多种激活方式，Hypo-Agent V1 仅保留 Cron 触发，保持简单。
 
@@ -302,6 +306,10 @@ graph TD
     - 用户主动开启一个专项任务（如"帮我调试这个项目"）
 - **回流机制**：副会话结束时，用小模型生成摘要，回流到主会话的上下文中（而非把所有细节灌回去）。
 - **WebUI 展示**：主会话为默认视图，副会话以可折叠的侧边栏/标签页形式展示（类似旧系统设计的"单收件箱 + 可折叠后台任务"）。
+
+**M8 Reminder 特例（当前生效）**：
+- 定时提醒与 Heartbeat 通知统一写入主会话（`session_id="main"`），不创建独立副会话；
+- 用户离线时事件仍落盘到 L1 `.jsonl`，上线后可在主会话历史中看到提醒消息。
 
 ### 3.10 OutputCompressor（工具输出压缩中间件）
 

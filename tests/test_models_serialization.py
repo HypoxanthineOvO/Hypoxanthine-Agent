@@ -2,10 +2,12 @@ from pydantic import ValidationError
 
 from hypo_agent.core.logging import configure_logging
 from hypo_agent.models import (
+    HeartbeatCheck,
     Message,
     ModelConfig,
     PersonaConfig,
     ProviderConfig,
+    ReminderCreate,
     SecretsConfig,
     SecurityConfig,
     SkillOutput,
@@ -27,9 +29,58 @@ def test_message_round_trip_serialization(fixed_timestamp):
     assert restored.image is None
     assert restored.file is None
     assert restored.audio is None
+    assert restored.message_tag is None
     assert restored.sender == "user"
     assert restored.timestamp == fixed_timestamp
     assert restored.session_id == "session-1"
+
+
+def test_message_accepts_optional_message_tag(fixed_timestamp):
+    message = Message(
+        text="提醒：开会",
+        sender="assistant",
+        timestamp=fixed_timestamp,
+        session_id="main",
+        message_tag="reminder",
+    )
+
+    payload = message.model_dump_json()
+    restored = Message.model_validate_json(payload)
+    assert restored.message_tag == "reminder"
+
+
+def test_message_accepts_tool_status_tag_and_metadata(fixed_timestamp):
+    message = Message(
+        text="正在创建提醒",
+        sender="assistant",
+        timestamp=fixed_timestamp,
+        session_id="main",
+        message_tag="tool_status",
+        metadata={"ephemeral": True},
+    )
+    payload = message.model_dump_json()
+    restored = Message.model_validate_json(payload)
+    assert restored.message_tag == "tool_status"
+    assert restored.metadata["ephemeral"] is True
+
+
+def test_reminder_models_validate_once_and_heartbeat_checks():
+    heartbeat = HeartbeatCheck(
+        check_type="http_status",
+        target="https://example.com/health",
+        expected=200,
+    )
+    reminder = ReminderCreate(
+        title="生产巡检",
+        description="检查服务状态",
+        schedule_type="once",
+        schedule_value="2026-03-08T15:00:00+08:00",
+        heartbeat_config=[heartbeat],
+    )
+
+    assert reminder.schedule_type == "once"
+    assert reminder.channel == "all"
+    assert reminder.heartbeat_config[0].check_type == "http_status"
 
 
 def test_skill_output_status_validation():

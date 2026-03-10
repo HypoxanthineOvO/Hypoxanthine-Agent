@@ -14,11 +14,17 @@ const avatarLabel = (): string => {
 </script>
 
 <template>
-  <article class="message-bubble" :data-sender="message.sender">
+  <article
+    class="message-bubble"
+    :data-sender="message.sender"
+    :data-message-tag="message.message_tag"
+  >
     <div class="bubble-avatar">{{ avatarLabel() }}</div>
     <div class="bubble-content">
       <header class="bubble-meta">
         <span class="sender-name">{{ message.senderName ?? message.sender }}</span>
+        <span v-if="message.message_tag === 'reminder'" class="message-tag">🔔 提醒</span>
+        <span v-else-if="message.message_tag === 'heartbeat'" class="message-tag">🔔 巡检</span>
         <span v-if="message.timestamp" class="sender-time">{{ message.timestamp }}</span>
       </header>
       <slot />
@@ -72,6 +78,14 @@ const avatarLabel = (): string => {
   );
 }
 
+.message-bubble[data-message-tag="reminder"] .bubble-content {
+  border-left: 3px solid color-mix(in srgb, var(--brand) 78%, transparent);
+}
+
+.message-bubble[data-message-tag="heartbeat"] .bubble-content {
+  border-left: 3px solid color-mix(in srgb, var(--brand-2) 78%, transparent);
+}
+
 .bubble-meta {
   align-items: baseline;
   color: var(--muted);
@@ -84,6 +98,14 @@ const avatarLabel = (): string => {
 .sender-name {
   font-weight: 700;
   text-transform: capitalize;
+}
+
+.message-tag {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  margin-left: auto;
+  margin-right: 0.4rem;
 }
 
 .sender-time {

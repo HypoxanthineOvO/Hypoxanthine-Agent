@@ -265,3 +265,118 @@ def test_structured_store_delete_session_data_cleans_all_related_rows(tmp_path) 
         assert all(item["session_id"] != "s1" for item in await store.list_sessions())
 
     asyncio.run(_run())
+
+
+def test_structured_store_reminders_crud(tmp_path) -> None:
+    db_path = tmp_path / "hypo.db"
+
+    async def _run() -> None:
+        store = StructuredStore(db_path=db_path)
+        await store.init()
+        reminder_id = await store.create_reminder(
+            title="喝水",
+            description="每小时喝水",
+            schedule_type="cron",
+            schedule_value="0 * * * *",
+            channel="all",
+            status="active",
+            next_run_at="2026-03-07T08:00:00+00:00",
+            heartbeat_config='[{"check_type":"file_exists","target":"/tmp/ok"}]',
+        )
+
+        inserted = await store.get_reminder(reminder_id)
+        assert inserted is not None
+        assert inserted["id"] == reminder_id
+        assert inserted["title"] == "喝水"
+        assert inserted["schedule_type"] == "cron"
+
+        await store.update_reminder(
+            reminder_id,
+            title="起身活动",
+            description="每小时起身",
+            schedule_type="once",
+            schedule_value="2026-03-07T09:00:00+00:00",
+            channel="all",
+            status="paused",
+            next_run_at="2026-03-07T09:00:00+00:00",
+            heartbeat_config="[]",
+        )
+        updated = await store.get_reminder(reminder_id)
+        assert updated is not None
+        assert updated["title"] == "起身活动"
+        assert updated["status"] == "paused"
+
+        await store.set_reminder_next_run_at(
+            reminder_id,
+            "2026-03-07T10:00:00+00:00",
+        )
+        rerun = await store.get_reminder(reminder_id)
+        assert rerun is not None
+        assert rerun["next_run_at"] == "2026-03-07T10:00:00+00:00"
+
+        await store.mark_reminder_completed(reminder_id)
+        done = await store.get_reminder(reminder_id)
+        assert done is not None
+        assert done["status"] == "completed"
+
+        await store.delete_reminder(reminder_id)
+        deleted = await store.get_reminder(reminder_id)
+        assert deleted is not None
+        assert deleted["status"] == "deleted"
+
+    asyncio.run(_run())
+
+
+def test_structured_store_list_reminders_filters_status(tmp_path) -> None:
+    db_path = tmp_path / "hypo.db"
+
+    async def _run() -> None:
+        store = StructuredStore(db_path=db_path)
+        await store.init()
+        await store.create_reminder(
+            title="A",
+            description="",
+            schedule_type="once",
+            schedule_value="2026-03-07T08:00:00+00:00",
+            channel="all",
+            status="active",
+            next_run_at="2026-03-07T08:00:00+00:00",
+            heartbeat_config=None,
+        )
+        await store.create_reminder(
+            title="B",
+            description="",
+            schedule_type="once",
+            schedule_value="2026-03-07T09:00:00+00:00",
+            channel="all",
+            status="paused",
+            next_run_at="2026-03-07T09:00:00+00:00",
+            heartbeat_config=None,
+        )
+        await store.create_reminder(
+            title="C",
+            description="",
+            schedule_type="once",
+            schedule_value="2026-03-07T10:00:00+00:00",
+            channel="all",
+            status="deleted",
+            next_run_at=None,
+            heartbeat_config=None,
+        )
+
+        active = await store.list_reminders(status="active")
+        paused = await store.list_reminders(status="paused")
+        all_rows = await store.list_reminders(status=None)
+        active_upper = await store.list_reminders(status="ACTIVE")
+        all_by_keyword = await store.list_reminders(status="all")
+
+        assert len(active) == 1
+        assert active[0]["title"] == "A"
+        assert len(paused) == 1
+        assert paused[0]["title"] == "B"
+        assert len(all_rows) == 2
+        assert len(active_upper) == 1
+        assert active_upper[0]["title"] == "A"
+        assert len(all_by_keyword) == 2
+
+    asyncio.run(_run())

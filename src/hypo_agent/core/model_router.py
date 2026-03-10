@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import inspect
 from collections.abc import AsyncIterator
 from collections.abc import Awaitable, Callable
+import re
 from time import perf_counter
 from typing import Any
 
@@ -233,6 +235,21 @@ class ModelRouter:
     def get_model_for_task(self, task_type: str) -> str:
         return self.config.task_routing.get(task_type, self.config.default_model)
 
+    async def call_lightweight_json(
+        self,
+        prompt: str,
+        *,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        model_name = self.get_model_for_task("lightweight")
+        text = await self.call(
+            model_name,
+            [{"role": "user", "content": prompt}],
+            session_id=session_id,
+        )
+        parsed = self._parse_json_object_from_text(text)
+        return parsed if isinstance(parsed, dict) else {}
+
     def get_fallback_chain(self, start_model: str) -> list[str]:
         return self._candidate_chain(start_model)
 
@@ -426,9 +443,40 @@ class ModelRouter:
         }
 
     def _json_dump(self, payload: dict[str, Any]) -> str:
-        import json
-
         return json.dumps(payload, ensure_ascii=False)
+
+    def _parse_json_object_from_text(self, text: str) -> dict[str, Any] | None:
+        raw = (text or "").strip()
+        if not raw:
+            return None
+
+        parsed_direct = self._try_parse_json_dict(raw)
+        if parsed_direct is not None:
+            return parsed_direct
+
+        fenced_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, flags=re.DOTALL)
+        if fenced_match:
+            parsed_fenced = self._try_parse_json_dict(fenced_match.group(1).strip())
+            if parsed_fenced is not None:
+                return parsed_fenced
+
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end > start:
+            parsed_slice = self._try_parse_json_dict(raw[start : end + 1])
+            if parsed_slice is not None:
+                return parsed_slice
+
+        return None
+
+    def _try_parse_json_dict(self, payload: str) -> dict[str, Any] | None:
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+        return None
 
     def _extract_delta_text(self, chunk: Any) -> str:
         choices = self._read_field(chunk, "choices") or []

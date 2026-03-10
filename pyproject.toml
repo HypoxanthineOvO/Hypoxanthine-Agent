@@ -17,6 +17,7 @@ dependencies = [
   "pydantic>=2.8.0,<3.0.0",
   "pyyaml>=6.0.0,<7.0.0",
   "structlog>=24.0.0,<26.0.0",
+  "apscheduler>=3.10.0,<4.0.0",
   "litellm>=1.60.0,<2.0.0",
   "aiosqlite>=0.20.0,<1.0.0",
   "pymupdf>=1.26.0,<2.0.0",

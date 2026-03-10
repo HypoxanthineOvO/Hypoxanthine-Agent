@@ -213,6 +213,76 @@ def test_slash_commands_session_list_returns_sessions(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
+def test_slash_commands_reminders_lists_non_deleted_by_default(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, store, _ = await _build_handler(tmp_path)
+        await store.create_reminder(
+            title="喝水",
+            description="每小时提醒",
+            schedule_type="cron",
+            schedule_value="0 * * * *",
+            channel="all",
+            status="active",
+            next_run_at="2026-03-07T09:00:00+00:00",
+            heartbeat_config=None,
+        )
+        await store.create_reminder(
+            title="错过提醒",
+            description="过去时间",
+            schedule_type="once",
+            schedule_value="2026-03-07T08:00:00+00:00",
+            channel="all",
+            status="missed",
+            next_run_at=None,
+            heartbeat_config=None,
+        )
+
+        text = await handler.try_handle(Message(text="/reminders", sender="user", session_id="s1"))
+        assert text is not None
+        assert "提醒列表" in text
+        assert "🟢 active" in text
+        assert "⏰ missed" in text
+        assert "喝水" in text
+        assert "错过提醒" in text
+
+    asyncio.run(_run())
+
+
+def test_slash_commands_reminders_support_status_filter(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, store, _ = await _build_handler(tmp_path)
+        await store.create_reminder(
+            title="喝水",
+            description="每小时提醒",
+            schedule_type="cron",
+            schedule_value="0 * * * *",
+            channel="all",
+            status="active",
+            next_run_at="2026-03-07T09:00:00+00:00",
+            heartbeat_config=None,
+        )
+        await store.create_reminder(
+            title="错过提醒",
+            description="过去时间",
+            schedule_type="once",
+            schedule_value="2026-03-07T08:00:00+00:00",
+            channel="all",
+            status="missed",
+            next_run_at=None,
+            heartbeat_config=None,
+        )
+
+        text = await handler.try_handle(
+            Message(text="/reminders active", sender="user", session_id="s1")
+        )
+        assert text is not None
+        assert "提醒列表（active）" in text
+        assert "喝水" in text
+        assert "错过提醒" not in text
+
+    asyncio.run(_run())
+
+
 def test_slash_commands_token_and_token_total_use_store_stats(tmp_path: Path) -> None:
     async def _run() -> None:
         handler, _, store, _ = await _build_handler(tmp_path)

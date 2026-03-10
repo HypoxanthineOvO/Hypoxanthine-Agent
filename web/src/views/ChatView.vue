@@ -389,7 +389,18 @@ const hasFileAttachment = (message: Message): boolean =>
   );
 
 const isToolCall = (message: Message): boolean =>
-  message.event_type === "tool_call_start" || message.event_type === "tool_call_result";
+  message.event_type === "tool_call_result";
+
+const isEphemeralToolResult = (message: Message): boolean =>
+  message.event_type === "tool_call_result" &&
+  message.metadata?.ephemeral === true;
+
+const isHiddenSystemToolEvent = (message: Message): boolean =>
+  message.event_type === "tool_call_start" || isEphemeralToolResult(message);
+
+const displayedMessages = computed(() =>
+  messages.value.filter((message) => !isHiddenSystemToolEvent(message)),
+);
 
 const isCompressedToolResult = (message: Message): boolean =>
   message.event_type === "tool_call_result" &&
@@ -584,7 +595,7 @@ useHotkey([
 
       <main ref="messagesRef" class="messages" aria-live="polite">
         <MessageBubble
-          v-for="(message, index) in messages"
+          v-for="(message, index) in displayedMessages"
           :key="`${message.session_id}-${message.sender}-${index}`"
           :message="message"
         >
@@ -626,7 +637,7 @@ useHotkey([
             :text="message.text ?? ''"
           />
         </MessageBubble>
-        <p v-if="messages.length === 0" class="empty-tip">
+        <p v-if="displayedMessages.length === 0" class="empty-tip">
           No messages yet. Connect and send your first line.
         </p>
       </main>
