@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from hypo_agent.core.config_loader import load_runtime_model_config
+from hypo_agent.core.config_loader import load_runtime_model_config, load_tasks_config
 
 
 def test_load_runtime_model_config_merges_models_and_secrets(tmp_path: Path) -> None:
@@ -156,3 +156,25 @@ providers:
 
     with pytest.raises(ValueError, match="MINIMAX_API_KEY"):
         load_runtime_model_config(models_yaml, secrets_yaml)
+
+
+def test_load_tasks_config_accepts_heartbeat_and_email_scan(tmp_path: Path) -> None:
+    tasks_yaml = tmp_path / "tasks.yaml"
+    tasks_yaml.write_text(
+        """
+heartbeat:
+  enabled: true
+  interval_minutes: 1
+email_scan:
+  enabled: true
+  interval_minutes: 5
+""".strip(),
+        encoding="utf-8",
+    )
+
+    tasks = load_tasks_config(tasks_yaml)
+
+    assert tasks.heartbeat.enabled is True
+    assert tasks.heartbeat.interval_minutes == 1
+    assert tasks.email_scan.enabled is True
+    assert tasks.email_scan.interval_minutes == 5

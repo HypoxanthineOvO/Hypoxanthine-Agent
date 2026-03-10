@@ -11,3 +11,5 @@ skills:
   reminder:
     enabled: true
     auto_confirm: true
+  email_scanner:
+    enabled: false

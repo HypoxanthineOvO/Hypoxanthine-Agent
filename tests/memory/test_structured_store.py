@@ -380,3 +380,73 @@ def test_structured_store_list_reminders_filters_status(tmp_path) -> None:
         assert len(all_by_keyword) == 2
 
     asyncio.run(_run())
+
+
+def test_structured_store_processed_emails_dedup(tmp_path) -> None:
+    db_path = tmp_path / "hypo.db"
+
+    async def _run() -> None:
+        store = StructuredStore(db_path=db_path)
+        await store.init()
+
+        first_insert_ok = await store.insert_processed_email(
+            account_name="main",
+            message_id="<msg-001@example.com>",
+            subject="发票待处理",
+            sender="billing@example.com",
+            received_at="2026-03-09T09:00:00+08:00",
+            category="important",
+            summary="需要今天确认付款",
+            attachment_paths=["memory/email_attachments/main/2026-03-09/invoice.pdf"],
+        )
+        second_insert_ok = await store.insert_processed_email(
+            account_name="main",
+            message_id="<msg-001@example.com>",
+            subject="发票待处理",
+            sender="billing@example.com",
+            received_at="2026-03-09T09:00:00+08:00",
+            category="important",
+            summary="需要今天确认付款",
+            attachment_paths=["memory/email_attachments/main/2026-03-09/invoice.pdf"],
+        )
+        has_processed = await store.has_processed_email("main", "<msg-001@example.com>")
+
+        assert first_insert_ok is True
+        assert second_insert_ok is False
+        assert has_processed is True
+
+    asyncio.run(_run())
+
+
+def test_structured_store_list_overdue_pending_reminders(tmp_path) -> None:
+    db_path = tmp_path / "hypo.db"
+
+    async def _run() -> None:
+        store = StructuredStore(db_path=db_path)
+        await store.init()
+        await store.create_reminder(
+            title="过期提醒",
+            description="应触发但未触发",
+            schedule_type="once",
+            schedule_value="2026-03-07T08:00:00+00:00",
+            channel="all",
+            status="active",
+            next_run_at="2000-01-01T00:00:00+00:00",
+            heartbeat_config=None,
+        )
+        await store.create_reminder(
+            title="未来提醒",
+            description="尚未触发",
+            schedule_type="once",
+            schedule_value="2099-03-07T08:00:00+00:00",
+            channel="all",
+            status="active",
+            next_run_at="2099-03-07T08:00:00+00:00",
+            heartbeat_config=None,
+        )
+
+        rows = await store.list_overdue_pending_reminders(limit=10)
+        assert len(rows) == 1
+        assert rows[0]["title"] == "过期提醒"
+
+    asyncio.run(_run())

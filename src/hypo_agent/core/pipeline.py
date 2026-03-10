@@ -573,6 +573,7 @@ class ChatPipeline:
         session_id = str(event.get("session_id") or "main")
         title = str(event.get("title") or "").strip()
         description = str(event.get("description") or "").strip()
+        summary = str(event.get("summary") or "").strip()
 
         if event_type == "reminder_trigger":
             text = f"🔔 提醒：{title}" if title else "🔔 提醒"
@@ -586,14 +587,28 @@ class ChatPipeline:
             )
 
         if event_type == "heartbeat_trigger":
-            text = f"🔔 Heartbeat 异常：{title}" if title else "🔔 Heartbeat 异常"
-            if description:
-                text += f"\n{description}"
+            if summary:
+                text = f"💓 {summary}"
+            else:
+                text = f"🔔 Heartbeat 异常：{title}" if title else "🔔 Heartbeat 异常"
+                if description:
+                    text += f"\n{description}"
             return Message(
                 text=text,
                 sender="assistant",
                 session_id=session_id,
                 message_tag="heartbeat",
+            )
+
+        if event_type == "email_scan_trigger":
+            text = summary or "📧 邮件扫描完成（暂无新增）"
+            if not text.startswith(("🔴", "⚪", "📂", "📧")):
+                text = f"📧 {text}"
+            return Message(
+                text=text,
+                sender="assistant",
+                session_id=session_id,
+                message_tag="email_scan",
             )
 
         return None

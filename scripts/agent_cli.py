@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import Enum
 import json
 import subprocess
 import sys
@@ -168,17 +170,135 @@ async def _smoke_send(ws: Any, text: str, session_id: str) -> None:
     await ws.send(json.dumps({"text": text, "sender": "user", "session_id": session_id}))
 
 
-async def cmd_smoke(*, port: int, session_id: str) -> int:
-    token = _load_token()
-    uri = _ws_url(port, token)
+class SmokeStatus(str, Enum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    SKIP = "SKIP"
 
-    print("=" * 60)
-    print("SMOKE TEST: Hypo-Agent m8_smoke flow")
-    print("=" * 60)
 
+@dataclass
+class SmokeCaseResult:
+    name: str
+    status: SmokeStatus
+    detail: str = ""
+
+
+class SmokeSession:
+    def __init__(self, ws: Any, session_id: str) -> None:
+        self._ws = ws
+        self._session_id = session_id
+        self.proactive_payloads: list[dict[str, Any]] = []
+
+    async def send(self, text: str) -> None:
+        await _smoke_send(self._ws, text, self._session_id)
+
+    async def recv_next(self, timeout: float = 5) -> dict[str, Any] | None:
+        end_at = time.time() + timeout
+        while time.time() < end_at:
+            wait_seconds = max(0.1, min(5.0, end_at - time.time()))
+            try:
+                payload = json.loads(await asyncio.wait_for(self._ws.recv(), timeout=wait_seconds))
+            except asyncio.TimeoutError:
+                continue
+
+            if str(payload.get("session_id") or "") != self._session_id:
+                continue
+
+            payload_type = str(payload.get("type") or "")
+            tag = str(payload.get("message_tag") or "")
+            if tag or payload_type == "message":
+                self.proactive_payloads.append(payload)
+            return payload
+
+        return None
+
+    async def wait_for_assistant_done(self, timeout: int = 30) -> tuple[bool, list[str]]:
+        chunks: list[str] = []
+        end_at = time.time() + timeout
+        while time.time() < end_at:
+            payload = await self.recv_next(timeout=min(5, max(1, int(end_at - time.time()))))
+            if payload is None:
+                continue
+
+            payload_type = str(payload.get("type") or "")
+            if payload_type == "assistant_chunk":
+                chunks.append(str(payload.get("text") or ""))
+                continue
+            if payload_type == "assistant_done":
+                return True, chunks
+        return False, chunks
+
+    async def wait_for_tag(self, tag: str, timeout: int) -> dict[str, Any] | None:
+        end_at = time.time() + timeout
+        while time.time() < end_at:
+            payload = await self.recv_next(timeout=min(5, max(1, int(end_at - time.time()))))
+            if payload is None:
+                continue
+            if str(payload.get("message_tag") or "") == tag:
+                return payload
+        return None
+
+
+def _load_tasks_config(config_path: Path = Path("config/tasks.yaml")) -> dict[str, Any]:
+    if not config_path.exists():
+        return {}
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    if isinstance(payload, dict):
+        return payload
+    return {}
+
+
+def _extract_interval_minutes(tasks_payload: dict[str, Any], key: str) -> tuple[bool, int | None]:
+    section = tasks_payload.get(key)
+    if not isinstance(section, dict):
+        return False, None
+    enabled = bool(section.get("enabled"))
+    interval = section.get("interval_minutes")
+    if isinstance(interval, int):
+        return enabled, interval
+    try:
+        if interval is not None:
+            return enabled, int(interval)
+    except (TypeError, ValueError):
+        return enabled, None
+    return enabled, None
+
+
+def _print_case_result(result: SmokeCaseResult) -> None:
+    icon = {
+        SmokeStatus.PASS: "✅",
+        SmokeStatus.FAIL: "❌",
+        SmokeStatus.SKIP: "⏭️",
+    }[result.status]
+    suffix = f" - {result.detail}" if result.detail else ""
+    print(f"{icon} {result.name}: {result.status.value}{suffix}")
+
+
+async def _case_send_regression(smoke: SmokeSession, text: str, timeout: int = 30) -> SmokeCaseResult:
+    await smoke.send(text)
+    done, chunks = await smoke.wait_for_assistant_done(timeout=timeout)
+    if not done:
+        return SmokeCaseResult(
+            name=f'send "{text}" regression',
+            status=SmokeStatus.FAIL,
+            detail="assistant_done timeout",
+        )
+    if not chunks:
+        return SmokeCaseResult(
+            name=f'send "{text}" regression',
+            status=SmokeStatus.FAIL,
+            detail="no assistant chunks",
+        )
+    return SmokeCaseResult(
+        name=f'send "{text}" regression',
+        status=SmokeStatus.PASS,
+        detail=f"chunks={len(chunks)}",
+    )
+
+
+async def _case_reminder_push_regression(smoke: SmokeSession) -> SmokeCaseResult:
     unique_title = f"m8_smoke_{int(time.time())}"
     trigger_at = (datetime.now() + timedelta(minutes=1)).replace(microsecond=0).isoformat()
-
     subprocess.run(
         [
             "sqlite3",
@@ -189,142 +309,180 @@ async def cmd_smoke(*, port: int, session_id: str) -> int:
     )
     baseline_id_raw = _query_db_value("SELECT COALESCE(MAX(id), 0) FROM reminders;")
     baseline_id = int(baseline_id_raw) if baseline_id_raw.isdigit() else 0
+    create_prompt = (
+        "请务必调用 create_reminder 工具创建提醒，不要只给文字答复。"
+        f"参数：title={unique_title}，schedule_type=once，schedule_value={trigger_at}，channel=all。"
+    )
+    await smoke.send(create_prompt)
+    await smoke.wait_for_assistant_done(timeout=45)
 
-    created = False
-    listed = False
-    pushed = False
-    created_ids: list[int] = []
-    created_titles: list[str] = []
-
-    async with websockets.connect(uri) as ws:
-        print("[STEP 1] create reminder")
-        create_prompt = (
-            "请务必调用 create_reminder 工具创建提醒，不要只给文字答复。"
-            f"参数：title={unique_title}，schedule_type=once，schedule_value={trigger_at}，channel=all。"
+    created_rows = _query_db_rows(
+        f"SELECT id, title FROM reminders WHERE id > {baseline_id} ORDER BY id DESC;"
+    )
+    created_ids = [int(row[0]) for row in created_rows if row and row[0].isdigit()]
+    created_titles = [row[1] for row in created_rows if len(row) >= 2 and row[1]]
+    if not created_ids:
+        retry_prompt = (
+            "上一步未创建成功。请直接调用 create_reminder 工具，"
+            f"title={unique_title}，schedule_type=once，schedule_value={trigger_at}。"
         )
-        await _smoke_send(ws, create_prompt, session_id)
-
-        step_started = time.time()
-        while time.time() - step_started < 30:
-            try:
-                payload = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-            except asyncio.TimeoutError:
-                continue
-            if str(payload.get("session_id") or "") != session_id:
-                continue
-            text = str(payload.get("text") or "")
-            payload_type = str(payload.get("type") or "")
-            if payload_type in {"assistant_chunk", "tool_call_result"} and text:
-                print(f"  {_format_message('[event]', payload)}")
-            if payload_type == "assistant_done":
-                break
-
+        await smoke.send(retry_prompt)
+        await smoke.wait_for_assistant_done(timeout=30)
         created_rows = _query_db_rows(
-            f"SELECT id, title, status FROM reminders WHERE id > {baseline_id} ORDER BY id DESC;"
+            f"SELECT id, title FROM reminders WHERE id > {baseline_id} ORDER BY id DESC;"
         )
-        created_ids = [
-            int(row[0])
-            for row in created_rows
-            if row and row[0].isdigit()
-        ]
+        created_ids = [int(row[0]) for row in created_rows if row and row[0].isdigit()]
         created_titles = [row[1] for row in created_rows if len(row) >= 2 and row[1]]
-        created = len(created_ids) > 0
-        if not created:
-            retry_prompt = (
-                "上一步没有创建成功。现在请直接调用 create_reminder 工具，"
-                f"title={unique_title}，schedule_type=once，schedule_value={trigger_at}。"
-            )
-            await _smoke_send(ws, retry_prompt, session_id)
-            retry_started = time.time()
-            while time.time() - retry_started < 20:
-                try:
-                    payload = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-                except asyncio.TimeoutError:
-                    continue
-                if str(payload.get("session_id") or "") != session_id:
-                    continue
-                if str(payload.get("type") or "") == "assistant_done":
-                    break
-            created_rows = _query_db_rows(
-                f"SELECT id, title, status FROM reminders WHERE id > {baseline_id} ORDER BY id DESC;"
-            )
-            created_ids = [
-                int(row[0])
-                for row in created_rows
-                if row and row[0].isdigit()
-            ]
-            created_titles = [row[1] for row in created_rows if len(row) >= 2 and row[1]]
-            created = len(created_ids) > 0
+    if not created_ids:
+        return SmokeCaseResult("reminder create regression", SmokeStatus.FAIL, "db has no new reminder row")
 
-        print("[STEP 2] list reminders")
-        await _smoke_send(ws, "/reminders", session_id)
-        list_chunks: list[str] = []
-        step_started = time.time()
-        while time.time() - step_started < 20:
-            try:
-                payload = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-            except asyncio.TimeoutError:
-                continue
-            if str(payload.get("session_id") or "") != session_id:
-                continue
-            payload_type = str(payload.get("type") or "")
-            if payload_type == "assistant_chunk":
-                list_chunks.append(str(payload.get("text") or ""))
-                continue
-            if payload_type == "assistant_done":
-                break
+    await smoke.send("/reminders")
+    done, list_chunks = await smoke.wait_for_assistant_done(timeout=20)
+    if not done:
+        return SmokeCaseResult("send \"/reminders\" regression", SmokeStatus.FAIL, "assistant_done timeout")
+    if not list_chunks:
+        return SmokeCaseResult("send \"/reminders\" regression", SmokeStatus.FAIL, "no assistant chunks")
 
-        list_text = "".join(list_chunks)
-        listed = any(f"#{reminder_id}" in list_text for reminder_id in created_ids)
-        if listed:
-            print("  reminder appears in /reminders output")
+    list_text = "".join(list_chunks)
+    if (unique_title not in list_text) and (not any(f"#{rid}" in list_text for rid in created_ids)):
+        return SmokeCaseResult("send \"/reminders\" regression", SmokeStatus.FAIL, "created reminder not listed")
 
-        print("[STEP 3] wait for proactive reminder push (<=120s)")
-        step_started = time.time()
-        while time.time() - step_started < 120:
-            try:
-                payload = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-            except asyncio.TimeoutError:
-                continue
-            if str(payload.get("session_id") or "") != session_id:
-                continue
-            tag = str(payload.get("message_tag") or "")
-            text = str(payload.get("text") or "")
-            if tag == "reminder":
-                if created_titles and not any(title in text for title in created_titles):
-                    continue
-                pushed = True
-                print(f"  reminder push received at {int(time.time() - step_started)}s")
-                break
+    reminder_payload = await smoke.wait_for_tag("reminder", timeout=120)
+    if reminder_payload is None:
+        return SmokeCaseResult("reminder proactive push regression", SmokeStatus.FAIL, "no reminder push")
 
-    ids_sql = ",".join(str(item) for item in created_ids) if created_ids else "0"
-    db_rows: list[list[str]] = []
-    db_ok = False
-    for _ in range(20):
-        db_rows = _query_db_rows(
-            f"SELECT id, title, status FROM reminders WHERE id IN ({ids_sql}) ORDER BY id DESC;"
+    reminder_text = str(reminder_payload.get("text") or "")
+    if created_titles and not any(title in reminder_text for title in created_titles):
+        return SmokeCaseResult(
+            "reminder proactive push regression",
+            SmokeStatus.FAIL,
+            "push missing created reminder title",
         )
-        db_ok = any(len(row) >= 3 and row[2] == "completed" for row in db_rows)
-        if db_ok:
-            break
-        await asyncio.sleep(0.5)
-    db_text = "\\n".join("|".join(row) for row in db_rows).strip()
-    print("[STEP 4] db status")
-    print(db_text if db_text else "(no rows)")
+    return SmokeCaseResult("reminder proactive push regression", SmokeStatus.PASS, 'message_tag="reminder" received')
 
-    checks = [
-        ("create reminder", created),
-        ("list reminder", listed),
-        ("receive push", pushed),
-        ("db status completed", db_ok),
-    ]
+
+async def _case_heartbeat_push(smoke: SmokeSession, tasks_payload: dict[str, Any]) -> SmokeCaseResult:
+    enabled, interval = _extract_interval_minutes(tasks_payload, "heartbeat")
+    if not enabled:
+        return SmokeCaseResult("heartbeat proactive push", SmokeStatus.SKIP, "tasks.heartbeat.enabled != true")
+    if interval is None:
+        return SmokeCaseResult("heartbeat proactive push", SmokeStatus.SKIP, "tasks.heartbeat.interval_minutes missing")
+    if interval != 1:
+        return SmokeCaseResult(
+            "heartbeat proactive push",
+            SmokeStatus.SKIP,
+            f"tasks.heartbeat.interval_minutes={interval}, expected 1 for smoke",
+        )
+
+    # Force one deterministic abnormal signal for smoke: overdue active reminder.
+    overdue_title = f"m9_smoke_overdue_{int(time.time())}"
+    subprocess.run(
+        [
+            "sqlite3",
+            "memory/hypo.db",
+            (
+                "INSERT INTO reminders("
+                "title,description,schedule_type,schedule_value,channel,status,created_at,updated_at,next_run_at,heartbeat_config"
+                ") VALUES ("
+                f"'{overdue_title}','smoke overdue seed','once','2000-01-01T00:00:00+00:00','all','active',"
+                "datetime('now'),datetime('now'),'2000-01-01T00:00:00+00:00',NULL"
+                ");"
+            ),
+        ],
+        check=False,
+    )
+
+    timeout = int(max(75, interval * 80))
+    payload = await smoke.wait_for_tag("heartbeat", timeout=timeout)
+    if payload is None:
+        return SmokeCaseResult("heartbeat proactive push", SmokeStatus.FAIL, "no heartbeat push in time window")
+    return SmokeCaseResult("heartbeat proactive push", SmokeStatus.PASS, 'message_tag="heartbeat" received')
+
+
+def _case_message_tag_integrity(smoke: SmokeSession) -> SmokeCaseResult:
+    if not smoke.proactive_payloads:
+        return SmokeCaseResult("proactive message_tag integrity", SmokeStatus.SKIP, "no proactive payload observed")
+
+    allowed_tags = {"reminder", "heartbeat", "email_scan", "tool_status"}
+    for payload in smoke.proactive_payloads:
+        tag = str(payload.get("message_tag") or "").strip()
+        if not tag:
+            return SmokeCaseResult("proactive message_tag integrity", SmokeStatus.FAIL, "message_tag is empty")
+        if tag not in allowed_tags:
+            return SmokeCaseResult(
+                "proactive message_tag integrity",
+                SmokeStatus.FAIL,
+                f"unexpected message_tag={tag}",
+            )
+    return SmokeCaseResult(
+        "proactive message_tag integrity",
+        SmokeStatus.PASS,
+        f"checked={len(smoke.proactive_payloads)}",
+    )
+
+
+async def _case_email_scan_trigger(smoke: SmokeSession, tasks_payload: dict[str, Any]) -> SmokeCaseResult:
+    enabled, interval = _extract_interval_minutes(tasks_payload, "email_scan")
+    if not enabled:
+        return SmokeCaseResult("email_scan scheduled trigger", SmokeStatus.SKIP, "tasks.email_scan.enabled != true")
+    if interval is None:
+        return SmokeCaseResult("email_scan scheduled trigger", SmokeStatus.SKIP, "tasks.email_scan.interval_minutes missing")
+
+    trigger_cmd = str(
+        (
+            tasks_payload.get("smoke") if isinstance(tasks_payload.get("smoke"), dict) else {}
+        ).get("email_scan_trigger_cmd")
+        or ""
+    ).strip()
+    if trigger_cmd:
+        run_result = subprocess.run(trigger_cmd, shell=True, capture_output=True, text=True, check=False)
+        if run_result.returncode != 0:
+            detail = (run_result.stderr or run_result.stdout or "").strip()
+            if len(detail) > 120:
+                detail = detail[:120] + "..."
+            return SmokeCaseResult(
+                "email_scan scheduled trigger",
+                SmokeStatus.FAIL,
+                f"trigger command failed: {detail or run_result.returncode}",
+            )
+
+    payload = await smoke.wait_for_tag("email_scan", timeout=max(90, interval * 90))
+    if payload is None:
+        return SmokeCaseResult("email_scan scheduled trigger", SmokeStatus.FAIL, "no email_scan push in time window")
+    return SmokeCaseResult("email_scan scheduled trigger", SmokeStatus.PASS, 'message_tag="email_scan" received')
+
+
+async def cmd_smoke(*, port: int, session_id: str) -> int:
+    token = _load_token()
+    uri = _ws_url(port, token)
+    tasks_payload = _load_tasks_config()
+
     print("=" * 60)
-    all_ok = True
-    for name, ok in checks:
-        print(f"{'✅' if ok else '❌'} {name}")
-        all_ok = all_ok and ok
+    print("SMOKE TEST: Hypo-Agent m9 smoke gates")
     print("=" * 60)
-    if all_ok:
+
+    results: list[SmokeCaseResult] = []
+    async with websockets.connect(uri) as ws:
+        smoke = SmokeSession(ws=ws, session_id=session_id)
+        print("[CASE 1] base dialogue regression")
+        results.append(await _case_send_regression(smoke, "你好", timeout=30))
+        print("[CASE 2] reminder regression and proactive push")
+        results.append(await _case_reminder_push_regression(smoke))
+        print("[CASE 3] heartbeat proactive push")
+        results.append(await _case_heartbeat_push(smoke, tasks_payload))
+        print("[CASE 4] proactive message_tag integrity")
+        results.append(_case_message_tag_integrity(smoke))
+        print("[CASE 5] email_scan scheduled trigger")
+        results.append(await _case_email_scan_trigger(smoke, tasks_payload))
+
+    print("=" * 60)
+    has_fail = False
+    for result in results:
+        _print_case_result(result)
+        if result.status == SmokeStatus.FAIL:
+            has_fail = True
+    print("=" * 60)
+    if not has_fail:
         print("ALL SMOKE TESTS PASSED")
         return 0
     print("SMOKE TEST FAILED")

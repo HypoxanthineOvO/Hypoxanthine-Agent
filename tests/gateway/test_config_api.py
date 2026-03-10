@@ -147,3 +147,39 @@ skills:
     assert response.json()["reloaded"] is True
     assert read_back.status_code == 200
     assert "default_timeout_seconds: 45" in read_back.json()["content"]
+
+
+def test_config_api_validates_new_tasks_fields(tmp_path) -> None:
+    client = _build_client(tmp_path)
+    with client:
+        invalid = client.put(
+            "/api/config/tasks.yaml",
+            params={"token": "test-token"},
+            json={
+                "content": """
+heartbeat:
+  enabled: true
+  interval_minutes: 0
+email_scan:
+  enabled: true
+  interval_minutes: 5
+""".strip()
+            },
+        )
+        valid = client.put(
+            "/api/config/tasks.yaml",
+            params={"token": "test-token"},
+            json={
+                "content": """
+heartbeat:
+  enabled: true
+  interval_minutes: 1
+email_scan:
+  enabled: true
+  interval_minutes: 5
+""".strip()
+            },
+        )
+
+    assert invalid.status_code == 422
+    assert valid.status_code == 200

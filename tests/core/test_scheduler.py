@@ -320,3 +320,45 @@ def test_heartbeat_abnormal_enqueues_event() -> None:
         assert event["title"] == "巡检"
 
     asyncio.run(_run())
+
+
+def test_scheduler_registers_interval_job_for_heartbeat() -> None:
+    async def _run() -> None:
+        service = SchedulerService(
+            structured_store=StubStore(),
+            event_queue=EventQueue(),
+        )
+        await service.start()
+
+        async def heartbeat_job() -> None:
+            return None
+
+        service.register_interval_job("heartbeat", 1, heartbeat_job)
+        job = service._scheduler.get_job("heartbeat")
+        assert job is not None
+        assert job.trigger is not None
+
+        await service.stop()
+
+    asyncio.run(_run())
+
+
+def test_scheduler_registers_interval_job_for_email_scan() -> None:
+    async def _run() -> None:
+        service = SchedulerService(
+            structured_store=StubStore(),
+            event_queue=EventQueue(),
+        )
+        await service.start()
+
+        async def email_scan_job() -> None:
+            return None
+
+        service.register_interval_job("email_scan", 5, email_scan_job)
+        job = service._scheduler.get_job("email_scan")
+        assert job is not None
+        assert job.trigger is not None
+
+        await service.stop()
+
+    asyncio.run(_run())

@@ -50,3 +50,21 @@ def test_event_queue_helpers() -> None:
         assert queue.qsize() == 0
 
     asyncio.run(_run())
+
+
+def test_event_queue_accepts_email_scan_event() -> None:
+    async def _run() -> None:
+        queue = EventQueue()
+        event = {
+            "event_type": "email_scan_trigger",
+            "session_id": "main",
+            "summary": "🔴 发票待处理",
+        }
+        await queue.put(event)
+        popped = await queue.get()
+        queue.task_done()
+
+        assert popped["event_type"] == "email_scan_trigger"
+        assert popped["summary"] == "🔴 发票待处理"
+
+    asyncio.run(_run())

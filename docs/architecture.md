@@ -188,6 +188,11 @@ graph TD
   - 调度器与 Pipeline 通过中心 `asyncio.Queue`（`reminder_trigger` / `heartbeat_trigger`）集成；
   - APScheduler 使用 MemoryJobStore，启动时由 L2 `reminders` 表重建 active 任务；
   - Heartbeat 触发链为“代码预检 -> lightweight 模型综合判断 -> 异常才通知（正常静默）”。
+- **M9 更新（Heartbeat + Email Scanner）**：
+  - 新增 `HeartbeatService`，独立于 reminder heartbeat precheck，支持事件源聚合（`register_event_source`）与漏网提醒兜底（`list_overdue_pending_reminders`）；
+  - `tasks.yaml` 新增 `heartbeat` 与 `email_scan` 的 interval 配置，应用启动时统一注册 interval jobs；
+  - 新增 `email_scan_trigger` 事件类型，沿用中心 `EventQueue -> ChatPipeline._event_to_message -> WebSocket` 主动推送通路；
+  - `agent_cli.py smoke` 纳入 heartbeat/email_scan 真机门禁，用于验收主动消息 `message_tag` 链路完整性。
 
 **相对 OpenClaw 的简化**：OpenClaw 支持 Webhook、邮件触发、语音唤醒等多种激活方式，Hypo-Agent V1 仅保留 Cron 触发，保持简单。
 
@@ -212,6 +217,7 @@ class BaseSkill:
 | **TmuxSkill** | 在 tmux 会话中执行命令，支持超时与输出截断保护 | `required_permissions=[]`（M5 暂不做 PM 校验） |
 | **CodeRunSkill** | 将 Python / shell 代码写入临时文件后执行，优先使用 bwrap 沙箱，缺失时 fallback 直执并告警 | `required_permissions=[]`（通过 PM 白名单生成 bwrap rw 绑定） |
 | **FileSystemSkill** | 智能文件读取/写入/目录列表 + 目录树索引（`directory_index.yaml`） | `required_permissions=["filesystem"]` |
+| **EmailScannerSkill（M9）** | 多账户 IMAP 扫描、三层分类、摘要、附件落盘、定时扫描入队 | `required_permissions=[]`（依赖白名单限制附件目录） |
 
 **M5 Tool Calling 执行路径**：
 

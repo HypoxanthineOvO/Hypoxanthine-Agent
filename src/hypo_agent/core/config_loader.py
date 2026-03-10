@@ -6,7 +6,7 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
-from hypo_agent.models import ModelConfig, SecretsConfig
+from hypo_agent.models import ModelConfig, SecretsConfig, TasksConfig
 
 
 class ResolvedModelConfig(BaseModel):
@@ -107,3 +107,17 @@ def load_runtime_model_config(
         task_routing=model_config.task_routing,
         models=resolved_models,
     )
+
+
+def load_secrets_config(
+    secrets_path: Path | str = "config/secrets.yaml",
+) -> SecretsConfig:
+    secrets_payload = _load_yaml(Path(secrets_path))
+    return SecretsConfig.model_validate(secrets_payload)
+
+
+def load_tasks_config(
+    tasks_path: Path | str = "config/tasks.yaml",
+) -> TasksConfig:
+    tasks_payload = _load_yaml(Path(tasks_path))
+    return TasksConfig.model_validate(tasks_payload)

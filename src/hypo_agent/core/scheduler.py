@@ -12,6 +12,7 @@ from apscheduler.events import EVENT_JOB_MISSED, JobEvent
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 import structlog
 
 from hypo_agent.core.event_queue import EventQueue
@@ -39,6 +40,7 @@ class SchedulerService:
         self._scheduler = AsyncIOScheduler(timezone=self.default_timezone)
         self._scheduler.add_listener(self._on_job_missed, EVENT_JOB_MISSED)
         self._running = False
+        self._interval_job_ids: set[str] = set()
 
     @property
     def is_running(self) -> bool:
@@ -55,6 +57,9 @@ class SchedulerService:
     async def stop(self) -> None:
         if not self._running:
             return
+        for job_id in list(self._interval_job_ids):
+            self._remove_job_if_exists(job_id)
+        self._interval_job_ids.clear()
         self._scheduler.shutdown(wait=False)
         self._running = False
 
@@ -108,6 +113,32 @@ class SchedulerService:
 
     def has_job(self, reminder_id: int) -> bool:
         return self._scheduler.get_job(self._job_id(reminder_id)) is not None
+
+    def register_interval_job(
+        self,
+        job_id: str,
+        minutes: int,
+        coro: Any,
+        *,
+        replace_existing: bool = True,
+    ) -> None:
+        if not callable(coro):
+            raise TypeError("coro must be callable")
+        safe_minutes = max(1, int(minutes))
+        trigger = IntervalTrigger(minutes=safe_minutes, timezone=self.default_timezone)
+        self._scheduler.add_job(
+            coro,
+            trigger=trigger,
+            id=str(job_id),
+            replace_existing=replace_existing,
+            misfire_grace_time=self._misfire_grace_time_seconds,
+        )
+        self._interval_job_ids.add(str(job_id))
+        logger.info(
+            "scheduler.interval_job_registered",
+            job_id=str(job_id),
+            interval_minutes=safe_minutes,
+        )
 
     async def _sweep_expired_once_reminders(self) -> None:
         active_reminders = await self.structured_store.list_reminders(status="active")

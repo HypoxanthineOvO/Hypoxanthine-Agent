@@ -24,7 +24,7 @@ const avatarLabel = (): string => {
       <header class="bubble-meta">
         <span class="sender-name">{{ message.senderName ?? message.sender }}</span>
         <span v-if="message.message_tag === 'reminder'" class="message-tag">🔔 提醒</span>
-        <span v-else-if="message.message_tag === 'heartbeat'" class="message-tag">🔔 巡检</span>
+        <span v-else-if="message.message_tag === 'heartbeat'" class="message-tag">💓 巡检</span>
         <span v-if="message.timestamp" class="sender-time">{{ message.timestamp }}</span>
       </header>
       <slot />
