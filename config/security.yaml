@@ -1,3 +1,4 @@
+auth_token: dev-token-change-me
 directory_whitelist:
   read:
     - ./docs

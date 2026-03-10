@@ -1,5 +1,9 @@
 # AGENTS
 
+## Project Docs
+
+- Architecture reference: `docs/architecture.md`（进行 M1 及后续开发前先阅读，包含目录结构、模块职责与数据模型契约）
+
 <skills_system priority="1">
 
 ## Available Skills
