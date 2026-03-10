@@ -567,8 +567,15 @@ async def cmd_smoke(*, port: int, session_id: str) -> int:
 
 
 def main() -> None:
+    from hypo_agent.core.config_loader import get_port
+
     parser = argparse.ArgumentParser(description="Hypo-Agent CLI")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Gateway port (default: $HYPO_PORT or 8765)",
+    )
     parser.add_argument("--session-id", default="main")
 
     sub = parser.add_subparsers(dest="command", required=True)
@@ -586,13 +593,14 @@ def main() -> None:
     sub.add_parser("smoke", help="run m8_smoke test")
 
     args = parser.parse_args()
+    port = args.port if args.port is not None else get_port()
 
     if args.command == "send":
         raise SystemExit(
             asyncio.run(
                 cmd_send(
                     args.text,
-                    port=args.port,
+                    port=port,
                     session_id=args.session_id,
                     wait=args.wait,
                 )
@@ -603,7 +611,7 @@ def main() -> None:
             asyncio.run(
                 cmd_listen(
                     args.duration,
-                    port=args.port,
+                    port=port,
                     session_id=args.session_id,
                 )
             )
@@ -611,7 +619,7 @@ def main() -> None:
     if args.command == "check-db":
         raise SystemExit(cmd_check_db(args.query))
     if args.command == "smoke":
-        raise SystemExit(asyncio.run(cmd_smoke(port=args.port, session_id=args.session_id)))
+        raise SystemExit(asyncio.run(cmd_smoke(port=port, session_id=args.session_id)))
 
 
 if __name__ == "__main__":
