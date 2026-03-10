@@ -263,8 +263,9 @@ def test_skill_manager_records_tool_invocations() -> None:
         def __init__(self) -> None:
             self.records: list[dict] = []
 
-        async def record_tool_invocation(self, **kwargs) -> None:
+        async def record_tool_invocation(self, **kwargs) -> int:
             self.records.append(kwargs)
+            return 7
 
     store = RecordingStructuredStore()
     manager = SkillManager(structured_store=store)
@@ -277,9 +278,13 @@ def test_skill_manager_records_tool_invocations() -> None:
     record = store.records[0]
     assert record["session_id"] == "s1"
     assert record["tool_name"] == "echo"
+    assert record["skill_name"] == "echo"
+    assert record["params_json"] == '{"text": "hello"}'
     assert record["status"] == "success"
     assert record["duration_ms"] >= 0
-    assert isinstance(record["result_preview"], str)
+    assert isinstance(record["result_summary"], str)
+    assert record["compressed_meta_json"] is None
+    assert output.metadata["invocation_id"] == 7
 
 
 def test_skill_manager_records_blocked_tool_invocations() -> None:
@@ -297,8 +302,9 @@ def test_skill_manager_records_blocked_tool_invocations() -> None:
         def __init__(self) -> None:
             self.records: list[dict] = []
 
-        async def record_tool_invocation(self, **kwargs) -> None:
+        async def record_tool_invocation(self, **kwargs) -> int:
             self.records.append(kwargs)
+            return 99
 
     store = RecordingStructuredStore()
     manager = SkillManager(circuit_breaker=BlockedCircuitBreaker(), structured_store=store)
@@ -312,3 +318,5 @@ def test_skill_manager_records_blocked_tool_invocations() -> None:
     record = store.records[0]
     assert record["status"] == "blocked"
     assert record["error_info"] == "blocked for test"
+    assert record["skill_name"] == "echo"
+    assert output.metadata["invocation_id"] == 99

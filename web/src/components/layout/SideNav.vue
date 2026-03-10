@@ -25,9 +25,9 @@ const emit = defineEmits<{
 
 const navItems: NavItem[] = [
   { key: "chat", icon: "💬", label: "Chat", disabled: false },
-  { key: "dashboard", icon: "📊", label: "Dashboard", disabled: true },
-  { key: "config", icon: "⚙️", label: "Config", disabled: true },
-  { key: "memory", icon: "🧠", label: "Memory", disabled: true },
+  { key: "dashboard", icon: "📊", label: "Dashboard", disabled: false },
+  { key: "config", icon: "⚙️", label: "Config", disabled: false },
+  { key: "memory", icon: "🧠", label: "Memory", disabled: false },
 ];
 
 const onClick = (item: NavItem): void => {

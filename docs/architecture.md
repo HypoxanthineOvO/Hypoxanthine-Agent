@@ -513,3 +513,76 @@ Chat 消息渲染从单体视图拆分为组件树：
 - `FileAttachment`
 
 同时新增统一 `markdownRenderer`（GFM table/task list、KaTeX、Mermaid 懒加载、代码块行号/复制/语言标签），并在 `useChatSocket` 中支持指数退避重连（1s→2s→4s→8s→16s→30s）。
+
+### 3.17 M7b 增补（Dashboard + Config Editor + Memory Editor）
+
+M7b 在 M7a 基础上补齐了功能页闭环，并优先修复了 Session 切换后工具中间消息不可恢复的问题。
+
+#### 3.17.1 Tool Invocation 持久化与回放
+
+- `tool_invocations` 表升级为 M7b 契约字段：
+  - `session_id`, `tool_name`, `skill_name`, `params_json`, `status`
+  - `result_summary`（500 字符摘要）
+  - `duration_ms`, `error_info`
+  - `compressed_meta_json`（`cache_id/original_chars/compressed_chars`）
+  - `created_at`
+- `SkillManager.invoke()` 在 `success/error/timeout/blocked` 全分支写入记录，并将 `invocation_id` 回填到 `SkillOutput.metadata`。
+- `ChatPipeline` 在 OutputCompressor 产生压缩元信息后，回写 `compressed_meta_json` 到对应 invocation 记录。
+- 新增 `GET /api/sessions/{session_id}/tool-invocations`（Token 鉴权）供前端恢复工具调用历史。
+- ChatView 切换会话时并行加载 `messages + tool-invocations`，按时间线交错重建 `tool_call_start/tool_call_result`。
+
+#### 3.17.2 Dashboard API（REST + Token）
+
+新增 `/api/dashboard/*`：
+
+- `GET /api/dashboard/status`：`uptime/session_count/kill_switch/bwrap_available`
+- `GET /api/dashboard/token-stats?days=7`：按模型按天聚合 token
+- `GET /api/dashboard/latency-stats?days=7`：按天输出 `p50/p95/p99`（优先 `token_usage.latency_ms`，空时回退 `tool_invocations.duration_ms`）
+- `GET /api/dashboard/recent-tasks?limit=20`：最近工具调用
+- `GET /api/dashboard/skills`：技能列表与熔断状态
+
+#### 3.17.3 Config API 与热重载
+
+新增 `/api/config/*`：
+
+- `GET /api/config/files`
+- `GET /api/config/{filename}`
+- `PUT /api/config/{filename}`
+
+可编辑文件限定为：
+`models.yaml`, `skills.yaml`, `security.yaml`, `persona.yaml`, `tasks.yaml`。
+
+`PUT` 流程：
+1. 解析 YAML
+2. 按文件类型做 Pydantic 校验
+3. 写盘
+4. 触发 `reload_config()` 热重载
+
+`reload_config()` 会更新：
+
+- `PermissionManager`
+- `CircuitBreaker`
+- `SkillManager`（含 skills.yaml 开关）
+- `ChatPipeline`（重建后接入新 `ModelRouter` / `SlashCommandHandler` / `OutputCompressor`）
+
+#### 3.17.4 Memory API（L1/L2/L3）
+
+新增 `/api/memory/*` 与会话导出接口：
+
+- `GET /api/memory/tables`
+- `GET /api/memory/tables/{name}?page=1&size=50`
+- `PUT /api/memory/tables/{name}/{id}`（后端可写白名单控制，当前 `preferences` 可写）
+- `GET /api/memory/files`
+- `GET /api/memory/files/{path}`
+- `PUT /api/memory/files/{path}`
+- `GET /api/sessions/{id}/export?format=json|markdown`
+- `DELETE /api/sessions/{id}`（会话删除）
+
+其中 `memory/files` 访问限定在 `memory/knowledge` 根目录内，防止路径穿越。
+
+#### 3.17.5 WebUI 功能页
+
+- `DashboardView.vue`：状态卡片 + Token 图 + Latency 图 + Skills 状态 + Recent Tasks，5s 轮询。
+- `ConfigView.vue`：左侧文件树 + 右侧 `Form/YAML` 双 Tab，YAML 编辑支持 Monaco（失败自动 fallback textarea）。
+- `MemoryView.vue`：L1 会话管理、L2 SQLite 浏览、L3 知识文件编辑。
+- `App.vue` 导航已从 Chat 单页升级为 `💬 / 📊 / ⚙️ / 🧠` 多页面切换，保持 M7a 三断点响应式行为。

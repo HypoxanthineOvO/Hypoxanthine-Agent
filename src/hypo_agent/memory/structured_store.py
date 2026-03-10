@@ -68,11 +68,13 @@ class StructuredStore:
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         session_id TEXT NOT NULL,
                         tool_name TEXT NOT NULL,
-                        params TEXT,
+                        skill_name TEXT,
+                        params_json TEXT,
                         status TEXT NOT NULL,
-                        result_preview TEXT,
+                        result_summary TEXT,
                         duration_ms REAL,
                         error_info TEXT,
+                        compressed_meta_json TEXT,
                         created_at TEXT NOT NULL DEFAULT (datetime('now'))
                     )
                     """
@@ -100,6 +102,38 @@ class StructuredStore:
                 column_names = {str(column[1]) for column in columns}
                 if "latency_ms" not in column_names:
                     await db.execute("ALTER TABLE token_usage ADD COLUMN latency_ms REAL")
+
+                async with db.execute("PRAGMA table_info(tool_invocations)") as cursor:
+                    tool_columns = await cursor.fetchall()
+                tool_column_names = {str(column[1]) for column in tool_columns}
+                if "skill_name" not in tool_column_names:
+                    await db.execute("ALTER TABLE tool_invocations ADD COLUMN skill_name TEXT")
+                if "params_json" not in tool_column_names:
+                    await db.execute("ALTER TABLE tool_invocations ADD COLUMN params_json TEXT")
+                if "result_summary" not in tool_column_names:
+                    await db.execute("ALTER TABLE tool_invocations ADD COLUMN result_summary TEXT")
+                if "compressed_meta_json" not in tool_column_names:
+                    await db.execute(
+                        "ALTER TABLE tool_invocations ADD COLUMN compressed_meta_json TEXT"
+                    )
+
+                # Backfill from legacy columns when they exist.
+                if "params" in tool_column_names:
+                    await db.execute(
+                        """
+                        UPDATE tool_invocations
+                        SET params_json = params
+                        WHERE params_json IS NULL AND params IS NOT NULL
+                        """
+                    )
+                if "result_preview" in tool_column_names:
+                    await db.execute(
+                        """
+                        UPDATE tool_invocations
+                        SET result_summary = result_preview
+                        WHERE result_summary IS NULL AND result_preview IS NOT NULL
+                        """
+                    )
                 await db.commit()
 
             self._initialized = True
@@ -205,29 +239,30 @@ class StructuredStore:
     async def list_token_usage(
         self,
         session_id: str | None = None,
+        since_iso: str | None = None,
     ) -> list[dict[str, Any]]:
         await self.init()
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            if session_id is None:
-                query = """
-                    SELECT id, session_id, requested_model, resolved_model,
-                           input_tokens, output_tokens, total_tokens, latency_ms, created_at
-                    FROM token_usage
-                    ORDER BY id DESC
-                """
-                params: tuple[Any, ...] = ()
-            else:
-                query = """
-                    SELECT id, session_id, requested_model, resolved_model,
-                           input_tokens, output_tokens, total_tokens, latency_ms, created_at
-                    FROM token_usage
-                    WHERE session_id = ?
-                    ORDER BY id DESC
-                """
-                params = (session_id,)
+            clauses: list[str] = []
+            params: list[Any] = []
+            if session_id is not None:
+                clauses.append("session_id = ?")
+                params.append(session_id)
+            if since_iso is not None:
+                clauses.append("created_at >= ?")
+                params.append(since_iso)
 
-            async with db.execute(query, params) as cursor:
+            query = """
+                SELECT id, session_id, requested_model, resolved_model,
+                       input_tokens, output_tokens, total_tokens, latency_ms, created_at
+                FROM token_usage
+            """
+            if clauses:
+                query += f" WHERE {' AND '.join(clauses)}"
+            query += " ORDER BY id DESC"
+
+            async with db.execute(query, tuple(params)) as cursor:
                 rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
@@ -307,38 +342,63 @@ class StructuredStore:
         *,
         session_id: str,
         tool_name: str,
-        params: str | None,
+        skill_name: str | None,
+        params_json: str | None,
         status: str,
-        result_preview: str | None,
+        result_summary: str | None,
         duration_ms: float | None,
         error_info: str | None,
-    ) -> None:
+        compressed_meta_json: str | None = None,
+    ) -> int | None:
         await self.init()
         await self.upsert_session(session_id)
-        preview = result_preview[:500] if isinstance(result_preview, str) else None
+        summary = result_summary[:500] if isinstance(result_summary, str) else None
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
+            cursor = await db.execute(
                 """
                 INSERT INTO tool_invocations(
                     session_id,
                     tool_name,
-                    params,
+                    skill_name,
+                    params_json,
                     status,
-                    result_preview,
+                    result_summary,
                     duration_ms,
-                    error_info
+                    error_info,
+                    compressed_meta_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
                     tool_name,
-                    params,
+                    skill_name,
+                    params_json,
                     status,
-                    preview,
+                    summary,
                     duration_ms,
                     error_info,
+                    compressed_meta_json,
                 ),
+            )
+            await db.commit()
+            return int(cursor.lastrowid) if cursor.lastrowid is not None else None
+
+    async def update_tool_invocation_compressed_meta(
+        self,
+        invocation_id: int,
+        *,
+        compressed_meta_json: str,
+    ) -> None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE tool_invocations
+                SET compressed_meta_json = ?
+                WHERE id = ?
+                """,
+                (compressed_meta_json, invocation_id),
             )
             await db.commit()
 
@@ -346,6 +406,7 @@ class StructuredStore:
         self,
         session_id: str | None = None,
         limit: int | None = None,
+        since_iso: str | None = None,
     ) -> list[dict[str, Any]]:
         await self.init()
         async with aiosqlite.connect(self.db_path) as db:
@@ -355,23 +416,28 @@ class StructuredStore:
             if session_id is not None:
                 clauses.append("session_id = ?")
                 params.append(session_id)
+            if since_iso is not None:
+                clauses.append("created_at >= ?")
+                params.append(since_iso)
 
             query = """
                 SELECT
                     id,
                     session_id,
                     tool_name,
-                    params,
+                    skill_name,
+                    params_json,
                     status,
-                    result_preview,
+                    result_summary,
                     duration_ms,
                     error_info,
+                    compressed_meta_json,
                     created_at
                 FROM tool_invocations
             """
             if clauses:
                 query += f" WHERE {' AND '.join(clauses)}"
-            query += " ORDER BY id DESC"
+            query += " ORDER BY created_at DESC, id DESC"
             if limit is not None and limit > 0:
                 query += " LIMIT ?"
                 params.append(limit)
@@ -379,3 +445,20 @@ class StructuredStore:
             async with db.execute(query, tuple(params)) as cursor:
                 rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    async def delete_session_data(self, session_id: str) -> None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "DELETE FROM tool_invocations WHERE session_id = ?",
+                (session_id,),
+            )
+            await db.execute(
+                "DELETE FROM token_usage WHERE session_id = ?",
+                (session_id,),
+            )
+            await db.execute(
+                "DELETE FROM sessions WHERE session_id = ?",
+                (session_id,),
+            )
+            await db.commit()

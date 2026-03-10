@@ -85,6 +85,109 @@ const showReconnectBanner = computed(
 const makeApiUrl = (path: string): string =>
   `${normalizedApiBase.value}/${path.replace(/^\/+/, "")}`;
 
+const withApiToken = (url: string): string => {
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}token=${encodeURIComponent(props.token)}`;
+};
+
+interface ToolInvocationRow {
+  id: number;
+  session_id: string;
+  tool_name: string;
+  skill_name?: string | null;
+  params_json?: string | null;
+  status: string;
+  result_summary?: string | null;
+  duration_ms?: number | null;
+  error_info?: string | null;
+  compressed_meta_json?: string | null;
+  created_at: string;
+}
+
+const parseJsonObject = (value: string | null | undefined): Record<string, unknown> => {
+  if (!value) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(value);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Keep fallback below.
+  }
+  return {};
+};
+
+const parseCompressedMeta = (
+  value: string | null | undefined,
+): Message["compressed_meta"] | undefined => {
+  if (!value) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(value);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as Message["compressed_meta"];
+    }
+  } catch {
+    // Keep fallback below.
+  }
+  return undefined;
+};
+
+const toTimelineValue = (value: string | undefined): number => {
+  if (!value) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const normalized = value.trim();
+
+  // SQLite datetime('now') commonly uses "YYYY-MM-DD HH:MM:SS" (UTC, no timezone).
+  // Normalize it to ISO UTC to avoid locale-dependent parsing shifts.
+  const sqliteUtcPattern = /^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(\.\d+)?$/;
+  const candidate = sqliteUtcPattern.test(normalized)
+    ? `${normalized.replace(/\s+/, "T")}Z`
+    : normalized;
+
+  const epoch = Date.parse(candidate);
+  return Number.isNaN(epoch) ? Number.POSITIVE_INFINITY : epoch;
+};
+
+const toToolInvocationMessages = (
+  rows: ToolInvocationRow[],
+): Message[] => {
+  const messagesFromRows: Message[] = [];
+  for (const row of rows) {
+    const toolCallId = `inv_${row.id}`;
+    const params = parseJsonObject(row.params_json);
+    const compressedMeta = parseCompressedMeta(row.compressed_meta_json);
+
+    messagesFromRows.push({
+      sender: "assistant",
+      session_id: row.session_id,
+      timestamp: row.created_at,
+      event_type: "tool_call_start",
+      tool_name: row.tool_name,
+      tool_call_id: toolCallId,
+      arguments: params,
+    });
+    messagesFromRows.push({
+      sender: "assistant",
+      session_id: row.session_id,
+      timestamp: row.created_at,
+      event_type: "tool_call_result",
+      tool_name: row.tool_name,
+      tool_call_id: toolCallId,
+      status: row.status,
+      result: row.result_summary ?? "",
+      error_info: row.error_info ?? "",
+      metadata: {},
+      compressed_meta: compressedMeta,
+    });
+  }
+  return messagesFromRows;
+};
+
 const ensureSessionPresent = (sessionId: string): void => {
   const existingIndex = sessions.value.findIndex(
     (item) => item.session_id === sessionId,
@@ -112,19 +215,55 @@ const ensureSessionPresent = (sessionId: string): void => {
 };
 
 const loadSessionMessages = async (sessionId: string): Promise<void> => {
-  const response = await fetch(
+  const messagesUrl = withApiToken(
     makeApiUrl(`sessions/${encodeURIComponent(sessionId)}/messages`),
   );
-  if (!response.ok) {
+  const invocationsUrl = withApiToken(
+    makeApiUrl(`sessions/${encodeURIComponent(sessionId)}/tool-invocations`),
+  );
+  const [messagesResponse, invocationsResponse] = await Promise.all([
+    fetch(messagesUrl),
+    fetch(invocationsUrl),
+  ]);
+  if (!messagesResponse.ok || !invocationsResponse.ok) {
     replaceMessages([]);
     return;
   }
-  const history = (await response.json()) as Message[];
-  replaceMessages(history);
+  const history = (await messagesResponse.json()) as Message[];
+  const invocations = (await invocationsResponse.json()) as ToolInvocationRow[];
+  const invocationMessages = toToolInvocationMessages(invocations);
+
+  const timeline = [...history, ...invocationMessages]
+    .map((message, index) => {
+      const sortPhase =
+        message.event_type === "tool_call_start"
+          ? 1
+          : message.event_type === "tool_call_result"
+            ? 2
+            : 0;
+      return {
+        message,
+        timestamp: toTimelineValue(message.timestamp),
+        sortPhase,
+        index,
+      };
+    })
+    .sort((left, right) => {
+      if (left.timestamp !== right.timestamp) {
+        return left.timestamp - right.timestamp;
+      }
+      if (left.sortPhase !== right.sortPhase) {
+        return left.sortPhase - right.sortPhase;
+      }
+      return left.index - right.index;
+    })
+    .map((item) => item.message);
+
+  replaceMessages(timeline);
 };
 
 const loadSessions = async (): Promise<void> => {
-  const response = await fetch(makeApiUrl("sessions"));
+  const response = await fetch(withApiToken(makeApiUrl("sessions")));
   if (!response.ok) {
     sessions.value = [];
     replaceMessages([]);

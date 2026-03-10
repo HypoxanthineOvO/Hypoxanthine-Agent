@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import aiosqlite
+
 from hypo_agent.memory.structured_store import StructuredStore
 
 
@@ -123,23 +125,143 @@ def test_structured_store_records_tool_invocations(tmp_path) -> None:
     async def _run() -> None:
         store = StructuredStore(db_path=db_path)
         await store.init()
-        await store.record_tool_invocation(
+        invocation_id = await store.record_tool_invocation(
             session_id="s1",
             tool_name="run_command",
-            params='{"command":"echo hi"}',
+            skill_name="tmux",
+            params_json='{"command":"echo hi"}',
             status="success",
-            result_preview="ok",
+            result_summary="ok",
             duration_ms=12.5,
             error_info="",
+            compressed_meta_json='{"cache_id":"abc","original_chars":1000,"compressed_chars":120}',
         )
 
         rows = await store.list_tool_invocations(session_id="s1")
         assert len(rows) == 1
         row = rows[0]
+        assert invocation_id == row["id"]
         assert row["session_id"] == "s1"
         assert row["tool_name"] == "run_command"
+        assert row["skill_name"] == "tmux"
+        assert row["params_json"] == '{"command":"echo hi"}'
         assert row["status"] == "success"
-        assert row["result_preview"] == "ok"
+        assert row["result_summary"] == "ok"
         assert row["duration_ms"] == 12.5
+        assert row["compressed_meta_json"] == (
+            '{"cache_id":"abc","original_chars":1000,"compressed_chars":120}'
+        )
+
+    asyncio.run(_run())
+
+
+def test_structured_store_updates_tool_invocation_compressed_meta(tmp_path) -> None:
+    db_path = tmp_path / "hypo.db"
+
+    async def _run() -> None:
+        store = StructuredStore(db_path=db_path)
+        await store.init()
+        invocation_id = await store.record_tool_invocation(
+            session_id="s1",
+            tool_name="run_command",
+            skill_name="tmux",
+            params_json='{"command":"echo hi"}',
+            status="success",
+            result_summary="ok",
+            duration_ms=1.0,
+            error_info="",
+        )
+        assert invocation_id is not None
+        await store.update_tool_invocation_compressed_meta(
+            invocation_id,
+            compressed_meta_json='{"cache_id":"cache_1","original_chars":5000,"compressed_chars":120}',
+        )
+
+        rows = await store.list_tool_invocations(session_id="s1")
+        assert len(rows) == 1
+        assert rows[0]["compressed_meta_json"] == (
+            '{"cache_id":"cache_1","original_chars":5000,"compressed_chars":120}'
+        )
+
+    asyncio.run(_run())
+
+
+def test_structured_store_list_token_usage_supports_since_filter(tmp_path) -> None:
+    db_path = tmp_path / "hypo.db"
+
+    async def _run() -> None:
+        store = StructuredStore(db_path=db_path)
+        await store.init()
+        await store.record_token_usage(
+            session_id="s1",
+            requested_model="Gemini3Pro",
+            resolved_model="Gemini3Pro",
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
+            latency_ms=100.0,
+        )
+        await store.record_token_usage(
+            session_id="s1",
+            requested_model="Gemini3Pro",
+            resolved_model="Gemini3Pro",
+            input_tokens=20,
+            output_tokens=10,
+            total_tokens=30,
+            latency_ms=110.0,
+        )
+
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute(
+                "UPDATE token_usage SET created_at = ? WHERE id = (SELECT MIN(id) FROM token_usage)",
+                ("2026-03-01T00:00:00+00:00",),
+            )
+            await db.execute(
+                "UPDATE token_usage SET created_at = ? WHERE id = (SELECT MAX(id) FROM token_usage)",
+                ("2026-03-06T00:00:00+00:00",),
+            )
+            await db.commit()
+
+        rows = await store.list_token_usage(
+            session_id="s1",
+            since_iso="2026-03-05T00:00:00+00:00",
+        )
+        assert len(rows) == 1
+        assert rows[0]["total_tokens"] == 30
+
+    asyncio.run(_run())
+
+
+def test_structured_store_delete_session_data_cleans_all_related_rows(tmp_path) -> None:
+    db_path = tmp_path / "hypo.db"
+
+    async def _run() -> None:
+        store = StructuredStore(db_path=db_path)
+        await store.init()
+        await store.record_token_usage(
+            session_id="s1",
+            requested_model="Gemini3Pro",
+            resolved_model="Gemini3Pro",
+            input_tokens=12,
+            output_tokens=8,
+            total_tokens=20,
+            latency_ms=100.0,
+        )
+        await store.record_tool_invocation(
+            session_id="s1",
+            tool_name="run_command",
+            skill_name="tmux",
+            params_json='{"command":"echo hi"}',
+            status="success",
+            result_summary="ok",
+            duration_ms=12.5,
+            error_info="",
+        )
+
+        await store.delete_session_data("s1")
+
+        assert await store.list_token_usage("s1") == []
+        assert await store.list_tool_invocations(session_id="s1") == []
+        assert all(item["session_id"] != "s1" for item in await store.list_sessions())
 
     asyncio.run(_run())

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+import inspect
 import json
 from typing import Any, Protocol
 
@@ -247,6 +248,10 @@ class ChatPipeline:
                             compressed_meta = compression_metadata.get("compressed_meta")
                             if isinstance(compressed_meta, dict):
                                 compressed_meta_for_event = dict(compressed_meta)
+                                await self._persist_tool_invocation_compressed_meta(
+                                    output=output,
+                                    compressed_meta=compressed_meta_for_event,
+                                )
                     yield self._format_event(
                         event_type="tool_call_result",
                         response=RichResponse(
@@ -382,3 +387,31 @@ class ChatPipeline:
             event_type=event_type,
             session_id=session_id,
         )
+
+    async def _persist_tool_invocation_compressed_meta(
+        self,
+        *,
+        output: SkillOutput,
+        compressed_meta: dict[str, Any],
+    ) -> None:
+        if self.skill_manager is None:
+            return
+
+        raw_invocation_id = output.metadata.get("invocation_id")
+        try:
+            invocation_id = int(raw_invocation_id)
+        except (TypeError, ValueError):
+            return
+        if invocation_id <= 0:
+            return
+
+        updater = getattr(self.skill_manager, "attach_invocation_compressed_meta", None)
+        if updater is None:
+            return
+
+        result = updater(
+            invocation_id=invocation_id,
+            compressed_meta=compressed_meta,
+        )
+        if inspect.isawaitable(result):
+            await result
