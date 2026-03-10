@@ -9,10 +9,13 @@ from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import structlog
 import yaml
 
-from hypo_agent.core.config_loader import load_tasks_config
+from hypo_agent.channels.qq_channel import QQChannelService
+from hypo_agent.core.config_loader import load_secrets_config, load_tasks_config
 from hypo_agent.core.channel_adapter import WebUIAdapter
+from hypo_agent.core.channel_dispatcher import ChannelDispatcher
 from hypo_agent.core.config_loader import load_runtime_model_config
 from hypo_agent.core.event_queue import EventQueue
 from hypo_agent.core.heartbeat import HeartbeatService
@@ -30,6 +33,7 @@ from hypo_agent.gateway.kill_switch_api import router as kill_switch_api_router
 from hypo_agent.gateway.memory_api import router as memory_api_router
 from hypo_agent.gateway.sessions_api import router as sessions_api_router
 from hypo_agent.gateway.middleware import WsTokenAuthMiddleware
+from hypo_agent.gateway.qq_ws import router as qq_ws_router
 from hypo_agent.gateway.settings import load_gateway_settings
 from hypo_agent.gateway.ws import broadcast_message, router as ws_router
 from hypo_agent.memory import SessionMemory, StructuredStore
@@ -42,6 +46,8 @@ from hypo_agent.skills import (
     ReminderSkill,
     TmuxSkill,
 )
+
+logger = structlog.get_logger("hypo_agent.gateway.app")
 
 
 @dataclass(slots=True)
@@ -268,6 +274,30 @@ def _ensure_pipeline_lifecycle_hooks(pipeline_obj: Any) -> None:
             setattr(pipeline_obj, method_name, _wrapped)
 
 
+def _build_qq_channel_service(config_dir: Path) -> QQChannelService | None:
+    secrets_path = config_dir / "secrets.yaml"
+    try:
+        secrets = load_secrets_config(secrets_path)
+    except FileNotFoundError:
+        return None
+    except Exception:
+        logger.exception("qq.config.load_failed", path=str(secrets_path))
+        return None
+
+    services = secrets.services
+    qq_cfg = services.qq if services is not None else None
+    if qq_cfg is None:
+        return None
+
+    allowed_users = {item.strip() for item in qq_cfg.allowed_users if item and item.strip()}
+    return QQChannelService(
+        napcat_http_url=qq_cfg.napcat_http_url,
+        napcat_http_token=qq_cfg.napcat_http_token,
+        bot_qq=qq_cfg.bot_qq,
+        allowed_users=allowed_users,
+    )
+
+
 def create_app(
     auth_token: str,
     pipeline: ChatPipeline | None = None,
@@ -374,12 +404,27 @@ def create_app(
     app.state.scheduler = resolved_deps.scheduler
     app.state.heartbeat_service = resolved_deps.heartbeat_service
     app.state.pipeline = pipeline_instance
+    app.state.channel_dispatcher = ChannelDispatcher()
+    app.state.qq_channel_service = None
 
     async def push_ws_message(payload: dict[str, object]) -> None:
         await broadcast_message(payload)
 
-    async def on_proactive_message(message: Message) -> None:
+    async def push_webui_message(message: Message) -> None:
         await push_ws_message(message.model_dump(mode="json"))
+
+    app.state.channel_dispatcher.register("webui", push_webui_message)
+
+    def refresh_qq_channel_service() -> None:
+        app.state.channel_dispatcher.unregister("qq")
+        config_dir = Path(getattr(app.state, "config_dir", Path("config")))
+        service = _build_qq_channel_service(config_dir)
+        app.state.qq_channel_service = service
+        if service is not None:
+            app.state.channel_dispatcher.register("qq", service.push_proactive)
+
+    async def on_proactive_message(message: Message) -> None:
+        await app.state.channel_dispatcher.broadcast(message)
 
     app.state.push_ws_message = push_ws_message
     setattr(app.state.pipeline, "on_proactive_message", on_proactive_message)
@@ -413,13 +458,16 @@ def create_app(
         app.state.pipeline = _build_default_pipeline(deps)
         _ensure_pipeline_lifecycle_hooks(app.state.pipeline)
         setattr(app.state.pipeline, "on_proactive_message", on_proactive_message)
+        refresh_qq_channel_service()
         app.state.output_compressor = deps.output_compressor
         await app.state.pipeline.start_event_consumer()
 
     resolved_deps.reload_config = reload_config
     app.state.reload_config = reload_config
+    refresh_qq_channel_service()
 
     app.include_router(ws_router)
+    app.include_router(qq_ws_router)
     app.include_router(sessions_api_router)
     app.include_router(compressed_api_router)
     app.include_router(files_api_router)
