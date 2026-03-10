@@ -8,6 +8,8 @@ from typing import Any, Callable
 
 import structlog
 
+from hypo_agent.core.config_loader import get_memory_dir
+
 logger = structlog.get_logger("hypo_agent.heartbeat")
 
 
@@ -23,13 +25,16 @@ class HeartbeatService:
         message_queue: Any,
         scheduler: Any | None = None,
         default_session_id: str = "main",
-        db_path: Path | str = "memory/hypo.db",
+        db_path: Path | str | None = None,
     ) -> None:
         self.structured_store = structured_store
         self.model_router = model_router
         self.message_queue = message_queue
         self.scheduler = scheduler
         self.default_session_id = default_session_id
+
+        if db_path is None:
+            db_path = get_memory_dir() / "hypo.db"
         self.db_path = Path(db_path)
         self._event_sources: dict[str, EventSourceCallback] = {}
 

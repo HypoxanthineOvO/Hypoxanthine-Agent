@@ -121,3 +121,30 @@ def load_tasks_config(
 ) -> TasksConfig:
     tasks_payload = _load_yaml(Path(tasks_path))
     return TasksConfig.model_validate(tasks_payload)
+
+
+def get_memory_dir() -> Path:
+    """Return the configured memory directory (defaults to ./memory).
+
+    This is intentionally resolved at call time so tests / processes can
+    override it via HYPO_MEMORY_DIR.
+    """
+
+    raw = os.getenv("HYPO_MEMORY_DIR", "").strip() or "./memory"
+    return Path(raw).expanduser().resolve(strict=False)
+
+
+def get_port(*, default: int = 8765) -> int:
+    raw = os.getenv("HYPO_PORT", "").strip()
+    if not raw:
+        return default
+
+    try:
+        port = int(raw)
+    except ValueError as exc:
+        raise ValueError("HYPO_PORT must be an integer") from exc
+
+    if port < 1 or port > 65535:
+        raise ValueError("HYPO_PORT must be between 1 and 65535")
+
+    return port

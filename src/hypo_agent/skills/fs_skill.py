@@ -11,6 +11,7 @@ from pptx import Presentation
 import structlog
 import yaml
 
+from hypo_agent.core.config_loader import get_memory_dir
 from hypo_agent.models import SkillOutput
 from hypo_agent.security.permission_manager import PermissionManager
 from hypo_agent.skills.base import BaseSkill
@@ -48,9 +49,13 @@ class FileSystemSkill(BaseSkill):
         self,
         *,
         permission_manager: PermissionManager | None,
-        index_file: Path | str = "memory/knowledge/directory_index.yaml",
+        index_file: Path | str | None = None,
     ) -> None:
         self.permission_manager = permission_manager
+
+        if index_file is None:
+            index_file = get_memory_dir() / "knowledge" / "directory_index.yaml"
+
         self.index_file = Path(index_file).expanduser().resolve(strict=False)
 
     @property

@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, ConfigDict
 
+from hypo_agent.core.config_loader import get_memory_dir
 from hypo_agent.gateway.auth import require_api_token
 from hypo_agent.models import Message
 
@@ -38,7 +39,7 @@ def _db_path(request: Request) -> Path:
 
 
 def _knowledge_root(request: Request) -> Path:
-    root = getattr(request.app.state, "knowledge_dir", "memory/knowledge")
+    root = getattr(request.app.state, "knowledge_dir", get_memory_dir() / "knowledge")
     return Path(root).resolve(strict=False)
 
 

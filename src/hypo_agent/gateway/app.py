@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import structlog
 import yaml
 
+from hypo_agent.core.config_loader import get_memory_dir
 from hypo_agent.channels.qq_channel import QQChannelService
 from hypo_agent.core.config_loader import load_secrets_config, load_tasks_config
 from hypo_agent.core.channel_adapter import WebUIAdapter
@@ -110,12 +111,7 @@ def _register_enabled_skills(
         )
 
     if "filesystem" in enabled_skills:
-        skill_manager.register(
-            FileSystemSkill(
-                permission_manager=permission_manager,
-                index_file="memory/knowledge/directory_index.yaml",
-            )
-        )
+        skill_manager.register(FileSystemSkill(permission_manager=permission_manager))
 
     if "reminder" in enabled_skills and structured_store is not None and scheduler is not None:
         skill_manager.register(
@@ -157,7 +153,7 @@ def _default_security() -> SecurityConfig:
 
 def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
     resolved_security = security or _default_security()
-    structured_store = StructuredStore(db_path="memory/hypo.db")
+    structured_store = StructuredStore()
     event_queue = EventQueue()
     scheduler = SchedulerService(
         structured_store=structured_store,
@@ -186,7 +182,7 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
     )
 
     return AppDeps(
-        session_memory=SessionMemory(sessions_dir="memory/sessions", buffer_limit=20),
+        session_memory=SessionMemory(buffer_limit=20),
         structured_store=structured_store,
         event_queue=event_queue,
         scheduler=scheduler,
@@ -400,7 +396,7 @@ def create_app(
     app.state.auth_token = auth_token
     app.state.started_at = datetime.now(UTC)
     app.state.config_dir = Path("config")
-    app.state.knowledge_dir = Path("memory/knowledge")
+    app.state.knowledge_dir = get_memory_dir() / "knowledge"
     app.state.deps = resolved_deps
     app.state.session_memory = resolved_deps.session_memory
     app.state.structured_store = resolved_deps.structured_store
