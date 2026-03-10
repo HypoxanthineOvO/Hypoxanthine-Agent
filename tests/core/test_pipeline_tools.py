@@ -549,3 +549,143 @@ def test_pipeline_stream_reply_persists_compressed_meta_with_invocation_id() -> 
             },
         )
     ]
+
+
+from hypo_agent.core.skill_manager import SkillManager
+from hypo_agent.models import CircuitBreakerConfig
+from hypo_agent.security.circuit_breaker import CircuitBreaker
+from hypo_agent.skills.base import BaseSkill
+
+
+class FailingSkill(BaseSkill):
+    name = "fail_skill"
+    description = "Always fails"
+
+    @property
+    def tools(self) -> list[dict]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "always_fail",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+
+    async def execute(self, tool_name: str, params: dict) -> SkillOutput:
+        return SkillOutput(status="error", error_info="boom")
+
+
+def test_tool_fuse_after_3_failures_returns_fused_status() -> None:
+    memory = StubSessionMemory()
+    breaker = CircuitBreaker(
+        CircuitBreakerConfig(
+            tool_level_max_failures=3,
+            session_level_max_failures=99,
+            cooldown_seconds=10,
+            global_kill_switch=False,
+        )
+    )
+    skills = SkillManager(circuit_breaker=breaker)
+    skills.register(FailingSkill())
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            self.calls += 1
+            if self.calls <= 3:
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": f"call_{self.calls}",
+                            "type": "function",
+                            "function": {
+                                "name": "always_fail",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                }
+            return {"text": "", "tool_calls": []}
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            yield "done"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skills,
+        max_react_rounds=5,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="run", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+    tool_statuses = [event["status"] for event in events if event.get("type") == "tool_call_result"]
+
+    assert tool_statuses[2] == "fused"
+
+
+def test_session_fuse_after_5_errors_returns_message() -> None:
+    memory = StubSessionMemory()
+    breaker = CircuitBreaker(
+        CircuitBreakerConfig(
+            tool_level_max_failures=99,
+            session_level_max_failures=5,
+            cooldown_seconds=10,
+            global_kill_switch=False,
+        )
+    )
+    skills = SkillManager(circuit_breaker=breaker)
+    skills.register(FailingSkill())
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            self.calls += 1
+            if self.calls <= 5:
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": f"call_{self.calls}",
+                            "type": "function",
+                            "function": {
+                                "name": "always_fail",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                }
+            return {"text": "", "tool_calls": []}
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            yield "done"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skills,
+        max_react_rounds=6,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="run", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+    combined = "".join(event.get("text", "") for event in events if event.get("type") == "assistant_chunk")
+
+    assert "累计错误过多" in combined

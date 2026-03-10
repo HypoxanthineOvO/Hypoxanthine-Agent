@@ -23,6 +23,7 @@ TOOL_USE_SYSTEM_PROMPT = (
 )
 
 KILL_SWITCH_MESSAGE = "⚠️ Kill Switch 已激活。所有执行已停止。发送 /resume 恢复。"
+SESSION_FUSED_MESSAGE = "⚠️ 本次对话累计错误过多（5 次），已暂停执行。请检查问题后重新发送消息继续。"
 
 TOOL_STATUS_TEMPLATES: dict[str, dict[str, str]] = {
     "create_reminder": {
@@ -243,6 +244,8 @@ class ChatPipeline:
                 text=kill_text,
                 sender="assistant",
                 session_id=inbound.session_id,
+                channel=inbound.channel,
+                sender_id=inbound.sender_id,
             )
             self.session_memory.append(outbound)
             yield self._format_event(
@@ -261,6 +264,7 @@ class ChatPipeline:
 
         full_text = ""
         killed = False
+        session_fused = False
 
         if use_tools:
             assert self.skill_manager is not None
@@ -446,6 +450,17 @@ class ChatPipeline:
                             "content": tool_content,
                         }
                     )
+                    if output.status == "fused" and "session circuit breaker" in output.error_info.lower():
+                        session_fused = True
+                        full_text = SESSION_FUSED_MESSAGE
+                        yield self._format_event(
+                            event_type="assistant_chunk",
+                            response=RichResponse(text=full_text),
+                            session_id=inbound.session_id,
+                        )
+                        break
+                if session_fused:
+                    break
 
             if reached_round_limit:
                 logger.warning("react.round_limit", session_id=inbound.session_id)
@@ -479,7 +494,7 @@ class ChatPipeline:
                     session_id=inbound.session_id,
                 )
 
-        if killed:
+        if session_fused:
             outbound = Message(
                 text=full_text,
                 sender="assistant",
@@ -495,6 +510,21 @@ class ChatPipeline:
             )
             return
 
+        if killed:
+            outbound = Message(
+                text=full_text,
+                sender="assistant",
+                session_id=inbound.session_id,
+                channel=inbound.channel,
+                sender_id=inbound.sender_id,
+            )
+            self.session_memory.append(outbound)
+            yield self._format_event(
+                event_type="assistant_done",
+                response=RichResponse(),
+                session_id=inbound.session_id,
+            )
+            return
 
         outbound = Message(
             text=full_text,

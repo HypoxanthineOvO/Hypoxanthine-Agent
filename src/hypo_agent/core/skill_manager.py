@@ -149,7 +149,8 @@ class SkillManager:
                     session_id=session_id,
                     reason=reason,
                 )
-                blocked = SkillOutput(status="error", error_info=reason)
+                status = "fused" if self._is_fused_reason(reason) else "error"
+                blocked = SkillOutput(status=status, error_info=reason)
                 invocation_id = await self._record_tool_invocation(
                     tool_name=tool_name,
                     params=params,
@@ -282,6 +283,9 @@ class SkillManager:
                 self._circuit_breaker.record_success(tool_name, session_id)
             else:
                 self._circuit_breaker.record_failure(tool_name, session_id)
+                allowed_after, reason_after = self._circuit_breaker.can_execute(tool_name, session_id)
+                if (not allowed_after) and self._is_fused_reason(reason_after):
+                    result = SkillOutput(status="fused", error_info=reason_after)
 
         if result.status == "success":
             logger.info("skill.invoke.ok", tool_name=tool_name, session_id=session_id)
@@ -362,9 +366,13 @@ class SkillManager:
             )
             return None
 
+    def _is_fused_reason(self, reason: str) -> bool:
+        lowered = reason.lower()
+        return ("disabled" in lowered) or ("session circuit breaker" in lowered)
+
     def _normalize_invocation_status(self, status: str) -> str:
         lowered = status.lower()
-        if lowered in {"success", "error", "timeout", "blocked"}:
+        if lowered in {"success", "error", "timeout", "blocked", "fused"}:
             return lowered
         return "error"
 

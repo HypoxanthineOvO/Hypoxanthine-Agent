@@ -20,8 +20,8 @@ class CircuitBreaker:
         self.config = config
         self._now_fn = now_fn or (lambda: datetime.now(UTC))
 
-        self._tool_failures: dict[str, int] = {}
-        self._tool_blocked_until: dict[str, datetime] = {}
+        self._tool_failures: dict[tuple[str | None, str], int] = {}
+        self._tool_fused: set[tuple[str | None, str]] = set()
         self._session_failures: dict[str, int] = {}
         self._session_blocked_until: dict[str, datetime] = {}
         self._global_kill_switch = bool(config.global_kill_switch)
@@ -44,18 +44,21 @@ class CircuitBreaker:
                     session_id=session_id,
                 )
 
-        tool_block_until = self._tool_blocked_until.get(tool_name)
-        if tool_block_until is not None:
-            if now < tool_block_until:
-                return False, f"tool circuit breaker is open for '{tool_name}'"
-            self._tool_blocked_until.pop(tool_name, None)
-            self._tool_failures[tool_name] = 0
-            logger.info("circuit_breaker.tool.recovered", tool_name=tool_name)
+        tool_key = (session_id, tool_name)
+        if tool_key in self._tool_fused:
+            return (
+                False,
+                (
+                    "Tool '{tool_name}' has been disabled after "
+                    f"{self.config.tool_level_max_failures} consecutive failures this session."
+                ).format(tool_name=tool_name),
+            )
 
         return True, ""
 
     def record_success(self, tool_name: str, session_id: str | None) -> None:
-        self._tool_failures[tool_name] = 0
+        tool_key = (session_id, tool_name)
+        self._tool_failures[tool_key] = 0
         if session_id:
             self._session_blocked_until.pop(session_id, None)
 
@@ -63,14 +66,16 @@ class CircuitBreaker:
         now = self._now_fn()
         cooldown_deadline = now + timedelta(seconds=self.config.cooldown_seconds)
 
-        next_tool_count = self._tool_failures.get(tool_name, 0) + 1
-        self._tool_failures[tool_name] = next_tool_count
+        tool_key = (session_id, tool_name)
+        next_tool_count = self._tool_failures.get(tool_key, 0) + 1
+        self._tool_failures[tool_key] = next_tool_count
         if next_tool_count >= self.config.tool_level_max_failures:
-            self._tool_blocked_until[tool_name] = cooldown_deadline
-            self._tool_failures[tool_name] = 0
+            self._tool_fused.add(tool_key)
+            self._tool_failures[tool_key] = 0
             logger.warning(
-                "circuit_breaker.tool.open",
+                "circuit_breaker.tool_fused",
                 tool_name=tool_name,
+                session_id=session_id,
                 max_failures=self.config.tool_level_max_failures,
             )
 

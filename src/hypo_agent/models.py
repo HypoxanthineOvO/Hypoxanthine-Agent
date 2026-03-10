@@ -25,7 +25,7 @@ class Message(BaseModel):
 class SkillOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["success", "error", "partial", "timeout"]
+    status: Literal["success", "error", "partial", "timeout", "fused"]
     result: Any = None
     error_info: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)

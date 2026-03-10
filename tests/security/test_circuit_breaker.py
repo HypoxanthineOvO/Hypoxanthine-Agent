@@ -26,9 +26,8 @@ def _config() -> CircuitBreakerConfig:
     )
 
 
-def test_tool_level_breaker_opens_and_recovers_after_cooldown() -> None:
-    clock = Clock()
-    breaker = CircuitBreaker(_config(), now_fn=clock.now)
+def test_tool_level_breaker_fuses_tool_for_session() -> None:
+    breaker = CircuitBreaker(_config())
 
     breaker.record_failure(tool_name="run_command", session_id="s1")
     breaker.record_failure(tool_name="run_command", session_id="s1")
@@ -36,17 +35,10 @@ def test_tool_level_breaker_opens_and_recovers_after_cooldown() -> None:
 
     allowed, reason = breaker.can_execute("run_command", "s1")
     assert allowed is False
-    assert "tool" in reason
+    assert "disabled" in reason.lower()
 
-    clock.advance(11)
-    allowed_after_cooldown, reason_after_cooldown = breaker.can_execute(
-        "run_command",
-        "s1",
-    )
-    assert allowed_after_cooldown is True
-    assert reason_after_cooldown == ""
-
-
+    allowed_other, _ = breaker.can_execute("run_command", "s2")
+    assert allowed_other is True
 def test_session_level_breaker_blocks_all_tools_for_session() -> None:
     clock = Clock()
     breaker = CircuitBreaker(_config(), now_fn=clock.now)
