@@ -59,6 +59,18 @@ class ChatSkillManager(Protocol):
     ) -> SkillOutput: ...
 
 
+class SlashCommands(Protocol):
+    async def try_handle(self, inbound: Message) -> str | None: ...
+
+
+class ChatOutputCompressor(Protocol):
+    async def compress_if_needed(
+        self,
+        output: str,
+        metadata: dict[str, Any],
+    ) -> tuple[str, bool]: ...
+
+
 class ChatPipeline:
     def __init__(
         self,
@@ -68,6 +80,8 @@ class ChatPipeline:
         history_window: int = 20,
         skill_manager: ChatSkillManager | None = None,
         max_react_rounds: int = 5,
+        slash_commands: SlashCommands | None = None,
+        output_compressor: ChatOutputCompressor | None = None,
     ) -> None:
         self.router = router
         self.chat_model = chat_model
@@ -75,8 +89,18 @@ class ChatPipeline:
         self.history_window = history_window
         self.skill_manager = skill_manager
         self.max_react_rounds = max_react_rounds
+        self.slash_commands = slash_commands
+        self.output_compressor = output_compressor
 
     async def run_once(self, inbound: Message) -> Message:
+        slash_result = await self._try_handle_slash(inbound)
+        if slash_result is not None:
+            return Message(
+                text=slash_result,
+                sender="assistant",
+                session_id=inbound.session_id,
+            )
+
         llm_messages = self._build_llm_messages(inbound)
         self.session_memory.append(inbound)
         text = await self.router.call(self.chat_model, llm_messages)
@@ -89,6 +113,21 @@ class ChatPipeline:
         return outbound
 
     async def stream_reply(self, inbound: Message) -> AsyncIterator[dict[str, Any]]:
+        slash_result = await self._try_handle_slash(inbound)
+        if slash_result is not None:
+            yield {
+                "type": "assistant_chunk",
+                "text": slash_result,
+                "sender": "assistant",
+                "session_id": inbound.session_id,
+            }
+            yield {
+                "type": "assistant_done",
+                "sender": "assistant",
+                "session_id": inbound.session_id,
+            }
+            return
+
         use_tools = (
             self.skill_manager is not None
             and self.max_react_rounds > 0
@@ -169,26 +208,48 @@ class ChatPipeline:
                         "arguments": arguments,
                         "session_id": inbound.session_id,
                     }
+
                     output = await self.skill_manager.invoke(
                         tool_name,
                         arguments,
                         session_id=inbound.session_id,
                     )
+                    serialized_output = json.dumps(
+                        output.model_dump(mode="json"),
+                        ensure_ascii=False,
+                    )
+                    tool_content = serialized_output
+                    tool_result_for_event: Any = output.result
+                    tool_metadata_for_event = dict(output.metadata)
+                    if self.output_compressor is not None:
+                        tool_content, was_compressed = await self.output_compressor.compress_if_needed(
+                            serialized_output,
+                            {
+                                "session_id": inbound.session_id,
+                                "tool_name": tool_name,
+                                "tool_call_id": tool_call_id,
+                            },
+                        )
+                        if was_compressed:
+                            tool_result_for_event = tool_content
+                            tool_metadata_for_event["compressed"] = True
+                            tool_metadata_for_event["original_chars"] = len(serialized_output)
+                            tool_metadata_for_event["compressed_chars"] = len(tool_content)
                     yield {
                         "type": "tool_call_result",
                         "tool_name": tool_name,
                         "tool_call_id": tool_call_id,
                         "status": output.status,
-                        "result": output.result,
+                        "result": tool_result_for_event,
                         "error_info": output.error_info,
-                        "metadata": output.metadata,
+                        "metadata": tool_metadata_for_event,
                         "session_id": inbound.session_id,
                     }
                     react_messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": tool_call_id,
-                            "content": json.dumps(output.model_dump(mode="json"), ensure_ascii=False),
+                            "content": tool_content,
                         }
                     )
 
@@ -286,3 +347,8 @@ class ChatPipeline:
         else:
             return None
         return {"role": role, "content": text}
+
+    async def _try_handle_slash(self, inbound: Message) -> str | None:
+        if self.slash_commands is None:
+            return None
+        return await self.slash_commands.try_handle(inbound)

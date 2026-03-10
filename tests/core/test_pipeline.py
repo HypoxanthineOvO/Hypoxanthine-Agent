@@ -127,3 +127,40 @@ def test_pipeline_rejects_empty_text() -> None:
             )
         )
     assert memory.appended == []
+
+
+def test_pipeline_run_once_short_circuits_slash_command() -> None:
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call(self, model_name, messages):
+            del model_name, messages
+            self.calls += 1
+            return "LLM should not be called"
+
+    class StubSlashCommands:
+        async def try_handle(self, inbound: Message) -> str | None:
+            if (inbound.text or "").startswith("/"):
+                return "slash ok"
+            return None
+
+    router = StubRouter()
+    pipeline = ChatPipeline(
+        router=router,
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        slash_commands=StubSlashCommands(),
+    )
+
+    reply = asyncio.run(
+        pipeline.run_once(Message(text="/help", sender="user", session_id="s1"))
+    )
+
+    assert reply.sender == "assistant"
+    assert reply.text == "slash ok"
+    assert router.calls == 0
+    assert memory.appended == []

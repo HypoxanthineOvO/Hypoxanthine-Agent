@@ -28,7 +28,7 @@ class CodeRunSkill(BaseSkill):
         permission_manager: PermissionManager | None = None,
         sandbox_dir: Path | str = "/tmp/hypo-agent-sandbox",
         default_timeout_seconds: int = 30,
-        max_output_chars: int = 8000,
+        max_output_chars: int = 262144,
         subprocess_exec=None,
         which_fn: Callable[[str], str | None] | None = None,
     ) -> None:

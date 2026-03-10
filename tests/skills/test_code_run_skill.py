@@ -206,3 +206,9 @@ def test_code_run_skill_runtime_falls_back_when_bwrap_exec_fails(
     assert calls[1][1] == "-lc"
     assert output.metadata["sandbox_backend"] == "fallback"
     assert "code_run.bwrap.runtime_fallback" in events
+
+
+def test_code_run_skill_default_max_output_chars_is_256k(tmp_path: Path) -> None:
+    manager = _permission_manager(tmp_path)
+    skill = CodeRunSkill(permission_manager=manager, sandbox_dir=tmp_path / "sandbox")
+    assert skill.max_output_chars == 262144
