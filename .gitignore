@@ -13,3 +13,9 @@ web/dist/
 web/.vite/
 
 config/secrets.yaml
+
+memory/*
+!memory/knowledge/
+!memory/knowledge/.gitkeep
+!memory/sessions/
+!memory/sessions/.gitkeep

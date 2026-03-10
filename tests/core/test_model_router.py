@@ -190,6 +190,59 @@ def test_model_router_stream_fallback_before_first_chunk(
     ]
 
 
+def test_model_router_emits_stream_success_event_with_usage(
+    runtime_config: RuntimeModelConfig,
+) -> None:
+    emitted: list[dict] = []
+
+    async def on_stream_success(event: dict) -> None:
+        emitted.append(event)
+
+    async def fake_acompletion(**kwargs):
+        async def _gen():
+            yield {"choices": [{"delta": {"content": "ok"}}]}
+            yield {
+                "choices": [{"delta": {"content": "!"}}],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 2,
+                    "total_tokens": 5,
+                },
+            }
+
+        return _gen()
+
+    router = ModelRouter(
+        runtime_config,
+        acompletion_fn=fake_acompletion,
+        on_stream_success=on_stream_success,
+    )
+
+    async def _collect() -> list[str]:
+        chunks: list[str] = []
+        async for chunk in router.stream(
+            "Gemini3Pro",
+            [{"role": "user", "content": "hi"}],
+            session_id="s1",
+        ):
+            chunks.append(chunk)
+        return chunks
+
+    chunks = asyncio.run(_collect())
+    assert chunks == ["ok", "!"]
+    assert emitted == [
+        {
+            "event": "model_stream_success",
+            "session_id": "s1",
+            "requested_model": "Gemini3Pro",
+            "resolved_model": "Gemini3Pro",
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5,
+        }
+    ]
+
+
 def test_model_router_rejects_fallback_cycle() -> None:
     config = RuntimeModelConfig.model_validate(
         {
