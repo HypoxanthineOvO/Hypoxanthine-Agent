@@ -80,6 +80,7 @@ def test_pipeline_event_consumer_persists_and_broadcasts_reminder() -> None:
         assert "喝水" in (memory.appended[0].text or "")
         assert len(pushed) == 1
         assert pushed[0].message_tag == "reminder"
+        assert pushed[0].channel == "system"
 
     asyncio.run(_run())
 
@@ -184,6 +185,7 @@ def test_pipeline_event_consumer_processes_multiple_events() -> None:
 
         assert len(memory.appended) == 3
         assert len(pushed) == 3
+        assert pushed[0].channel == "system"
         assert "event-0" in (memory.appended[0].text or "")
         assert "event-1" in (memory.appended[1].text or "")
         assert "event-2" in (memory.appended[2].text or "")
@@ -224,5 +226,36 @@ def test_pipeline_event_consumer_writes_email_scan_message() -> None:
         assert "🔴" in (memory.appended[0].text or "")
         assert len(pushed) == 1
         assert pushed[0].message_tag == "email_scan"
+        assert pushed[0].channel == "system"
+
+    asyncio.run(_run())
+
+
+def test_pipeline_event_consumer_processes_user_message_tasks() -> None:
+    async def _run() -> None:
+        queue = EventQueue()
+        memory = StubSessionMemory()
+        streamed: list[dict[str, object]] = []
+
+        async def emit(event: dict[str, object]) -> None:
+            streamed.append(event)
+
+        pipeline = ChatPipeline(
+            router=StubRouter(),
+            chat_model="Gemini3Pro",
+            session_memory=memory,
+            event_queue=queue,
+        )
+
+        await pipeline.start_event_consumer()
+        await pipeline.enqueue_user_message(
+            Message(text="hello", sender="user", session_id="main"),
+            emit=emit,
+        )
+        await asyncio.sleep(0.05)
+        await pipeline.stop_event_consumer()
+
+        assert any(str(item.get("type")) == "assistant_chunk" for item in streamed)
+        assert any(str(item.get("type")) == "assistant_done" for item in streamed)
 
     asyncio.run(_run())

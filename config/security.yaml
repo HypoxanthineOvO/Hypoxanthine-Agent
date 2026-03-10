@@ -22,6 +22,17 @@ directory_whitelist:
     - path: ./workflows
       permissions: [read, execute]
   default_policy: readonly
+  blocked_paths:
+    - /etc/passwd
+    - /etc/shadow
+    - /etc/sudoers
+    - /etc/gshadow
+    - ~/.ssh
+    - ~/.gnupg
+    - ~/.bash_history
+    - ~/.zsh_history
+    - ~/.python_history
+    - /root
 circuit_breaker:
   tool_level_max_failures: 3
   session_level_max_failures: 5

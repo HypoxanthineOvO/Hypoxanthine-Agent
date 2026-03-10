@@ -66,6 +66,40 @@ def test_permission_manager_allows_readonly_outside_whitelist(tmp_path: Path) ->
     assert "readonly" in exec_reason.lower()
 
 
+def test_permission_manager_blocks_blocked_paths(tmp_path: Path) -> None:
+    blocked = tmp_path / "blocked.txt"
+    blocked.write_text("secret", encoding="utf-8")
+    whitelist = DirectoryWhitelist(
+        rules=[WhitelistRule(path=str(tmp_path), permissions=["read", "write"])],
+        default_policy="readonly",
+        blocked_paths=[str(blocked)],
+    )
+    manager = PermissionManager(whitelist)
+
+    allowed, reason = manager.check_permission(str(blocked), "read")
+
+    assert allowed is False
+    assert "blocked" in reason.lower()
+
+
+def test_permission_manager_blocks_symlink_to_blocked(tmp_path: Path) -> None:
+    blocked = tmp_path / "blocked.txt"
+    blocked.write_text("secret", encoding="utf-8")
+    link = tmp_path / "blocked-link.txt"
+    link.symlink_to(blocked)
+    whitelist = DirectoryWhitelist(
+        rules=[],
+        default_policy="readonly",
+        blocked_paths=[str(blocked)],
+    )
+    manager = PermissionManager(whitelist)
+
+    allowed, reason = manager.check_permission(str(link), "read")
+
+    assert allowed is False
+    assert "blocked" in reason.lower()
+
+
 def test_permission_manager_denies_path_traversal_after_resolve(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     outside = tmp_path / "outside.txt"

@@ -169,15 +169,28 @@ def test_slash_commands_unknown_command_returns_hint(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
-def test_slash_commands_kill_toggles_global_state(tmp_path: Path) -> None:
+def test_slash_commands_kill_enables_and_resume_disables(tmp_path: Path) -> None:
     async def _run() -> None:
         handler, _, _, breaker = await _build_handler(tmp_path)
         first = await handler.try_handle(Message(text="/kill", sender="user", session_id="s1"))
         second = await handler.try_handle(Message(text="/kill", sender="user", session_id="s1"))
+        resume = await handler.try_handle(Message(text="/resume", sender="user", session_id="s1"))
 
-        assert first is not None and "开启" in first
-        assert second is not None and "关闭" in second
+        assert first is not None and "Kill Switch 已激活" in first
+        assert second is not None and "Kill Switch 已激活" in second
+        assert resume is not None and "Kill Switch 已解除" in resume
         assert breaker.get_global_kill_switch() is False
+
+    asyncio.run(_run())
+
+
+def test_slash_commands_resume_without_kill(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, _, breaker = await _build_handler(tmp_path)
+        breaker.set_global_kill_switch(False)
+        result = await handler.try_handle(Message(text="/resume", sender="user", session_id="s1"))
+        assert result is not None
+        assert "未处于" in result
 
     asyncio.run(_run())
 

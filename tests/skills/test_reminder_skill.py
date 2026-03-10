@@ -11,7 +11,7 @@ class StubRouter:
         self.calls: list[tuple[str, dict]] = []
         self.parsed = parsed or {
             "schedule_type": "once",
-            "schedule_value": "2026-03-08T15:00:00+08:00",
+            "schedule_value": "2099-03-08T15:00:00+08:00",
             "human_readable": "明天下午3点",
             "timezone": "Asia/Shanghai",
         }
@@ -181,7 +181,7 @@ def test_create_reminder_auto_confirm_persists_without_confirm() -> None:
                 "title": "提醒我开会",
                 "description": "项目例会",
                 "schedule_type": "once",
-                "schedule_value": "2026-03-08T15:00:00+08:00",
+                "schedule_value": "2099-03-08T15:00:00+08:00",
                 "channel": "all",
             },
         )
@@ -192,6 +192,83 @@ def test_create_reminder_auto_confirm_persists_without_confirm() -> None:
         assert store.created[0]["status"] == "active"
         assert len(scheduler.registered) == 1
         assert scheduler.registered[0]["id"] == 1
+
+    asyncio.run(_run())
+
+
+def test_create_reminder_rejects_past_time(monkeypatch) -> None:
+    async def _run() -> None:
+        from datetime import datetime, timedelta, UTC
+        import hypo_agent.skills.reminder_skill as reminder_module
+
+        fixed = datetime(2026, 3, 10, 0, 0, 0, tzinfo=UTC)
+
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return fixed
+                return fixed.astimezone(tz)
+
+        monkeypatch.setattr(reminder_module, "datetime", FixedDatetime)
+
+        store = StubStore()
+        scheduler = StubScheduler()
+        skill = ReminderSkill(
+            structured_store=store,
+            scheduler=scheduler,
+            model_router=StubRouter(),
+        )
+        past = (fixed - timedelta(minutes=5)).isoformat()
+        result = await skill.execute(
+            "create_reminder",
+            {
+                "title": "过去提醒",
+                "schedule_type": "once",
+                "schedule_value": past,
+            },
+        )
+
+        assert result.status == "error"
+        assert "in the past" in (result.error_info or "")
+
+    asyncio.run(_run())
+
+
+def test_create_reminder_accepts_future_time(monkeypatch) -> None:
+    async def _run() -> None:
+        from datetime import datetime, timedelta, UTC
+        import hypo_agent.skills.reminder_skill as reminder_module
+
+        fixed = datetime(2026, 3, 10, 0, 0, 0, tzinfo=UTC)
+
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return fixed
+                return fixed.astimezone(tz)
+
+        monkeypatch.setattr(reminder_module, "datetime", FixedDatetime)
+
+        store = StubStore()
+        scheduler = StubScheduler()
+        skill = ReminderSkill(
+            structured_store=store,
+            scheduler=scheduler,
+            model_router=StubRouter(),
+        )
+        future = (fixed + timedelta(minutes=5)).isoformat()
+        result = await skill.execute(
+            "create_reminder",
+            {
+                "title": "未来提醒",
+                "schedule_type": "once",
+                "schedule_value": future,
+            },
+        )
+
+        assert result.status == "success"
 
     asyncio.run(_run())
 
@@ -213,7 +290,7 @@ def test_create_reminder_confirm_persists_and_registers_scheduler_job_when_requi
                 "title": "提醒我开会",
                 "description": "项目例会",
                 "schedule_type": "once",
-                "schedule_value": "2026-03-08T15:00:00+08:00",
+                "schedule_value": "2099-03-08T15:00:00+08:00",
                 "channel": "all",
             },
         )
@@ -226,7 +303,7 @@ def test_create_reminder_confirm_persists_and_registers_scheduler_job_when_requi
                 "title": "提醒我开会",
                 "description": "项目例会",
                 "schedule_type": "once",
-                "schedule_value": "2026-03-08T15:00:00+08:00",
+                "schedule_value": "2099-03-08T15:00:00+08:00",
                 "channel": "all",
                 "confirm": True,
             },
@@ -256,10 +333,10 @@ def test_reminder_skill_update_delete_and_snooze() -> None:
             title="旧提醒",
             description="旧描述",
             schedule_type="once",
-            schedule_value="2026-03-08T15:00:00+08:00",
+            schedule_value="2099-03-08T15:00:00+08:00",
             channel="all",
             status="active",
-            next_run_at="2026-03-08T15:00:00+08:00",
+            next_run_at="2099-03-08T15:00:00+08:00",
             heartbeat_config=None,
         )
 
@@ -312,17 +389,17 @@ def test_list_reminders_defaults_to_all_non_deleted() -> None:
             title="A",
             description="",
             schedule_type="once",
-            schedule_value="2026-03-08T15:00:00+08:00",
+            schedule_value="2099-03-08T15:00:00+08:00",
             channel="all",
             status="active",
-            next_run_at="2026-03-08T15:00:00+08:00",
+            next_run_at="2099-03-08T15:00:00+08:00",
             heartbeat_config=None,
         )
         await skill.structured_store.create_reminder(
             title="B",
             description="",
             schedule_type="once",
-            schedule_value="2026-03-08T16:00:00+08:00",
+            schedule_value="2099-03-08T16:00:00+08:00",
             channel="all",
             status="completed",
             next_run_at=None,
@@ -353,7 +430,7 @@ def test_update_reminder_paused_removes_scheduler_job() -> None:
                 "title": "提醒我开会",
                 "description": "项目例会",
                 "schedule_type": "once",
-                "schedule_value": "2026-03-08T15:00:00+08:00",
+                "schedule_value": "2099-03-08T15:00:00+08:00",
                 "channel": "all",
             },
         )

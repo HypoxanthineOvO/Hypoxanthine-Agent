@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
 import asyncio
 
 import pytest
 
 from hypo_agent.core.pipeline import ChatPipeline
+from hypo_agent.memory.structured_store import StructuredStore
 from hypo_agent.models import Message
 
 
@@ -35,7 +37,9 @@ def test_pipeline_injects_recent_history_before_inbound() -> None:
     class StubRouter:
         async def call(self, model_name, messages):
             assert model_name == "Gemini3Pro"
-            assert messages == [
+            assert messages[0]["role"] == "system"
+            assert "当前时间:" in messages[0]["content"]
+            assert messages[1:] == [
                 {"role": "user", "content": "旧问题"},
                 {"role": "assistant", "content": "旧回答"},
                 {"role": "user", "content": "新问题"},
@@ -66,7 +70,9 @@ def test_pipeline_stream_reply_emits_chunk_and_done_events_and_persists() -> Non
     class StubRouter:
         async def stream(self, model_name, messages, *, session_id=None):
             assert model_name == "Gemini3Pro"
-            assert messages == [{"role": "user", "content": "hello"}]
+            assert messages[0]["role"] == "system"
+            assert "当前时间:" in messages[0]["content"]
+            assert messages[1:] == [{"role": "user", "content": "hello"}]
             assert session_id == "s1"
             yield "He"
             yield "llo"
@@ -164,3 +170,239 @@ def test_pipeline_run_once_short_circuits_slash_command() -> None:
     assert reply.text == "slash ok"
     assert router.calls == 0
     assert memory.appended == []
+
+
+class StubBreaker:
+    def __init__(self, enabled: bool = False) -> None:
+        self._enabled = enabled
+
+    def set_global_kill_switch(self, enabled: bool) -> None:
+        self._enabled = bool(enabled)
+
+    def get_global_kill_switch(self) -> bool:
+        return self._enabled
+
+
+def test_pipeline_kill_blocks_llm() -> None:
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call(self, model_name, messages):
+            self.calls += 1
+            return "LLM"
+
+    breaker = StubBreaker(enabled=True)
+    router = StubRouter()
+    pipeline = ChatPipeline(
+        router=router,
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        circuit_breaker=breaker,
+    )
+
+    reply = asyncio.run(pipeline.run_once(Message(text="hello", sender="user", session_id="s1")))
+
+    assert "Kill Switch" in (reply.text or "")
+    assert router.calls == 0
+
+
+def test_pipeline_stream_stops_when_kill_triggered() -> None:
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        async def stream(self, model_name, messages, *, session_id=None):
+            yield "He"
+            breaker.set_global_kill_switch(True)
+            yield "llo"
+
+    breaker = StubBreaker(enabled=False)
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        circuit_breaker=breaker,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="hello", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+    text = "".join(event.get("text", "") for event in events if event.get("type") == "assistant_chunk")
+
+    assert "Kill Switch" in text
+    assert "llo" not in text
+
+
+def test_system_prompt_contains_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    import hypo_agent.core.pipeline as pipeline_module
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    fixed = datetime(2026, 3, 10, 0, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return fixed
+            return fixed.astimezone(tz)
+
+    monkeypatch.setattr(pipeline_module, "datetime", FixedDatetime)
+
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        async def call(self, model_name, messages):
+            return "unused"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+    )
+
+    messages = pipeline._build_llm_messages(Message(text="hi", sender="user", session_id="s1"))
+    system_messages = [item for item in messages if item["role"] == "system"]
+    assert len(system_messages) == 1
+    content = system_messages[0]["content"]
+    assert "当前时间:" in content
+    assert "2026-03-10T00:15:00+08:00" in content
+    assert "(" in content and ")" in content
+    tz_name = content.split("(")[-1].split(")")[0].strip()
+    assert tz_name
+
+
+def test_pipeline_broadcasts_reply_for_qq_channel() -> None:
+    memory = StubSessionMemory()
+    from hypo_agent.core.channel_dispatcher import ChannelDispatcher
+
+    dispatcher = ChannelDispatcher()
+    webui_received: list[Message] = []
+    qq_received: list[Message] = []
+
+    async def webui_sink(message: Message) -> None:
+        webui_received.append(message)
+
+    async def qq_sink(message: Message) -> None:
+        qq_received.append(message)
+
+    dispatcher.register("webui", webui_sink)
+    dispatcher.register("qq", qq_sink)
+
+    class StubRouter:
+        async def stream(self, model_name, messages, *, session_id=None):
+            yield "Hi"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        on_proactive_message=dispatcher.broadcast,
+    )
+
+    async def _collect() -> None:
+        inbound = Message(
+            text="hello",
+            sender="user",
+            session_id="s1",
+            channel="qq",
+            sender_id="10001",
+        )
+        async for _ in pipeline.stream_reply(inbound):
+            pass
+
+    asyncio.run(_collect())
+
+    assert len(webui_received) == 1
+    assert len(qq_received) == 1
+    assert webui_received[0].text == "Hi"
+    assert webui_received[0].channel == "qq"
+    assert qq_received[0].channel == "qq"
+
+
+def test_pipeline_broadcasts_reply_excluding_webui() -> None:
+    memory = StubSessionMemory()
+    from hypo_agent.core.channel_dispatcher import ChannelDispatcher
+
+    dispatcher = ChannelDispatcher()
+    webui_received: list[Message] = []
+    qq_received: list[Message] = []
+
+    async def webui_sink(message: Message) -> None:
+        webui_received.append(message)
+
+    async def qq_sink(message: Message) -> None:
+        qq_received.append(message)
+
+    dispatcher.register("webui", webui_sink)
+    dispatcher.register("qq", qq_sink)
+
+    class StubRouter:
+        async def stream(self, model_name, messages, *, session_id=None):
+            yield "OK"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        on_proactive_message=dispatcher.broadcast,
+    )
+
+    async def _collect() -> None:
+        inbound = Message(
+            text="hello",
+            sender="user",
+            session_id="s1",
+            channel="webui",
+        )
+        async for _ in pipeline.stream_reply(inbound):
+            pass
+
+    asyncio.run(_collect())
+
+    assert webui_received == []
+    assert len(qq_received) == 1
+    assert qq_received[0].text == "OK"
+    assert qq_received[0].channel == "webui"
+
+
+def test_preference_injection(tmp_path: Path) -> None:
+    db_path = tmp_path / "hypo.db"
+
+    async def _seed() -> StructuredStore:
+        store = StructuredStore(db_path=db_path)
+        await store.init()
+        await store.set_preference("喜欢的饮品", "绿茶")
+        return store
+
+    store = asyncio.run(_seed())
+
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        async def call(self, model_name, messages):
+            return "unused"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        structured_store=store,
+    )
+
+    messages = pipeline._build_llm_messages(
+        Message(text="hi", sender="user", session_id="main"),
+        use_tools=True,
+    )
+    system_messages = [item for item in messages if item["role"] == "system"]
+    assert any("User Preferences" in item.get("content", "") for item in system_messages)

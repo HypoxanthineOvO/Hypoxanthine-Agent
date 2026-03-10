@@ -87,8 +87,13 @@ class SlashCommandHandler:
             ),
             SlashCommandEntry(
                 command="/kill",
-                description="开启/关闭全局紧急停止开关",
-                handler=self._handle_kill_toggle,
+                description="激活全局紧急停止开关",
+                handler=self._handle_kill,
+            ),
+            SlashCommandEntry(
+                command="/resume",
+                description="解除全局紧急停止开关",
+                handler=self._handle_resume,
             ),
             SlashCommandEntry(
                 command="/clear",
@@ -245,14 +250,24 @@ class SlashCommandHandler:
         )
         return "\n".join(lines)
 
-    def _handle_kill_toggle(self, _: Message) -> str:
+    def _handle_kill(self, _: Message) -> str:
         if self.circuit_breaker is None:
             return "Kill Switch 不可用。"
 
-        enabled = not bool(self.circuit_breaker.get_global_kill_switch())
-        self.circuit_breaker.set_global_kill_switch(enabled)
-        logger.warning("slash.kill_switch.toggled", enabled=enabled)
-        return "⚡ Kill Switch 已开启" if enabled else "⚡ Kill Switch 已关闭"
+        if not bool(self.circuit_breaker.get_global_kill_switch()):
+            self.circuit_breaker.set_global_kill_switch(True)
+        logger.warning("slash.kill_switch.toggled", enabled=True)
+        return "⚠️ Kill Switch 已激活。所有执行已停止。发送 /resume 恢复。"
+
+    def _handle_resume(self, _: Message) -> str:
+        if self.circuit_breaker is None:
+            return "Kill Switch 不可用。"
+
+        if not bool(self.circuit_breaker.get_global_kill_switch()):
+            return "当前未处于 Kill 状态。"
+        self.circuit_breaker.set_global_kill_switch(False)
+        logger.warning("slash.kill_switch.toggled", enabled=False)
+        return "✅ Kill Switch 已解除，恢复正常执行。"
 
     def _handle_clear_session(self, inbound: Message) -> str:
         self.session_memory.clear_session(inbound.session_id)

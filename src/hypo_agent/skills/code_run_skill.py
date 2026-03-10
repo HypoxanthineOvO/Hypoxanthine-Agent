@@ -187,6 +187,9 @@ class CodeRunSkill(BaseSkill):
             "/",
             "/",
         ]
+        blocked_paths = self._collect_blocked_paths()
+        for path in blocked_paths:
+            args.extend(["--tmpfs", str(path)])
         for path in writable_paths:
             path_str = str(path)
             args.extend(["--bind", path_str, path_str])
@@ -204,6 +207,11 @@ class CodeRunSkill(BaseSkill):
             ]
         )
         return args
+
+    def _collect_blocked_paths(self) -> list[Path]:
+        if self.permission_manager is None:
+            return []
+        return self.permission_manager.blocked_paths()
 
     def _collect_writable_paths(self) -> list[Path]:
         writable: list[Path] = [self.sandbox_dir]

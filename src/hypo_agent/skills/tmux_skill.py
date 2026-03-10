@@ -8,8 +8,13 @@ from typing import Any
 from uuid import uuid4
 
 from hypo_agent.models import SkillOutput
+from hypo_agent.security.permission_manager import PermissionManager
 from hypo_agent.skills.base import BaseSkill
 
+
+_SAFE_COMMANDS = {"echo", "pwd", "whoami", "date", "uptime", "ps", "top", "free", "df"}
+_SAFE_GIT_SUBCOMMANDS = {"status", "log", "branch"}
+_WRITE_COMMANDS = {"rm", "mv", "cp", "tee", "dd"}
 
 class TmuxSkill(BaseSkill):
     name = "tmux"
@@ -22,12 +27,14 @@ class TmuxSkill(BaseSkill):
         default_timeout_seconds: int = 30,
         max_output_chars: int = 262144,
         sandbox_dir: Path | str = "/tmp/hypo-agent-sandbox",
+        permission_manager: PermissionManager | None = None,
         subprocess_exec=None,
     ) -> None:
         self.default_timeout_seconds = default_timeout_seconds
         self.max_output_chars = max_output_chars
         self.sandbox_dir = Path(sandbox_dir)
         self.sandbox_dir.mkdir(parents=True, exist_ok=True)
+        self.permission_manager = permission_manager
         self._subprocess_exec = subprocess_exec or asyncio.create_subprocess_exec
 
     @property
@@ -51,6 +58,49 @@ class TmuxSkill(BaseSkill):
             }
         ]
 
+    def _looks_like_path(self, token: str) -> bool:
+        return token.startswith("/") or token.startswith("~") or token.startswith("./") or token.startswith("../")
+
+    def _normalize_path_token(self, token: str) -> str:
+        return token.strip(";,")
+
+    def _is_safe_command(self, tokens: list[str]) -> bool:
+        if not tokens:
+            return True
+        if tokens[0] in _SAFE_COMMANDS:
+            return not any(self._looks_like_path(t) for t in tokens[1:])
+        if tokens[0] == "git" and len(tokens) > 1 and tokens[1] in _SAFE_GIT_SUBCOMMANDS:
+            return not any(self._looks_like_path(t) for t in tokens[2:])
+        return False
+
+    def _is_write_command(self, tokens: list[str], raw: str) -> bool:
+        if tokens and tokens[0] in _WRITE_COMMANDS:
+            return True
+        return (">" in raw) or (">>" in raw)
+
+    def _scan_command(self, command: str) -> tuple[bool, str]:
+        if self.permission_manager is None:
+            return True, ""
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            tokens = command.split()
+        if not tokens:
+            return True, ""
+        if self._is_safe_command(tokens):
+            return True, ""
+        path_tokens = [self._normalize_path_token(t) for t in tokens if self._looks_like_path(t)]
+        if not path_tokens:
+            return True, ""
+        operation = "write" if self._is_write_command(tokens, command) else "read"
+        for token in path_tokens:
+            allowed, reason = self.permission_manager.check_permission(token, operation, log_allowed=False)
+            if not allowed:
+                if "blocked" in reason.lower():
+                    return False, f"{token} is in blocked_paths"
+                return False, reason
+        return True, ""
+
     async def execute(self, tool_name: str, params: dict[str, Any]) -> SkillOutput:
         if tool_name != "run_command":
             return SkillOutput(
@@ -61,6 +111,13 @@ class TmuxSkill(BaseSkill):
         command = str(params.get("command", "")).strip()
         if not command:
             return SkillOutput(status="error", error_info="command is required")
+
+        allowed, reason = self._scan_command(command)
+        if not allowed:
+            return SkillOutput(
+                status="error",
+                error_info=f"Permission denied: {reason}",
+            )
 
         session_name = str(params.get("session_name") or "hypo-agent")
         timeout = int(params.get("timeout") or self.default_timeout_seconds)

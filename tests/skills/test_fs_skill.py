@@ -48,6 +48,45 @@ def test_fs_skill_declares_required_permissions(tmp_path: Path) -> None:
     assert skill.required_permissions == ["filesystem"]
 
 
+def test_blocked_path_filesystem_denied(tmp_path: Path) -> None:
+    blocked = tmp_path / "blocked.txt"
+    blocked.write_text("secret", encoding="utf-8")
+    manager = PermissionManager(
+        DirectoryWhitelist(
+            rules=[],
+            default_policy="readonly",
+            blocked_paths=[str(blocked)],
+        )
+    )
+    skill = FileSystemSkill(permission_manager=manager, index_file=tmp_path / "index.yaml")
+
+    output = asyncio.run(skill.execute("read_file", {"path": str(blocked)}))
+
+    assert output.status == "error"
+    assert "permission" in (output.error_info or "").lower()
+
+
+def test_gray_zone_read_allowed(tmp_path: Path) -> None:
+    gray = tmp_path / "gray.txt"
+    gray.write_text("ok", encoding="utf-8")
+    manager = PermissionManager(DirectoryWhitelist(rules=[], default_policy="readonly"))
+    skill = FileSystemSkill(permission_manager=manager, index_file=tmp_path / "index.yaml")
+
+    output = asyncio.run(skill.execute("read_file", {"path": str(gray)}))
+
+    assert output.status == "success"
+
+
+def test_gray_zone_write_denied(tmp_path: Path) -> None:
+    gray = tmp_path / "gray.txt"
+    manager = PermissionManager(DirectoryWhitelist(rules=[], default_policy="readonly"))
+    skill = FileSystemSkill(permission_manager=manager, index_file=tmp_path / "index.yaml")
+
+    output = asyncio.run(skill.execute("write_file", {"path": str(gray), "content": "x"}))
+
+    assert output.status == "error"
+
+
 def test_read_file_truncates_large_text(tmp_path: Path) -> None:
     skill, _, readonly = _build_skill(tmp_path)
     file_path = readonly / "big.log"

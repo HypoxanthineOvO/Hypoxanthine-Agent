@@ -450,3 +450,15 @@ def test_structured_store_list_overdue_pending_reminders(tmp_path) -> None:
         assert rows[0]["title"] == "过期提醒"
 
     asyncio.run(_run())
+
+
+def test_save_and_get_preference(tmp_path) -> None:
+    db_path = tmp_path / "hypo.db"
+
+    async def _run() -> None:
+        store = StructuredStore(db_path=db_path)
+        await store.init()
+        await store.save_preference("favorite_drink", "绿茶")
+        assert await store.get_preference("favorite_drink") == "绿茶"
+
+    asyncio.run(_run())

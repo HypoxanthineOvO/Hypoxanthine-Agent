@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import re
+from pathlib import Path
 
+from hypo_agent.models import DirectoryWhitelist
+from hypo_agent.security.permission_manager import PermissionManager
 from hypo_agent.skills.tmux_skill import TmuxSkill
 
 
@@ -125,3 +128,32 @@ def test_tmux_skill_truncates_long_output() -> None:
 def test_tmux_skill_default_max_output_chars_is_256k() -> None:
     skill = TmuxSkill(subprocess_exec=_build_fake_tmux_exec(command_stdout="ok"))
     assert skill.max_output_chars == 262144
+
+
+def test_tmux_blocks_blocked_path(tmp_path: Path) -> None:
+    manager = PermissionManager(
+        DirectoryWhitelist(rules=[], default_policy="readonly", blocked_paths=["/etc/passwd"])
+    )
+    skill = TmuxSkill(
+        permission_manager=manager,
+        subprocess_exec=_build_fake_tmux_exec(command_stdout="ok"),
+    )
+
+    output = asyncio.run(skill.execute("run_command", {"command": "cat /etc/passwd"}))
+
+    assert output.status == "error"
+    assert "permission denied" in (output.error_info or "").lower()
+
+
+def test_tmux_safe_command_no_scan(tmp_path: Path) -> None:
+    manager = PermissionManager(
+        DirectoryWhitelist(rules=[], default_policy="readonly", blocked_paths=["/etc/passwd"])
+    )
+    skill = TmuxSkill(
+        permission_manager=manager,
+        subprocess_exec=_build_fake_tmux_exec(command_stdout="ok"),
+    )
+
+    output = asyncio.run(skill.execute("run_command", {"command": "ps aux"}))
+
+    assert output.status == "success"

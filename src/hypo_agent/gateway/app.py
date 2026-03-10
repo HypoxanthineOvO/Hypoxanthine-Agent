@@ -43,6 +43,7 @@ from hypo_agent.skills import (
     CodeRunSkill,
     EmailScannerSkill,
     FileSystemSkill,
+    MemorySkill,
     ReminderSkill,
     TmuxSkill,
 )
@@ -96,7 +97,9 @@ def _register_enabled_skills(
     auto_confirm = bool(reminder_cfg.get("auto_confirm", True))
 
     if "tmux" in enabled_skills:
-        skill_manager.register(TmuxSkill(default_timeout_seconds=tmux_timeout))
+        skill_manager.register(
+            TmuxSkill(default_timeout_seconds=tmux_timeout, permission_manager=permission_manager)
+        )
 
     if "code_run" in enabled_skills:
         skill_manager.register(
@@ -137,6 +140,10 @@ def _register_enabled_skills(
             and hasattr(email_skill, "_check_new_emails")
         ):
             heartbeat_service.register_event_source("email", email_skill._check_new_emails)
+
+    # Memory tools are safe and expected to be available for preference persistence.
+    if structured_store is not None:
+        skill_manager.register(MemorySkill(structured_store=structured_store))
 
 
 def _default_security() -> SecurityConfig:
@@ -244,6 +251,7 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
         session_memory=deps.session_memory,
         history_window=20,
         skill_manager=deps.skill_manager,
+        structured_store=deps.structured_store,
         max_react_rounds=5,
         slash_commands=slash_commands,
         output_compressor=deps.output_compressor,
@@ -421,10 +429,14 @@ def create_app(
         service = _build_qq_channel_service(config_dir)
         app.state.qq_channel_service = service
         if service is not None:
-            app.state.channel_dispatcher.register("qq", service.push_proactive)
+            app.state.channel_dispatcher.register("qq", service.send_message)
 
-    async def on_proactive_message(message: Message) -> None:
-        await app.state.channel_dispatcher.broadcast(message)
+    async def on_proactive_message(
+        message: Message,
+        *,
+        exclude_channels: set[str] | None = None,
+    ) -> None:
+        await app.state.channel_dispatcher.broadcast(message, exclude_channels=exclude_channels)
 
     app.state.push_ws_message = push_ws_message
     setattr(app.state.pipeline, "on_proactive_message", on_proactive_message)
