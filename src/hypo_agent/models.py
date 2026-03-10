@@ -33,6 +33,9 @@ class SingleModelConfig(BaseModel):
     provider: str | None = None
     litellm_model: str | None = None
     fallback: str | None = None
+    supports_tool_calling: bool | None = None
+    context_window: int | None = None
+    description: str | None = None
 
 
 class ModelConfig(BaseModel):
@@ -46,7 +49,7 @@ class ModelConfig(BaseModel):
 class ProviderConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    api_base: str
+    api_base: str | None = None
     api_key: str
 
 

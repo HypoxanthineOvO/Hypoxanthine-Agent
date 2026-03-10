@@ -1,13 +1,47 @@
-default_model: DeepseekV3_2
+default_model: KimiK25
 
 task_routing:
-  chat: DeepseekV3_2
+  chat: KimiK25
   lightweight: DeepseekV3_2
 
 models:
+  KimiK25:
+    litellm_model: "openai/kimi-k2.5"
+    provider: "volcengine_coding"
+    supports_tool_calling: true
+    description: "Kimi K2.5 via 火山引擎 Coding Plan (OpenAI compat)"
+    fallback: KimiK2
+
+  KimiK2:
+    litellm_model: "openai/moonshot-v1-32k"
+    provider: "volcengine_kimi"
+    supports_tool_calling: true
+    context_window: 32768
+    description: "Kimi（火山引擎部署），支持 function calling"
+    fallback: Gemini3Pro
+
+  MiniMaxM2:
+    litellm_model: "minimax/MiniMax-M2"
+    provider: "minimax"
+    supports_tool_calling: true
+    context_window: 1000000
+    description: "MiniMax M2，原生 Anthropic 兼容接口"
+    fallback: GLM4
+
+  GLM4:
+    litellm_model: "zai/glm-4-plus"
+    provider: "zhipu"
+    supports_tool_calling: true
+    context_window: 128000
+    description: "智谱 GLM-4-Plus，原生 function calling"
+    fallback: Gemini3Pro
+
   Gemini3Pro:
     provider: Hiapi
-    litellm_model: "openai/gemini-2.5-pro"
+    # NOTE(M4 diagnose): 2026-03-04 tool-calling probe returned tool_calls=null
+    # on this provider endpoint. Keep config unchanged, but re-check provider
+    # compatibility before relying on function calling in production.
+    litellm_model: "openai/gemini-3-pro"
     fallback: DeepseekV3_2
 
   DeepseekV3_1:
@@ -28,9 +62,9 @@ models:
   ClaudeSonnet:
     provider: null
     litellm_model: null
-    fallback: Gemini3Pro
+    fallback: KimiK2
 
   Gpt4o:
     provider: null
     litellm_model: null
-    fallback: Gemini3Pro
+    fallback: KimiK2

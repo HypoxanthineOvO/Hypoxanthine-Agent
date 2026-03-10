@@ -86,3 +86,73 @@ models:
 
     with pytest.raises(ValueError, match="Provider 'Hiapi'"):
         load_runtime_model_config(models_yaml, secrets_yaml)
+
+
+def test_load_runtime_model_config_resolves_env_api_key_and_optional_api_base(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    models_yaml = tmp_path / "models.yaml"
+    models_yaml.write_text(
+        """
+default_model: MiniMaxM2
+task_routing:
+  chat: MiniMaxM2
+models:
+  MiniMaxM2:
+    provider: minimax
+    litellm_model: minimax/MiniMax-M2
+    fallback: null
+""".strip(),
+        encoding="utf-8",
+    )
+
+    secrets_yaml = tmp_path / "secrets.yaml"
+    secrets_yaml.write_text(
+        """
+providers:
+  minimax:
+    api_key: $MINIMAX_API_KEY
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MINIMAX_API_KEY", "env-minimax-key")
+
+    runtime = load_runtime_model_config(models_yaml, secrets_yaml)
+
+    assert runtime.models["MiniMaxM2"].api_base is None
+    assert runtime.models["MiniMaxM2"].api_key == "env-minimax-key"
+
+
+def test_load_runtime_model_config_rejects_missing_env_api_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    models_yaml = tmp_path / "models.yaml"
+    models_yaml.write_text(
+        """
+default_model: MiniMaxM2
+task_routing:
+  chat: MiniMaxM2
+models:
+  MiniMaxM2:
+    provider: minimax
+    litellm_model: minimax/MiniMax-M2
+    fallback: null
+""".strip(),
+        encoding="utf-8",
+    )
+
+    secrets_yaml = tmp_path / "secrets.yaml"
+    secrets_yaml.write_text(
+        """
+providers:
+  minimax:
+    api_key: $MINIMAX_API_KEY
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+
+    with pytest.raises(ValueError, match="MINIMAX_API_KEY"):
+        load_runtime_model_config(models_yaml, secrets_yaml)

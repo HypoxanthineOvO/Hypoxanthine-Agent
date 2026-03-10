@@ -53,6 +53,9 @@ def test_model_config_defaults_and_mapping():
                 "provider": "Hiapi",
                 "litellm_model": "openai/gemini-2.5-pro",
                 "fallback": "DeepseekV3_2",
+                "supports_tool_calling": True,
+                "context_window": 32768,
+                "description": "Gemini model",
             },
             "ClaudeSonnet": {
                 "provider": None,
@@ -69,6 +72,8 @@ def test_model_config_defaults_and_mapping():
     assert restored.task_routing["chat"] == "Gemini3Pro"
     assert restored.task_routing["lightweight"] == "DeepseekV3_2"
     assert restored.models["ClaudeSonnet"].provider is None
+    assert restored.models["Gemini3Pro"].supports_tool_calling is True
+    assert restored.models["Gemini3Pro"].context_window == 32768
 
 
 def test_provider_config_round_trip():

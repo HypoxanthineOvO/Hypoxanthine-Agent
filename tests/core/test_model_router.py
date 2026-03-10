@@ -273,3 +273,235 @@ def test_model_router_rejects_fallback_cycle() -> None:
     router = ModelRouter(config, acompletion_fn=fake_acompletion)
     with pytest.raises(ValueError, match="Fallback cycle"):
         asyncio.run(router.call("A", [{"role": "user", "content": "hi"}]))
+
+
+def test_model_router_call_passes_tools_to_acompletion(
+    runtime_config: RuntimeModelConfig,
+) -> None:
+    captured: list[dict] = []
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "run_command", "parameters": {"type": "object"}},
+        }
+    ]
+
+    async def fake_acompletion(**kwargs):
+        captured.append(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    router = ModelRouter(runtime_config, acompletion_fn=fake_acompletion)
+    text = asyncio.run(
+        router.call(
+            "Gemini3Pro",
+            [{"role": "user", "content": "hi"}],
+            tools=tools,
+        )
+    )
+
+    assert text == "ok"
+    assert captured[0]["tools"] == tools
+
+
+def test_model_router_stream_passes_tools_to_acompletion(
+    runtime_config: RuntimeModelConfig,
+) -> None:
+    captured: list[dict] = []
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "run_command", "parameters": {"type": "object"}},
+        }
+    ]
+
+    async def fake_acompletion(**kwargs):
+        captured.append(kwargs)
+
+        async def _gen():
+            yield {"choices": [{"delta": {"content": "ok"}}]}
+
+        return _gen()
+
+    router = ModelRouter(runtime_config, acompletion_fn=fake_acompletion)
+
+    async def _collect() -> list[str]:
+        chunks: list[str] = []
+        async for chunk in router.stream(
+            "Gemini3Pro",
+            [{"role": "user", "content": "hi"}],
+            tools=tools,
+        ):
+            chunks.append(chunk)
+        return chunks
+
+    chunks = asyncio.run(_collect())
+    assert chunks == ["ok"]
+    assert captured[0]["tools"] == tools
+
+
+def test_model_router_call_with_tools_extracts_tool_calls(
+    runtime_config: RuntimeModelConfig,
+) -> None:
+    async def fake_acompletion(**kwargs):
+        del kwargs
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "run_command",
+                                    "arguments": "{\"command\": \"echo hi\"}",
+                                },
+                            }
+                        ],
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    router = ModelRouter(runtime_config, acompletion_fn=fake_acompletion)
+    payload = asyncio.run(
+        router.call_with_tools(
+            "Gemini3Pro",
+            [{"role": "user", "content": "hi"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "run_command",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+        )
+    )
+
+    assert payload["text"] == ""
+    assert payload["tool_calls"][0]["function"]["name"] == "run_command"
+
+
+def test_model_router_call_with_tools_extracts_legacy_function_call(
+    runtime_config: RuntimeModelConfig,
+) -> None:
+    async def fake_acompletion(**kwargs):
+        del kwargs
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": "",
+                        "function_call": {
+                            "name": "run_command",
+                            "arguments": {"command": "echo hello"},
+                        },
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    router = ModelRouter(runtime_config, acompletion_fn=fake_acompletion)
+    payload = asyncio.run(
+        router.call_with_tools(
+            "Gemini3Pro",
+            [{"role": "user", "content": "hi"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "run_command",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+        )
+    )
+
+    assert payload["tool_calls"][0]["function"]["name"] == "run_command"
+    assert "\"command\": \"echo hello\"" in payload["tool_calls"][0]["function"]["arguments"]
+
+
+def test_model_router_call_with_tools_extracts_gemini_content_tool_part(
+    runtime_config: RuntimeModelConfig,
+) -> None:
+    async def fake_acompletion(**kwargs):
+        del kwargs
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": [
+                            {
+                                "type": "function_call",
+                                "id": "gemini_1",
+                                "name": "run_command",
+                                "arguments": {"command": "echo gemini"},
+                            }
+                        ]
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    router = ModelRouter(runtime_config, acompletion_fn=fake_acompletion)
+    payload = asyncio.run(
+        router.call_with_tools(
+            "Gemini3Pro",
+            [{"role": "user", "content": "hi"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "run_command",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+        )
+    )
+
+    assert payload["tool_calls"][0]["id"] == "gemini_1"
+    assert payload["tool_calls"][0]["function"]["name"] == "run_command"
+
+
+def test_model_router_does_not_pass_api_base_when_missing() -> None:
+    runtime = RuntimeModelConfig.model_validate(
+        {
+            "default_model": "MiniMaxM2",
+            "task_routing": {"chat": "MiniMaxM2"},
+            "models": {
+                "MiniMaxM2": {
+                    "provider": "minimax",
+                    "litellm_model": "minimax/MiniMax-M2",
+                    "fallback": None,
+                    "api_base": None,
+                    "api_key": "mini-key",
+                }
+            },
+        }
+    )
+    captured: list[dict] = []
+
+    async def fake_acompletion(**kwargs):
+        captured.append(kwargs)
+        return {
+            "choices": [{"message": {"content": "ok", "tool_calls": []}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    router = ModelRouter(runtime, acompletion_fn=fake_acompletion)
+    result = asyncio.run(router.call("MiniMaxM2", [{"role": "user", "content": "hi"}]))
+
+    assert result == "ok"
+    assert "api_base" not in captured[0]
+    assert captured[0]["api_key"] == "mini-key"
