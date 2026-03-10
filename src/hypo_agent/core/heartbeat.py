@@ -92,7 +92,8 @@ class HeartbeatService:
     def _check_db_access(self) -> bool:
         try:
             if not self.db_path.exists():
-                return False
+                # Treat missing DB as non-fatal; StructuredStore may create on demand.
+                return True
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("SELECT 1").fetchone()
             return True
