@@ -20,7 +20,10 @@ TOOL_USE_SYSTEM_PROMPT = (
     "You are an assistant with access to tools. "
     "When the user asks you to execute a command or run code, you MUST use "
     "the provided tools instead of describing the action in text. "
-    "Always prefer using tools over explaining what you would do."
+    "Always prefer using tools over explaining what you would do. "
+    "When the user expresses stable preferences/habits/personal details, "
+    "you MUST call save_preference(key, value) to persist them. "
+    "Use get_preference(key) to read them back when needed."
 )
 
 KILL_SWITCH_MESSAGE = "⚠️ Kill Switch 已激活。所有执行已停止。发送 /resume 恢复。"
@@ -131,6 +134,7 @@ class ChatPipeline:
         session_memory: SessionMemory,
         history_window: int = 20,
         skill_manager: ChatSkillManager | None = None,
+        structured_store: Any | None = None,
         circuit_breaker: Any | None = None,
         max_react_rounds: int = 5,
         slash_commands: SlashCommands | None = None,
@@ -144,6 +148,7 @@ class ChatPipeline:
         self.session_memory = session_memory
         self.history_window = history_window
         self.skill_manager = skill_manager
+        self.structured_store = structured_store
         self.circuit_breaker = circuit_breaker
         self.max_react_rounds = max_react_rounds
         self.slash_commands = slash_commands
@@ -609,6 +614,9 @@ class ChatPipeline:
         if use_tools:
             llm_messages.append({"role": "system", "content": TOOL_USE_SYSTEM_PROMPT})
         llm_messages.append({"role": "system", "content": self._system_time_context()})
+        prefs_context = self._preferences_context()
+        if prefs_context:
+            llm_messages.append({"role": "system", "content": prefs_context})
 
         history = self.session_memory.get_recent_messages(
             inbound.session_id,
@@ -621,6 +629,30 @@ class ChatPipeline:
 
         llm_messages.append({"role": "user", "content": text})
         return llm_messages
+
+    def _preferences_context(self) -> str:
+        store = self.structured_store
+        if store is None:
+            return ""
+
+        lister = getattr(store, "list_preferences_sync", None)
+        if not callable(lister):
+            return ""
+
+        try:
+            rows = lister(limit=20)
+        except Exception:
+            return ""
+
+        if not rows:
+            return ""
+
+        lines = ["[User Preferences]"]
+        for key, value in rows[:20]:
+            if not key:
+                continue
+            lines.append(f"- {key}: {value}")
+        return "\n".join(lines)
 
     def _to_llm_message(self, message: Message) -> dict[str, str] | None:
         text = (message.text or "").strip()

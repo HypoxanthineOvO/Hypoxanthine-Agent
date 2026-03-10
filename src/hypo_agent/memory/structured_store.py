@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 import json
 from pathlib import Path
+import sqlite3
 from typing import Any
 
 import aiosqlite
@@ -236,6 +237,9 @@ class StructuredStore:
             )
             await db.commit()
 
+    async def save_preference(self, key: str, value: str) -> None:
+        await self.set_preference(key, value)
+
     async def get_preference(self, key: str) -> str | None:
         await self.init()
         async with aiosqlite.connect(self.db_path) as db:
@@ -247,6 +251,37 @@ class StructuredStore:
         if row is None:
             return None
         return row[0]
+
+    def list_preferences_sync(self, limit: int = 20) -> list[tuple[str, str]]:
+        if limit <= 0:
+            return []
+        if not self.db_path.exists():
+            return []
+
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT pref_key, pref_value
+                    FROM preferences
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (int(limit),),
+                ).fetchall()
+        except Exception:
+            return []
+
+        result: list[tuple[str, str]] = []
+        for row in rows:
+            if not row or len(row) < 2:
+                continue
+            key = str(row[0] or "").strip()
+            if not key:
+                continue
+            value = str(row[1] or "")
+            result.append((key, value))
+        return result
 
     async def record_token_usage(
         self,

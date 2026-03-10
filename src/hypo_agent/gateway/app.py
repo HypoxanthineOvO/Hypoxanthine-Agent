@@ -43,6 +43,7 @@ from hypo_agent.skills import (
     CodeRunSkill,
     EmailScannerSkill,
     FileSystemSkill,
+    MemorySkill,
     ReminderSkill,
     TmuxSkill,
 )
@@ -139,6 +140,10 @@ def _register_enabled_skills(
             and hasattr(email_skill, "_check_new_emails")
         ):
             heartbeat_service.register_event_source("email", email_skill._check_new_emails)
+
+    # Memory tools are safe and expected to be available for preference persistence.
+    if structured_store is not None:
+        skill_manager.register(MemorySkill(structured_store=structured_store))
 
 
 def _default_security() -> SecurityConfig:
@@ -246,6 +251,7 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
         session_memory=deps.session_memory,
         history_window=20,
         skill_manager=deps.skill_manager,
+        structured_store=deps.structured_store,
         max_react_rounds=5,
         slash_commands=slash_commands,
         output_compressor=deps.output_compressor,

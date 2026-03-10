@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
 import asyncio
 
 import pytest
 
 from hypo_agent.core.pipeline import ChatPipeline
+from hypo_agent.memory.structured_store import StructuredStore
 from hypo_agent.models import Message
 
 
@@ -371,3 +373,36 @@ def test_pipeline_broadcasts_reply_excluding_webui() -> None:
     assert len(qq_received) == 1
     assert qq_received[0].text == "OK"
     assert qq_received[0].channel == "webui"
+
+
+def test_preference_injection(tmp_path: Path) -> None:
+    db_path = tmp_path / "hypo.db"
+
+    async def _seed() -> StructuredStore:
+        store = StructuredStore(db_path=db_path)
+        await store.init()
+        await store.set_preference("喜欢的饮品", "绿茶")
+        return store
+
+    store = asyncio.run(_seed())
+
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        async def call(self, model_name, messages):
+            return "unused"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        structured_store=store,
+    )
+
+    messages = pipeline._build_llm_messages(
+        Message(text="hi", sender="user", session_id="main"),
+        use_tools=True,
+    )
+    system_messages = [item for item in messages if item["role"] == "system"]
+    assert any("User Preferences" in item.get("content", "") for item in system_messages)
