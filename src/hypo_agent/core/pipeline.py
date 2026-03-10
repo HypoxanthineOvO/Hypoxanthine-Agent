@@ -22,6 +22,8 @@ TOOL_USE_SYSTEM_PROMPT = (
     "Always prefer using tools over explaining what you would do."
 )
 
+KILL_SWITCH_MESSAGE = "⚠️ Kill Switch 已激活。所有执行已停止。发送 /resume 恢复。"
+
 TOOL_STATUS_TEMPLATES: dict[str, dict[str, str]] = {
     "create_reminder": {
         "start": "🔔 正在创建提醒...",
@@ -126,6 +128,7 @@ class ChatPipeline:
         session_memory: SessionMemory,
         history_window: int = 20,
         skill_manager: ChatSkillManager | None = None,
+        circuit_breaker: Any | None = None,
         max_react_rounds: int = 5,
         slash_commands: SlashCommands | None = None,
         output_compressor: ChatOutputCompressor | None = None,
@@ -138,6 +141,7 @@ class ChatPipeline:
         self.session_memory = session_memory
         self.history_window = history_window
         self.skill_manager = skill_manager
+        self.circuit_breaker = circuit_breaker
         self.max_react_rounds = max_react_rounds
         self.slash_commands = slash_commands
         self.output_compressor = output_compressor
@@ -164,6 +168,22 @@ class ChatPipeline:
         except asyncio.CancelledError:
             pass
 
+    async def enqueue_user_message(
+        self,
+        inbound: Message,
+        *,
+        emit: Any,
+    ) -> None:
+        if self.event_queue is None:
+            raise RuntimeError("event_queue is required for queued user messages")
+        await self.event_queue.put(
+            {
+                "event_type": "user_message",
+                "message": inbound,
+                "emit": emit,
+            }
+        )
+
     async def run_once(self, inbound: Message) -> Message:
         slash_result = await self._try_handle_slash(inbound)
         if slash_result is not None:
@@ -173,6 +193,16 @@ class ChatPipeline:
                 session_id=inbound.session_id,
             )
 
+        if self._kill_switch_active():
+            self.session_memory.append(inbound)
+            outbound = Message(
+                text=KILL_SWITCH_MESSAGE,
+                sender="assistant",
+                session_id=inbound.session_id,
+            )
+            self.session_memory.append(outbound)
+            return outbound
+
         llm_messages = self._build_llm_messages(inbound)
         self.session_memory.append(inbound)
         text = await self.router.call(self.chat_model, llm_messages)
@@ -180,6 +210,8 @@ class ChatPipeline:
             text=text,
             sender="assistant",
             session_id=inbound.session_id,
+            channel=inbound.channel,
+            sender_id=inbound.sender_id,
         )
         self.session_memory.append(outbound)
         return outbound
@@ -199,6 +231,27 @@ class ChatPipeline:
             )
             return
 
+        if self._kill_switch_active():
+            self.session_memory.append(inbound)
+            kill_text = KILL_SWITCH_MESSAGE
+            yield self._format_event(
+                event_type="assistant_chunk",
+                response=RichResponse(text=kill_text),
+                session_id=inbound.session_id,
+            )
+            outbound = Message(
+                text=kill_text,
+                sender="assistant",
+                session_id=inbound.session_id,
+            )
+            self.session_memory.append(outbound)
+            yield self._format_event(
+                event_type="assistant_done",
+                response=RichResponse(),
+                session_id=inbound.session_id,
+            )
+            return
+
         use_tools = (
             self.skill_manager is not None
             and self.max_react_rounds > 0
@@ -207,6 +260,7 @@ class ChatPipeline:
         self.session_memory.append(inbound)
 
         full_text = ""
+        killed = False
 
         if use_tools:
             assert self.skill_manager is not None
@@ -220,6 +274,15 @@ class ChatPipeline:
             )
 
             for round_num in range(1, self.max_react_rounds + 1):
+                if self._kill_switch_active():
+                    full_text = KILL_SWITCH_MESSAGE
+                    yield self._format_event(
+                        event_type="assistant_chunk",
+                        response=RichResponse(text=full_text),
+                        session_id=inbound.session_id,
+                    )
+                    killed = True
+                    break
                 decision = await self.router.call_with_tools(
                     self.chat_model,
                     react_messages,
@@ -249,6 +312,15 @@ class ChatPipeline:
                             session_id=inbound.session_id,
                             tools=tools,
                         ):
+                            if self._kill_switch_active():
+                                full_text = KILL_SWITCH_MESSAGE
+                                yield self._format_event(
+                                    event_type="assistant_chunk",
+                                    response=RichResponse(text=full_text),
+                                    session_id=inbound.session_id,
+                                )
+                                killed = True
+                                break
                             if not chunk:
                                 continue
                             full_text += chunk
@@ -257,6 +329,8 @@ class ChatPipeline:
                                 response=RichResponse(text=chunk),
                                 session_id=inbound.session_id,
                             )
+                        if killed:
+                            break
                     break
 
                 react_messages.append(
@@ -387,6 +461,15 @@ class ChatPipeline:
                 llm_messages,
                 session_id=inbound.session_id,
             ):
+                if self._kill_switch_active():
+                    full_text = KILL_SWITCH_MESSAGE
+                    yield self._format_event(
+                        event_type="assistant_chunk",
+                        response=RichResponse(text=full_text),
+                        session_id=inbound.session_id,
+                    )
+                    killed = True
+                    break
                 if not chunk:
                     continue
                 full_text += chunk
@@ -396,10 +479,29 @@ class ChatPipeline:
                     session_id=inbound.session_id,
                 )
 
+        if killed:
+            outbound = Message(
+                text=full_text,
+                sender="assistant",
+                session_id=inbound.session_id,
+                channel=inbound.channel,
+                sender_id=inbound.sender_id,
+            )
+            self.session_memory.append(outbound)
+            yield self._format_event(
+                event_type="assistant_done",
+                response=RichResponse(),
+                session_id=inbound.session_id,
+            )
+            return
+
+
         outbound = Message(
             text=full_text,
             sender="assistant",
             session_id=inbound.session_id,
+            channel=inbound.channel,
+            sender_id=inbound.sender_id,
         )
         self.session_memory.append(outbound)
         yield self._format_event(
@@ -465,6 +567,12 @@ class ChatPipeline:
         else:
             return None
         return {"role": role, "content": text}
+
+    def _kill_switch_active(self) -> bool:
+        return bool(
+            self.circuit_breaker is not None
+            and self.circuit_breaker.get_global_kill_switch()
+        )
 
     async def _try_handle_slash(self, inbound: Message) -> str | None:
         if self.slash_commands is None:
@@ -553,6 +661,9 @@ class ChatPipeline:
                     "event_consumer.processing",
                     event_type=event.get("event_type"),
                 )
+                if str(event.get("event_type") or "").strip().lower() == "user_message":
+                    await self._consume_user_message_event(event)
+                    continue
                 message = self._event_to_message(event)
                 if message is None:
                     continue
@@ -567,6 +678,47 @@ class ChatPipeline:
                 task_done = getattr(self.event_queue, "task_done", None)
                 if callable(task_done):
                     task_done()
+
+    async def _consume_user_message_event(self, event: dict[str, Any]) -> None:
+        raw_message = event.get("message")
+        if isinstance(raw_message, Message):
+            inbound = raw_message
+        elif isinstance(raw_message, dict):
+            inbound = Message.model_validate(raw_message)
+        else:
+            raise ValueError("user_message event missing 'message'")
+
+        emitter = event.get("emit")
+        if not callable(emitter):
+            raise ValueError("user_message event missing callable 'emit'")
+
+        try:
+            async for payload in self.stream_reply(inbound):
+                emit_result = emitter(payload)
+                if inspect.isawaitable(emit_result):
+                    await emit_result
+        except TimeoutError:
+            error_payload = {
+                "type": "error",
+                "code": "LLM_TIMEOUT",
+                "message": "LLM 调用超时，请稍后重试",
+                "retryable": True,
+                "session_id": inbound.session_id,
+            }
+            emit_result = emitter(error_payload)
+            if inspect.isawaitable(emit_result):
+                await emit_result
+        except RuntimeError:
+            error_payload = {
+                "type": "error",
+                "code": "LLM_RUNTIME_ERROR",
+                "message": "LLM 调用失败，请检查配置或稍后重试",
+                "retryable": True,
+                "session_id": inbound.session_id,
+            }
+            emit_result = emitter(error_payload)
+            if inspect.isawaitable(emit_result):
+                await emit_result
 
     def _event_to_message(self, event: dict[str, Any]) -> Message | None:
         event_type = str(event.get("event_type") or "").strip().lower()

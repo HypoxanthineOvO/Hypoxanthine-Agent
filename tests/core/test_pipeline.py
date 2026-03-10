@@ -164,3 +164,70 @@ def test_pipeline_run_once_short_circuits_slash_command() -> None:
     assert reply.text == "slash ok"
     assert router.calls == 0
     assert memory.appended == []
+
+
+class StubBreaker:
+    def __init__(self, enabled: bool = False) -> None:
+        self._enabled = enabled
+
+    def set_global_kill_switch(self, enabled: bool) -> None:
+        self._enabled = bool(enabled)
+
+    def get_global_kill_switch(self) -> bool:
+        return self._enabled
+
+
+def test_pipeline_kill_blocks_llm() -> None:
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call(self, model_name, messages):
+            self.calls += 1
+            return "LLM"
+
+    breaker = StubBreaker(enabled=True)
+    router = StubRouter()
+    pipeline = ChatPipeline(
+        router=router,
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        circuit_breaker=breaker,
+    )
+
+    reply = asyncio.run(pipeline.run_once(Message(text="hello", sender="user", session_id="s1")))
+
+    assert "Kill Switch" in (reply.text or "")
+    assert router.calls == 0
+
+
+def test_pipeline_stream_stops_when_kill_triggered() -> None:
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        async def stream(self, model_name, messages, *, session_id=None):
+            yield "He"
+            breaker.set_global_kill_switch(True)
+            yield "llo"
+
+    breaker = StubBreaker(enabled=False)
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        circuit_breaker=breaker,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="hello", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+    text = "".join(event.get("text", "") for event in events if event.get("type") == "assistant_chunk")
+
+    assert "Kill Switch" in text
+    assert "llo" not in text

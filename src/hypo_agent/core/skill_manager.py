@@ -118,6 +118,29 @@ class SkillManager:
         started_at = perf_counter()
 
         if self._circuit_breaker is not None:
+            kill_getter = getattr(self._circuit_breaker, "get_global_kill_switch", None)
+            kill_active = bool(kill_getter()) if callable(kill_getter) else False
+            if kill_active:
+                reason = "Kill Switch is active"
+                logger.warning(
+                    "skill.invoke.blocked",
+                    tool_name=tool_name,
+                    session_id=session_id,
+                    reason=reason,
+                )
+                blocked = SkillOutput(status="error", error_info=reason)
+                invocation_id = await self._record_tool_invocation(
+                    tool_name=tool_name,
+                    params=params,
+                    session_id=session_id,
+                    status="blocked",
+                    result=None,
+                    error_info=reason,
+                    duration_ms=self._duration_ms(started_at),
+                )
+                self._attach_invocation_id(blocked, invocation_id)
+                return blocked
+
             allowed, reason = self._circuit_breaker.can_execute(tool_name, session_id)
             if not allowed:
                 logger.warning(
