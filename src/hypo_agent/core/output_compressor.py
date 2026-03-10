@@ -70,27 +70,17 @@ class OutputCompressor:
             return final_output, True
 
         body = working[:body_budget]
-        compressed_chars = len(body)
-        marker, body_budget = self._build_marker(len(output), compressed_chars)
-        if body_budget <= 0:
-            final_output = marker[: self.target_chars]
-            self._attach_compressed_meta(
-                metadata=metadata,
-                cache_id=cache_id,
-                original_chars=len(output),
-                compressed_chars=len(final_output),
-            )
-            return final_output, True
-        body = body[:body_budget]
-        final_output = f"{marker}\n{body}"
-        trimmed = final_output[: self.target_chars]
+        final_output = self._finalize_with_marker(
+            original_chars=len(output),
+            body=body,
+        )
         self._attach_compressed_meta(
             metadata=metadata,
             cache_id=cache_id,
             original_chars=len(output),
-            compressed_chars=len(trimmed),
+            compressed_chars=len(final_output),
         )
-        return trimmed, True
+        return final_output, True
 
     def get_recent_originals(self) -> dict[str, dict[str, Any]]:
         return dict(self._recent_originals)
@@ -153,10 +143,29 @@ class OutputCompressor:
 
     def _build_marker(self, original_chars: int, compressed_chars: int) -> tuple[str, int]:
         marker = (
-            f"[📦 输出已压缩 ({original_chars} → {compressed_chars} 字符)。如需查看原文，请告知。]"
+            f"[📦 Output compressed from {original_chars} → {compressed_chars} chars. "
+            "Original saved to logs. Ask me for details.]"
         )
         body_budget = self.target_chars - len(marker) - 1
         return marker, body_budget
+
+    def _finalize_with_marker(self, *, original_chars: int, body: str) -> str:
+        compressed_chars = len(body)
+        final_output = ""
+        for _ in range(3):
+            marker, body_budget = self._build_marker(original_chars, compressed_chars)
+            if body_budget <= 0:
+                final_output = marker[: self.target_chars]
+                compressed_chars = len(final_output)
+                break
+            safe_body = body[:body_budget]
+            final_output = f"{safe_body}\n{marker}"
+            compressed_chars = len(final_output)
+            if len(final_output) <= self.target_chars:
+                break
+        if len(final_output) > self.target_chars:
+            final_output = final_output[: self.target_chars]
+        return final_output
 
     def _save_original(self, output: str, metadata: dict[str, Any]) -> str:
         cache_id = uuid4().hex

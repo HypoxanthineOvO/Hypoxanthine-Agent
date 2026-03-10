@@ -25,6 +25,7 @@ TOOL_USE_SYSTEM_PROMPT = (
 
 KILL_SWITCH_MESSAGE = "⚠️ Kill Switch 已激活。所有执行已停止。发送 /resume 恢复。"
 SESSION_FUSED_MESSAGE = "⚠️ 本次对话累计错误过多（5 次），已暂停执行。请检查问题后重新发送消息继续。"
+COMPRESSED_MARKER_PREFIX = "[📦 Output compressed"
 
 TOOL_STATUS_TEMPLATES: dict[str, dict[str, str]] = {
     "create_reminder": {
@@ -283,6 +284,7 @@ class ChatPipeline:
         full_text = ""
         killed = False
         session_fused = False
+        last_compressed_meta: dict[str, Any] | None = None
 
         if use_tools:
             assert self.skill_manager is not None
@@ -440,6 +442,7 @@ class ChatPipeline:
                             compressed_meta = compression_metadata.get("compressed_meta")
                             if isinstance(compressed_meta, dict):
                                 compressed_meta_for_event = dict(compressed_meta)
+                                last_compressed_meta = dict(compressed_meta)
                                 await self._persist_tool_invocation_compressed_meta(
                                     output=output,
                                     compressed_meta=compressed_meta_for_event,
@@ -546,6 +549,18 @@ class ChatPipeline:
             )
             return
 
+        extra_chunk = self._apply_compression_marker(
+            text=full_text,
+            compressed_meta=last_compressed_meta,
+        )
+        if extra_chunk is not None:
+            full_text += extra_chunk
+            yield self._format_event(
+                event_type="assistant_chunk",
+                response=RichResponse(text=extra_chunk),
+                session_id=inbound.session_id,
+            )
+
         outbound = Message(
             text=full_text,
             sender="assistant",
@@ -651,6 +666,37 @@ class ChatPipeline:
         if not tz_name:
             tz_name = "local"
         return f"[System Context]\n当前时间: {now.isoformat()} ({tz_name})"
+
+    def _apply_compression_marker(
+        self,
+        *,
+        text: str,
+        compressed_meta: dict[str, Any] | None,
+    ) -> str | None:
+        if not compressed_meta:
+            return None
+        if COMPRESSED_MARKER_PREFIX in text:
+            return None
+        marker = self._format_compression_marker(compressed_meta)
+        if not marker:
+            return None
+        if not text:
+            return marker
+        prefix = "\n" if not text.endswith(("\n", "\r")) else ""
+        return f"{prefix}{marker}"
+
+    def _format_compression_marker(self, compressed_meta: dict[str, Any]) -> str | None:
+        try:
+            original_chars = int(compressed_meta.get("original_chars"))
+            compressed_chars = int(compressed_meta.get("compressed_chars"))
+        except (TypeError, ValueError):
+            return None
+        if original_chars <= 0 or compressed_chars <= 0:
+            return None
+        return (
+            f"[📦 Output compressed from {original_chars} → {compressed_chars} chars. "
+            "Original saved to logs. Ask me for details.]"
+        )
 
     def _kill_switch_active(self) -> bool:
         return bool(

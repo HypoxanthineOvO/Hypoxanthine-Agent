@@ -402,7 +402,11 @@ def test_pipeline_stream_reply_compresses_tool_output_before_tool_message() -> N
                 "original_chars": 5000,
                 "compressed_chars": 120,
             }
-            return "[📦 输出已压缩 (5000 → 120 字符)。如需查看原文，请告知。]\ncompressed", True
+            return (
+                "compressed\n"
+                "[📦 Output compressed from 5000 → 120 chars. Original saved to logs. "
+                "Ask me for details.]"
+            ), True
 
     compressor = StubOutputCompressor()
 
@@ -452,7 +456,7 @@ def test_pipeline_stream_reply_compresses_tool_output_before_tool_message() -> N
     events = asyncio.run(_collect())
     assert compressor.calls
     assert events[1]["type"] == "tool_call_result"
-    assert events[1]["result"].startswith("[📦 输出已压缩")
+    assert str(events[1]["result"]).endswith("Ask me for details.]")
     assert events[1]["compressed_meta"] == {
         "cache_id": "cache_1",
         "original_chars": 5000,
@@ -460,7 +464,7 @@ def test_pipeline_stream_reply_compresses_tool_output_before_tool_message() -> N
     }
     tool_messages = [m for m in router.last_messages if m.get("role") == "tool"]
     assert tool_messages
-    assert tool_messages[-1]["content"].startswith("[📦 输出已压缩")
+    assert str(tool_messages[-1]["content"]).endswith("Ask me for details.]")
 
 
 def test_pipeline_stream_reply_persists_compressed_meta_with_invocation_id() -> None:
@@ -495,7 +499,11 @@ def test_pipeline_stream_reply_persists_compressed_meta_with_invocation_id() -> 
                 "original_chars": 5000,
                 "compressed_chars": 120,
             }
-            return "[📦 输出已压缩]\ncompressed", True
+            return (
+                "compressed\n"
+                "[📦 Output compressed from 5000 → 120 chars. Original saved to logs. "
+                "Ask me for details.]"
+            ), True
 
     class StubRouter:
         def __init__(self) -> None:
@@ -549,6 +557,77 @@ def test_pipeline_stream_reply_persists_compressed_meta_with_invocation_id() -> 
             },
         )
     ]
+
+
+def test_pipeline_appends_compression_marker_when_missing_from_llm_reply() -> None:
+    memory = StubSessionMemory()
+    skills = StubSkillManager(
+        output=SkillOutput(
+            status="success",
+            result={"stdout": "a" * 5000, "stderr": "", "exit_code": 0},
+        )
+    )
+
+    marker = (
+        "[📦 Output compressed from 5000 → 120 chars. Original saved to logs. "
+        "Ask me for details.]"
+    )
+
+    class StubOutputCompressor:
+        async def compress_if_needed(self, output: str, metadata: dict) -> tuple[str, bool]:
+            del output
+            metadata["compressed_meta"] = {
+                "cache_id": "cache_3",
+                "original_chars": 5000,
+                "compressed_chars": 120,
+            }
+            return f"compressed\n{marker}", True
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "run_command",
+                                "arguments": "{\"command\": \"echo big\"}",
+                            },
+                        }
+                    ],
+                }
+            return {"text": "done", "tool_calls": []}
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            del model_name, messages, session_id, tools
+            raise AssertionError("stream should not be called")
+            yield ""  # pragma: no cover
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skills,
+        output_compressor=StubOutputCompressor(),
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="run", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+    combined = "".join(event.get("text", "") for event in events if event.get("type") == "assistant_chunk")
+
+    assert combined.startswith("done")
+    assert combined.endswith(marker)
 
 
 from hypo_agent.core.skill_manager import SkillManager

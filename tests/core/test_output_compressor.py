@@ -125,7 +125,7 @@ def test_output_compressor_keeps_recent_original_cache_of_ten_entries() -> None:
     asyncio.run(_run())
 
 
-def test_compression_marker_chinese() -> None:
+def test_compression_marker_appended() -> None:
     router = StubRouter(lambda **_: "summary")
     compressor = OutputCompressor(router=router)
 
@@ -135,8 +135,8 @@ def test_compression_marker_chinese() -> None:
             metadata={"session_id": "s1"},
         )
         assert compressed is True
-        assert re.match(
-            r"^\[📦 输出已压缩 \(\d+ → \d+ 字符\)。如需查看原文，请告知。\]\n",
+        assert re.search(
+            r"\n\[📦 Output compressed from \d+ → \d+ chars\. Original saved to logs\. Ask me for details\.\]$",
             output,
         )
 
