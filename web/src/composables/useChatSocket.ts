@@ -7,6 +7,7 @@ import type {
   ConnectionStatus,
   IncomingWsEvent,
   Message,
+  NarrationEvent,
   ToolCallResultEvent,
   ToolCallStartEvent,
   WsErrorEvent,
@@ -54,6 +55,11 @@ export function useChatSocket(options: UseChatSocketOptions) {
 
   const isWsErrorEvent = (payload: IncomingWsEvent): payload is WsErrorEvent =>
     "type" in payload && payload.type === "error";
+
+  const isNarrationEvent = (
+    payload: IncomingWsEvent,
+  ): payload is NarrationEvent =>
+    "type" in payload && payload.type === "narration";
 
   const isToolCallStartEvent = (
     payload: IncomingWsEvent,
@@ -141,6 +147,24 @@ export function useChatSocket(options: UseChatSocketOptions) {
           return;
         }
 
+        if (isNarrationEvent(payload)) {
+          if (payload.session_id !== options.sessionId.value) {
+            return;
+          }
+          messages.value.push({
+            text: payload.text,
+            sender: "assistant",
+            session_id: payload.session_id,
+            timestamp: payload.timestamp,
+            message_tag: "narration",
+            metadata: {
+              ephemeral: true,
+              narration: true,
+            },
+          });
+          return;
+        }
+
         if (isAssistantChunkEvent(payload)) {
           if (payload.session_id !== options.sessionId.value) {
             return;
@@ -160,6 +184,7 @@ export function useChatSocket(options: UseChatSocketOptions) {
               text: chunkText,
               sender: "assistant",
               session_id: payload.session_id,
+              timestamp: payload.timestamp,
             });
             streamingAssistantIndex = messages.value.length - 1;
             return;
@@ -174,12 +199,23 @@ export function useChatSocket(options: UseChatSocketOptions) {
             return;
           }
           existing.text = `${existing.text ?? ""}${chunkText}`;
+          existing.timestamp = existing.timestamp ?? payload.timestamp;
           return;
         }
 
         if (isAssistantDoneEvent(payload)) {
           if (payload.session_id !== options.sessionId.value) {
             return;
+          }
+          if (
+            streamingAssistantIndex !== null &&
+            streamingAssistantIndex >= 0 &&
+            streamingAssistantIndex < messages.value.length
+          ) {
+            const existing = messages.value[streamingAssistantIndex];
+            if (existing) {
+              existing.timestamp = existing.timestamp ?? payload.timestamp;
+            }
           }
           streamingAssistantIndex = null;
           return;
@@ -263,6 +299,7 @@ export function useChatSocket(options: UseChatSocketOptions) {
       text: trimmed,
       sender: "user",
       session_id: options.sessionId.value,
+      timestamp: new Date().toISOString(),
     };
     socket.send(JSON.stringify(message));
     messages.value.push(message);

@@ -322,6 +322,236 @@ def test_heartbeat_abnormal_enqueues_event() -> None:
     asyncio.run(_run())
 
 
+def test_legacy_email_heartbeat_enqueues_email_scan_event_for_important_mail() -> None:
+    async def _run() -> None:
+        queue = EventQueue()
+        store = StubStore(
+            [
+                {
+                    "id": 31,
+                    "title": "📧 定时邮件推送（Heartbeat）",
+                    "description": "每 30 分钟扫描一次邮箱",
+                    "schedule_type": "cron",
+                    "schedule_value": "*/30 * * * *",
+                    "status": "active",
+                    "channel": "all",
+                    "heartbeat_config": [
+                        {
+                            "check_interval": 1800,
+                            "timeout": 300,
+                            "alert_threshold": 1,
+                            "action": "push_email_summary",
+                        }
+                    ],
+                }
+            ]
+        )
+        service = SchedulerService(
+            structured_store=store,
+            event_queue=queue,
+        )
+
+        async def scan_emails() -> dict:
+            return {
+                "accounts_scanned": 1,
+                "accounts_failed": 0,
+                "new_emails": 2,
+                "items": [
+                    {"category": "important", "subject": "重要通知"},
+                    {"category": "archive", "subject": "归档通知"},
+                ],
+                "summary": "📧 邮件扫描完成：🔴 1 封重要；⚪ 0 封普通；📂 1 封归档",
+            }
+
+        service.set_email_scan_executor(scan_emails)
+        await service._handle_job_trigger(reminder_id=31)
+
+        event = await queue.get()
+        queue.task_done()
+        assert event["event_type"] == "email_scan_trigger"
+        assert "1 封重要" in event["summary"]
+
+    asyncio.run(_run())
+
+
+def test_legacy_email_heartbeat_skips_when_email_skill_not_enabled() -> None:
+    async def _run() -> None:
+        queue = EventQueue()
+        store = StubStore(
+            [
+                {
+                    "id": 32,
+                    "title": "📧 定时邮件推送（Heartbeat）",
+                    "description": "每 30 分钟扫描一次邮箱",
+                    "schedule_type": "cron",
+                    "schedule_value": "*/30 * * * *",
+                    "status": "active",
+                    "channel": "all",
+                    "heartbeat_config": [
+                        {
+                            "check_interval": 1800,
+                            "timeout": 300,
+                            "alert_threshold": 1,
+                            "action": "push_email_summary",
+                        }
+                    ],
+                }
+            ]
+        )
+        service = SchedulerService(
+            structured_store=store,
+            event_queue=queue,
+        )
+
+        await service._handle_job_trigger(reminder_id=32)
+        assert queue.empty() is True
+
+    asyncio.run(_run())
+
+
+def test_legacy_email_heartbeat_gracefully_handles_connection_failure() -> None:
+    async def _run() -> None:
+        queue = EventQueue()
+        store = StubStore(
+            [
+                {
+                    "id": 33,
+                    "title": "📧 定时邮件推送（Heartbeat）",
+                    "description": "每 30 分钟扫描一次邮箱",
+                    "schedule_type": "cron",
+                    "schedule_value": "*/30 * * * *",
+                    "status": "active",
+                    "channel": "all",
+                    "heartbeat_config": [
+                        {
+                            "check_interval": 1800,
+                            "timeout": 300,
+                            "alert_threshold": 1,
+                            "action": "push_email_summary",
+                        }
+                    ],
+                }
+            ]
+        )
+        service = SchedulerService(
+            structured_store=store,
+            event_queue=queue,
+        )
+
+        async def scan_emails() -> dict:
+            return {
+                "accounts_scanned": 0,
+                "accounts_failed": 1,
+                "new_emails": 0,
+                "items": [{"status": "failed", "error": "imap auth failed"}],
+                "summary": "📧 邮件扫描完成：🔴 0 封重要；⚪ 0 封普通；📂 0 封归档",
+            }
+
+        service.set_email_scan_executor(scan_emails)
+        await service._handle_job_trigger(reminder_id=33)
+        assert queue.empty() is True
+
+    asyncio.run(_run())
+
+
+def test_legacy_email_heartbeat_skips_push_when_no_important_mail() -> None:
+    async def _run() -> None:
+        queue = EventQueue()
+        store = StubStore(
+            [
+                {
+                    "id": 34,
+                    "title": "📧 定时邮件推送（Heartbeat）",
+                    "description": "每 30 分钟扫描一次邮箱",
+                    "schedule_type": "cron",
+                    "schedule_value": "*/30 * * * *",
+                    "status": "active",
+                    "channel": "all",
+                    "heartbeat_config": [
+                        {
+                            "check_interval": 1800,
+                            "timeout": 300,
+                            "alert_threshold": 1,
+                            "action": "push_email_summary",
+                        }
+                    ],
+                }
+            ]
+        )
+        service = SchedulerService(
+            structured_store=store,
+            event_queue=queue,
+        )
+
+        async def scan_emails() -> dict:
+            return {
+                "accounts_scanned": 1,
+                "accounts_failed": 0,
+                "new_emails": 2,
+                "items": [
+                    {"category": "archive", "subject": "归档通知"},
+                    {"category": "low_priority", "subject": "普通通知"},
+                ],
+                "summary": "📧 邮件扫描完成：🔴 0 封重要；⚪ 1 封普通；📂 1 封归档",
+            }
+
+        service.set_email_scan_executor(scan_emails)
+        await service._handle_job_trigger(reminder_id=34)
+        assert queue.empty() is True
+
+    asyncio.run(_run())
+
+
+def test_legacy_email_heartbeat_passes_heartbeat_trigger_context_when_supported() -> None:
+    async def _run() -> None:
+        queue = EventQueue()
+        store = StubStore(
+            [
+                {
+                    "id": 35,
+                    "title": "📧 定时邮件推送（Heartbeat）",
+                    "description": "每 30 分钟扫描一次邮箱",
+                    "schedule_type": "cron",
+                    "schedule_value": "*/30 * * * *",
+                    "status": "active",
+                    "channel": "all",
+                    "heartbeat_config": [
+                        {
+                            "check_interval": 1800,
+                            "timeout": 300,
+                            "alert_threshold": 1,
+                            "action": "push_email_summary",
+                        }
+                    ],
+                }
+            ]
+        )
+        service = SchedulerService(
+            structured_store=store,
+            event_queue=queue,
+        )
+        seen_params: list[dict] = []
+
+        async def scan_emails(*, params=None) -> dict:
+            seen_params.append(dict(params or {}))
+            return {
+                "accounts_scanned": 1,
+                "accounts_failed": 0,
+                "new_emails": 1,
+                "items": [
+                    {"category": "important", "subject": "重要通知"},
+                ],
+                "summary": "📧 邮件扫描完成：🔴 1 封重要；⚪ 0 封普通；📂 0 封归档",
+            }
+
+        service.set_email_scan_executor(scan_emails)
+        await service._handle_job_trigger(reminder_id=35)
+
+        assert seen_params == [{"triggered_by": "heartbeat"}]
+
+    asyncio.run(_run())
+
+
 def test_scheduler_registers_interval_job_for_heartbeat() -> None:
     async def _run() -> None:
         service = SchedulerService(

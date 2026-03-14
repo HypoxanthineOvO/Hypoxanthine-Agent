@@ -26,10 +26,17 @@ const apiBase = import.meta.env.VITE_API_BASE ?? "";
 
 const { mode, theme, toggleMode } = useThemeMode();
 const activeView = ref<"chat" | "dashboard" | "config" | "memory">("chat");
+const navItems = [
+  { key: "chat", icon: "💬", label: "Chat" },
+  { key: "dashboard", icon: "📊", label: "Dashboard" },
+  { key: "config", icon: "⚙️", label: "Config" },
+  { key: "memory", icon: "🧠", label: "Memory" },
+] as const;
 
 const viewportWidth = ref(window.innerWidth);
 const sidebarCollapsed = ref(false);
 
+const isMobile = computed(() => viewportWidth.value < 768);
 const isDesktop = computed(() => viewportWidth.value >= 1024);
 const isTablet = computed(
   () => viewportWidth.value >= 768 && viewportWidth.value < 1024,
@@ -162,6 +169,20 @@ onUnmounted(() => {
                 :api-base="apiBase"
               />
             </section>
+
+            <nav v-if="isMobile" class="mobile-nav" data-testid="mobile-nav">
+              <button
+                v-for="item in navItems"
+                :key="item.key"
+                type="button"
+                class="mobile-nav-item"
+                :data-active="item.key === activeView"
+                @click="onSelectView(item.key)"
+              >
+                <span class="mobile-nav-icon">{{ item.icon }}</span>
+                <span class="mobile-nav-label">{{ item.label }}</span>
+              </button>
+            </nav>
           </main>
         </div>
       </n-message-provider>
@@ -188,7 +209,7 @@ onUnmounted(() => {
 .app-main {
   display: grid;
   gap: 0.85rem;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto 1fr auto;
   min-height: 0;
   min-width: 0;
 }
@@ -224,6 +245,44 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
+.mobile-nav {
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border: 1px solid var(--panel-edge);
+  border-radius: 1rem;
+  display: grid;
+  gap: 0.45rem;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding: 0.45rem;
+}
+
+.mobile-nav-item {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 0.8rem;
+  color: var(--text);
+  cursor: pointer;
+  display: grid;
+  gap: 0.2rem;
+  justify-items: center;
+  padding: 0.45rem 0.35rem;
+}
+
+.mobile-nav-item[data-active="true"] {
+  background: color-mix(in srgb, var(--brand) 20%, transparent);
+  border-color: color-mix(in srgb, var(--brand) 55%, var(--panel-edge));
+}
+
+.mobile-nav-icon {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.mobile-nav-label {
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
 @media (max-width: 1023px) {
   .app-shell {
     grid-template-columns: 76px 1fr;
@@ -239,6 +298,7 @@ onUnmounted(() => {
   .app-shell {
     grid-template-columns: 1fr;
     padding: 0.5rem;
+    height: 100dvh;
   }
 
   .main-header {
@@ -248,6 +308,10 @@ onUnmounted(() => {
 
   .header-title {
     font-size: 0.86rem;
+  }
+
+  .main-body {
+    overflow: auto;
   }
 }
 </style>

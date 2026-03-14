@@ -5,6 +5,7 @@ from typing import Literal
 
 import structlog
 
+from hypo_agent.core.config_loader import expand_runtime_placeholders
 from hypo_agent.models import DirectoryWhitelist, WhitelistRule
 
 logger = structlog.get_logger()
@@ -159,7 +160,9 @@ class PermissionManager:
         return None
 
     def _resolve_path(self, path: str | Path) -> Path:
-        return Path(path).expanduser().resolve(strict=False)
+        raw_path = str(path)
+        expanded_path = expand_runtime_placeholders(raw_path)
+        return Path(expanded_path).expanduser().resolve(strict=False)
 
     def _is_within(self, resolved_path: Path, rule_path: Path) -> bool:
         try:

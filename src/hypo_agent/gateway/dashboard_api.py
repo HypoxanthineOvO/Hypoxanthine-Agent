@@ -11,6 +11,7 @@ from fastapi import APIRouter, Query, Request
 
 from hypo_agent.core.skill_manager import SkillManager
 from hypo_agent.gateway.auth import require_api_token
+from hypo_agent.gateway.ws import connection_manager
 
 router = APIRouter(prefix="/api")
 
@@ -45,6 +46,58 @@ def _quantile(values: list[float], q: float) -> float:
     return float(values[lower] * (1.0 - weight) + values[upper] * weight)
 
 
+def _configured_skill_enabled_map(path: Path | str) -> dict[str, bool]:
+    payload = SkillManager._load_skills_payload(path)
+    configured_skills = payload.get("skills", {})
+    if not isinstance(configured_skills, dict):
+        return {}
+
+    enabled_map: dict[str, bool] = {}
+    for name, cfg in configured_skills.items():
+        enabled_map[str(name)] = isinstance(cfg, dict) and bool(cfg.get("enabled", False))
+    return enabled_map
+
+
+def _external_skill_runtime(request: Request, name: str) -> dict[str, Any] | None:
+    if name == "qq":
+        return {
+            "description": "QQ channel integration",
+            "tools": [],
+            "active": getattr(request.app.state, "qq_channel_service", None) is not None,
+        }
+    return None
+
+
+def _disabled_qq_status() -> dict[str, Any]:
+    return {
+        "status": "disabled",
+        "bot_qq": "",
+        "napcat_ws_url": "",
+        "connected_at": None,
+        "last_message_at": None,
+        "messages_received": 0,
+        "messages_sent": 0,
+    }
+
+
+def _disabled_email_status() -> dict[str, Any]:
+    return {
+        "status": "disabled",
+        "accounts": [],
+        "last_scan_at": None,
+        "next_scan_at": None,
+        "emails_processed": 0,
+    }
+
+
+def _disabled_heartbeat_status() -> dict[str, Any]:
+    return {
+        "status": "disabled",
+        "last_heartbeat_at": None,
+        "active_tasks": 0,
+    }
+
+
 @router.get("/dashboard/status")
 async def dashboard_status(request: Request) -> dict[str, Any]:
     require_api_token(request)
@@ -67,6 +120,58 @@ async def dashboard_status(request: Request) -> dict[str, Any]:
         "session_count": len(sessions),
         "kill_switch": kill_switch,
         "bwrap_available": bool(shutil.which("bwrap")),
+    }
+
+
+@router.get("/channels/status")
+async def channels_status(request: Request) -> dict[str, Any]:
+    require_api_token(request)
+
+    config_dir = Path(getattr(request.app.state, "config_dir", Path("config")))
+    configured_enabled = _configured_skill_enabled_map(config_dir / "skills.yaml")
+    deps = request.app.state.deps
+    skill_manager = getattr(deps, "skill_manager", None)
+    scheduler = getattr(request.app.state, "scheduler", None)
+
+    qq_enabled = configured_enabled.get("qq", False)
+    email_enabled = configured_enabled.get("email_scanner", False)
+
+    qq_status = _disabled_qq_status()
+    if qq_enabled:
+        qq_client = getattr(request.app.state, "qq_ws_client", None)
+        qq_channel_service = getattr(request.app.state, "qq_channel_service", None)
+        if qq_client is not None and hasattr(qq_client, "get_status"):
+            qq_status = qq_client.get_status()
+        else:
+            qq_status = {
+                "status": "disconnected",
+                "bot_qq": str(getattr(qq_channel_service, "bot_qq", "") or ""),
+                "napcat_ws_url": str(getattr(request.app.state, "qq_ws_url", "") or ""),
+                "connected_at": None,
+                "last_message_at": None,
+                "messages_received": 0,
+                "messages_sent": 0,
+            }
+
+    email_status = _disabled_email_status()
+    email_skill = None
+    if skill_manager is not None and hasattr(skill_manager, "_skills"):
+        email_skill = skill_manager._skills.get("email_scanner")
+    if email_enabled and email_skill is not None and hasattr(email_skill, "get_status"):
+        email_status = email_skill.get_status(scheduler=scheduler)
+
+    heartbeat_status = _disabled_heartbeat_status()
+    heartbeat_service = getattr(request.app.state, "heartbeat_service", None)
+    if heartbeat_service is not None and hasattr(heartbeat_service, "get_status"):
+        heartbeat_status = heartbeat_service.get_status(scheduler=scheduler)
+
+    return {
+        "channels": {
+            "webui": connection_manager.get_status(),
+            "qq": qq_status,
+            "email": email_status,
+            "heartbeat": heartbeat_status,
+        }
     }
 
 
@@ -188,17 +293,20 @@ async def dashboard_skills(request: Request) -> dict[str, Any]:
 
     config_dir = Path(getattr(request.app.state, "config_dir", Path("config")))
     known_skills = SkillManager.known_skill_names(config_dir / "skills.yaml")
+    configured_enabled = _configured_skill_enabled_map(config_dir / "skills.yaml")
 
     rows: list[dict[str, Any]] = []
     if skill_manager is None:
         for name in sorted(known_skills):
+            enabled = configured_enabled.get(name, False)
+            external = _external_skill_runtime(request, name)
             rows.append(
                 {
                     "name": name,
-                    "description": "",
-                    "enabled": False,
-                    "status": "disabled",
-                    "tools": [],
+                    "description": external.get("description", "") if external else "",
+                    "enabled": enabled,
+                    "status": "healthy" if enabled and external and external.get("active") else "disabled",
+                    "tools": external.get("tools", []) if external else [],
                 }
             )
         return {"global_kill_switch": global_kill, "data": rows}
@@ -211,21 +319,24 @@ async def dashboard_skills(request: Request) -> dict[str, Any]:
 
     for name in sorted(set(runtime_items.keys()) | known_skills):
         item = runtime_items.get(name)
+        external = _external_skill_runtime(request, name)
+        enabled = configured_enabled.get(name)
         if item is None:
             rows.append(
                 {
                     "name": name,
-                    "description": "",
-                    "enabled": False,
-                    "status": "disabled",
-                    "tools": [],
+                    "description": external.get("description", "") if external else "",
+                    "enabled": bool(enabled),
+                    "status": "healthy" if enabled and external and external.get("active") else "disabled",
+                    "tools": external.get("tools", []) if external else [],
                 }
             )
             continue
 
         tools = [tool for tool in item.get("tools", []) if isinstance(tool, str) and tool]
         status = "healthy"
-        enabled = bool(item.get("enabled", True))
+        if enabled is None:
+            enabled = bool(item.get("enabled", True))
         if not enabled:
             status = "disabled"
         elif global_kill:
@@ -240,7 +351,7 @@ async def dashboard_skills(request: Request) -> dict[str, Any]:
         rows.append(
             {
                 "name": name,
-                "description": item.get("description"),
+                "description": item.get("description") or (external.get("description") if external else ""),
                 "enabled": enabled,
                 "status": status,
                 "tools": tools,

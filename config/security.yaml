@@ -1,26 +1,25 @@
 auth_token: dev-token-change-me
 directory_whitelist:
   rules:
-    - path: ./docs
-      permissions: [read]
-    - path: ./config
-      permissions: [read]
-    - path: ./memory
-      permissions: [read]
-    - path: ./src
-      permissions: [read]
-    - path: ./tests
-      permissions: [read]
-    - path: ./memory/sessions
-      permissions: [read, write]
-    - path: ./memory/knowledge
-      permissions: [read, write]
-    - path: ./memory/email_attachments
-      permissions: [read, write]
-    - path: ./logs
-      permissions: [read, write]
-    - path: ./workflows
-      permissions: [read, execute]
+    - path: ${HYPO_AGENT_ROOT}
+      permissions:
+        - read
+    - path: ${HYPO_AGENT_ROOT}/config
+      permissions:
+        - read
+        - write
+    - path: ${HYPO_AGENT_ROOT}/memory
+      permissions:
+        - read
+        - write
+    - path: ${HYPO_AGENT_ROOT}/logs
+      permissions:
+        - read
+        - write
+    - path: ${HYPO_AGENT_ROOT}/workflows
+      permissions:
+        - read
+        - execute
   default_policy: readonly
   blocked_paths:
     - /etc/passwd
@@ -34,7 +33,7 @@ directory_whitelist:
     - ~/.python_history
     - /root
 circuit_breaker:
-  tool_level_max_failures: 3
-  session_level_max_failures: 5
+  tool_level_max_failures: 5
+  session_level_max_failures: 10
   cooldown_seconds: 120
   global_kill_switch: false

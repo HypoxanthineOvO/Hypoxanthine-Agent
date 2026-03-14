@@ -11,7 +11,12 @@ from pptx import Presentation
 import structlog
 import yaml
 
-from hypo_agent.core.config_loader import get_memory_dir
+from hypo_agent.core.config_loader import get_agent_root, get_memory_dir
+from hypo_agent.core.directory_index import (
+    build_directory_tree,
+    load_directory_index_payload,
+    merge_directory_descriptions,
+)
 from hypo_agent.models import SkillOutput
 from hypo_agent.security.permission_manager import PermissionManager
 from hypo_agent.skills.base import BaseSkill
@@ -369,6 +374,8 @@ class FileSystemSkill(BaseSkill):
         if isinstance(old_tree, dict):
             new_tree = self._merge_descriptions(new_tree, old_tree)
         directories[root_key] = new_tree
+        payload["agent_root"] = str(get_agent_root())
+        payload["generated_at"] = datetime.now(UTC).isoformat()
         payload["last_scan"] = datetime.now(UTC).isoformat()
 
         self.index_file.parent.mkdir(parents=True, exist_ok=True)
@@ -484,13 +491,7 @@ class FileSystemSkill(BaseSkill):
         return content[: self.MAX_FILE_CHARS] + "\n[truncated]", True
 
     def _load_directory_index(self) -> dict[str, Any]:
-        if not self.index_file.exists():
-            return {"directories": {}}
-
-        raw = yaml.safe_load(self.index_file.read_text(encoding="utf-8")) or {}
-        if not isinstance(raw, dict):
-            return {"directories": {}}
-        return raw
+        return load_directory_index_payload(self.index_file)
 
     def _iter_entries(self, root: Path, max_depth: int) -> Iterable[tuple[Path, int]]:
         queue: list[tuple[Path, int]] = [(root, 0)]
@@ -544,48 +545,14 @@ class FileSystemSkill(BaseSkill):
             del pixmap
 
     def _scan_tree(self, root: Path, depth: int) -> dict[str, Any]:
-        files = [item for item in root.iterdir() if item.is_file()]
-        children = [item for item in root.iterdir() if item.is_dir()]
-
-        node: dict[str, Any] = {
-            "description": "",
-            "file_count": len(files),
-            "children": {},
-        }
-
-        if depth <= 1:
-            return node
-
-        for child_dir in sorted(children, key=lambda item: item.name):
-            node["children"][child_dir.name] = self._scan_tree(child_dir, depth - 1)
-        return node
+        return build_directory_tree(root, agent_root=get_agent_root(), max_depth=depth)
 
     def _merge_descriptions(
         self,
         fresh: dict[str, Any],
         existing: dict[str, Any],
     ) -> dict[str, Any]:
-        existing_description = existing.get("description")
-        if isinstance(existing_description, str) and existing_description and not fresh.get(
-            "description"
-        ):
-            fresh["description"] = existing_description
-
-        fresh_children = fresh.get("children")
-        existing_children = existing.get("children")
-        if not isinstance(fresh_children, dict) or not isinstance(existing_children, dict):
-            return fresh
-
-        for child_name, child_node in fresh_children.items():
-            if child_name not in existing_children:
-                continue
-            existing_child = existing_children[child_name]
-            if isinstance(child_node, dict) and isinstance(existing_child, dict):
-                fresh_children[child_name] = self._merge_descriptions(
-                    child_node,
-                    existing_child,
-                )
-        return fresh
+        return merge_directory_descriptions(fresh, existing)
 
     def _find_node(
         self,

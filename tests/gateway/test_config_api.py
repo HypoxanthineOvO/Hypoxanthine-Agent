@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
 from fastapi.testclient import TestClient
 
 from hypo_agent.gateway.app import AppDeps, create_app
@@ -35,7 +36,10 @@ models:
         """
 default_timeout_seconds: 30
 skills:
-  tmux:
+  reminder:
+    enabled: true
+    auto_confirm: true
+  qq:
     enabled: true
 """.strip(),
         encoding="utf-8",
@@ -56,13 +60,79 @@ name: Hypo
 aliases: []
 personality: []
 speaking_style: {}
+system_prompt_template: |
+  你是 Hypo。
 """.strip(),
         encoding="utf-8",
     )
     (config_dir / "tasks.yaml").write_text(
         """
-scheduler:
-  tick_interval_seconds: 10
+heartbeat:
+  enabled: true
+  interval_minutes: 30
+  prompt_template: |
+    hello
+email_scan:
+  enabled: true
+  interval_minutes: 60
+email_store:
+  enabled: true
+  max_entries: 5000
+  retention_days: 90
+  warmup_hours: 168
+""".strip(),
+        encoding="utf-8",
+    )
+    (config_dir / "narration.yaml").write_text(
+        """
+enabled: true
+model: DeepseekV3_2
+tool_levels:
+  heavy:
+    - scan_emails
+  medium:
+    - write_file
+debounce_seconds: 2
+max_narration_length: 80
+""".strip(),
+        encoding="utf-8",
+    )
+    (config_dir / "email_rules.yaml").write_text(
+        """
+user_preferences: |
+  只看重要邮件
+rules:
+  - name: keep-important
+    subject_contains: 重要
+    category: important
+    skip_llm: true
+""".strip(),
+        encoding="utf-8",
+    )
+    (config_dir / "secrets.yaml").write_text(
+        """
+providers:
+  Hiapi:
+    api_base: https://hiapi.example/v1
+    api_key: sk-live-123
+services:
+  email:
+    accounts:
+      - name: 主邮箱
+        host: imap.example.com
+        port: 993
+        username: user@example.com
+        password: email-password
+        folder: INBOX
+        use_ssl: true
+  qq:
+    napcat_ws_url: ws://127.0.0.1:3009/onebot/v11/ws
+    napcat_ws_token: ws-secret
+    napcat_http_url: http://127.0.0.1:3000
+    napcat_http_token: http-secret
+    bot_qq: "123456789"
+    allowed_users:
+      - "10001"
 """.strip(),
         encoding="utf-8",
     )
@@ -82,104 +152,186 @@ def _build_client(tmp_path: Path) -> TestClient:
     return TestClient(app)
 
 
-def test_config_files_require_token(tmp_path) -> None:
+def test_config_list_requires_token(tmp_path: Path) -> None:
     client = _build_client(tmp_path)
     with client:
-        response = client.get("/api/config/files")
+        response = client.get("/api/config")
     assert response.status_code == 401
 
 
-def test_config_files_and_get_endpoints(tmp_path) -> None:
+def test_config_list_returns_metadata_and_secrets_get_is_masked(tmp_path: Path) -> None:
     client = _build_client(tmp_path)
     with client:
-        files_response = client.get("/api/config/files", params={"token": "test-token"})
-        get_response = client.get(
-            "/api/config/models.yaml",
+        list_response = client.get("/api/config", params={"token": "test-token"})
+        get_response = client.get("/api/config/secrets.yaml", params={"token": "test-token"})
+
+    assert list_response.status_code == 200
+    payload = list_response.json()
+    assert [item["filename"] for item in payload] == [
+        "persona.yaml",
+        "skills.yaml",
+        "tasks.yaml",
+        "narration.yaml",
+        "email_rules.yaml",
+        "secrets.yaml",
+        "security.yaml",
+    ]
+    assert payload[0]["label"] == "人设配置"
+    assert payload[5]["icon"] == "🔐"
+
+    assert get_response.status_code == 200
+    body = get_response.json()
+    assert body["filename"] == "secrets.yaml"
+    assert "masked_fields" in body
+    assert "providers.Hiapi.api_key" in body["masked_fields"]
+    assert "services.email.accounts[0].password" in body["masked_fields"]
+    assert "services.qq.napcat_ws_token" in body["masked_fields"]
+    assert body["data"]["providers"]["Hiapi"]["api_key"] == "••••••••"
+    assert body["data"]["services"]["qq"]["napcat_http_token"] == "••••••••"
+    assert "sk-live-123" not in body["content"]
+    assert "http-secret" not in body["content"]
+
+
+def test_config_put_preserves_masked_secret_values_and_updates_new_values(tmp_path: Path) -> None:
+    client = _build_client(tmp_path)
+    payload = {
+        "providers": {
+            "Hiapi": {
+                "api_base": "https://hiapi.example/v2",
+                "api_key": "••••••••",
+            }
+        },
+        "services": {
+            "email": {
+                "accounts": [
+                    {
+                        "name": "主邮箱",
+                        "host": "imap.example.com",
+                        "port": 993,
+                        "username": "user@example.com",
+                        "password": "••••••••",
+                        "folder": "INBOX",
+                        "use_ssl": True,
+                    }
+                ]
+            },
+            "qq": {
+                "napcat_ws_url": "ws://127.0.0.1:3009/onebot/v11/ws",
+                "napcat_ws_token": "updated-ws-token",
+                "napcat_http_url": "http://127.0.0.1:3000",
+                "napcat_http_token": "••••••••",
+                "bot_qq": "123456789",
+                "allowed_users": ["10001"],
+            },
+        },
+    }
+
+    with client:
+        response = client.put(
+            "/api/config/secrets.yaml",
             params={"token": "test-token"},
+            json={"data": payload},
         )
 
-    assert files_response.status_code == 200
-    files_payload = files_response.json()
-    names = [item["filename"] for item in files_payload["files"]]
-    assert names == [
-        "models.yaml",
-        "skills.yaml",
-        "security.yaml",
-        "persona.yaml",
-        "tasks.yaml",
-    ]
-    assert get_response.status_code == 200
-    assert "default_model" in get_response.json()["content"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reloaded"] is True
+    assert body["data"]["services"]["qq"]["napcat_ws_token"] == "••••••••"
+
+    stored = yaml.safe_load((tmp_path / "config" / "secrets.yaml").read_text(encoding="utf-8"))
+    assert stored["providers"]["Hiapi"]["api_base"] == "https://hiapi.example/v2"
+    assert stored["providers"]["Hiapi"]["api_key"] == "sk-live-123"
+    assert stored["services"]["email"]["accounts"][0]["password"] == "email-password"
+    assert stored["services"]["qq"]["napcat_http_token"] == "http-secret"
+    assert stored["services"]["qq"]["napcat_ws_token"] == "updated-ws-token"
 
 
-def test_config_put_validates_yaml_before_write(tmp_path) -> None:
+def test_config_put_validates_yaml_before_write(tmp_path: Path) -> None:
     client = _build_client(tmp_path)
     with client:
         response = client.put(
-            "/api/config/models.yaml",
+            "/api/config/tasks.yaml",
             params={"token": "test-token"},
-            json={"content": "default_model: [bad"},
+            json={"content": "heartbeat: [bad"},
         )
     assert response.status_code == 422
 
 
-def test_config_put_updates_content_when_valid(tmp_path) -> None:
-    client = _build_client(tmp_path)
-    with client:
-        response = client.put(
-            "/api/config/skills.yaml",
-            params={"token": "test-token"},
-            json={
-                "content": """
-default_timeout_seconds: 45
-skills:
-  tmux:
-    enabled: false
-""".strip()
-            },
-        )
-        read_back = client.get(
-            "/api/config/skills.yaml",
-            params={"token": "test-token"},
-        )
-
-    assert response.status_code == 200
-    assert response.json()["reloaded"] is True
-    assert read_back.status_code == 200
-    assert "default_timeout_seconds: 45" in read_back.json()["content"]
-
-
-def test_config_api_validates_new_tasks_fields(tmp_path) -> None:
+def test_config_put_validates_new_tasks_fields(tmp_path: Path) -> None:
     client = _build_client(tmp_path)
     with client:
         invalid = client.put(
             "/api/config/tasks.yaml",
             params={"token": "test-token"},
             json={
-                "content": """
-heartbeat:
-  enabled: true
-  interval_minutes: 0
-email_scan:
-  enabled: true
-  interval_minutes: 5
-""".strip()
+                "data": {
+                    "heartbeat": {
+                        "enabled": True,
+                        "interval_minutes": 0,
+                        "prompt_template": "bad",
+                    },
+                    "email_scan": {
+                        "enabled": True,
+                        "interval_minutes": 5,
+                    },
+                    "email_store": {
+                        "enabled": True,
+                        "max_entries": 5000,
+                        "retention_days": 90,
+                        "warmup_hours": 168,
+                    },
+                }
             },
         )
         valid = client.put(
             "/api/config/tasks.yaml",
             params={"token": "test-token"},
             json={
-                "content": """
-heartbeat:
-  enabled: true
-  interval_minutes: 1
-email_scan:
-  enabled: true
-  interval_minutes: 5
-""".strip()
+                "data": {
+                    "heartbeat": {
+                        "enabled": True,
+                        "interval_minutes": 1,
+                        "prompt_template": "good",
+                    },
+                    "email_scan": {
+                        "enabled": True,
+                        "interval_minutes": 5,
+                    },
+                    "email_store": {
+                        "enabled": True,
+                        "max_entries": 5000,
+                        "retention_days": 90,
+                        "warmup_hours": 168,
+                    },
+                }
             },
         )
 
     assert invalid.status_code == 422
     assert valid.status_code == 200
+
+
+def test_config_put_accepts_valid_narration_yaml(tmp_path: Path) -> None:
+    client = _build_client(tmp_path)
+    with client:
+        response = client.put(
+            "/api/config/narration.yaml",
+            params={"token": "test-token"},
+            json={
+                "content": """
+enabled: true
+model: lightweight
+tool_levels:
+  heavy:
+    - scan_emails
+    - run_command
+  medium:
+    - write_file
+debounce_seconds: 2
+max_narration_length: 80
+""".strip()
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["reloaded"] is True

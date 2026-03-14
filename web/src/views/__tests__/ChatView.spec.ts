@@ -70,20 +70,18 @@ describe("ChatView", () => {
       },
     });
     await flushUi();
-    expect(wrapper.text()).toContain("Connecting");
+    await flushUi();
+    await flushUi();
+    expect(wrapper.text()).toContain("Connect");
     expect(MockWebSocket.instances).toHaveLength(1);
   });
 
-  it("loads sessions and message history on mount", async () => {
+  it("loads main session history on mount without fetching session list", async () => {
     const fetchMock = vi.fn();
     fetchMock
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => [{ session_id: "s1" }],
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => [{ text: "old", sender: "user", session_id: "s1" }],
+        json: async () => [{ text: "old", sender: "user", session_id: "main" }],
       })
       .mockResolvedValueOnce({
         ok: true,
@@ -104,29 +102,23 @@ describe("ChatView", () => {
     await flushUi();
 
     expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/api/sessions/main/messages?token=test-token",
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/api/sessions/main/tool-invocations?token=test-token",
+    );
+    expect(fetchMock).not.toHaveBeenCalledWith(
       "http://localhost:8000/api/sessions?token=test-token",
-    );
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:8000/api/sessions/s1/messages?token=test-token",
-    );
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:8000/api/sessions/s1/tool-invocations?token=test-token",
     );
     expect(wrapper.text()).toContain("old");
   });
 
-  it("infers apiBase from wsUrl and renders session sidebar on mount", async () => {
+  it("uses explicit session id prop for debug loading", async () => {
     const fetchMock = vi.fn();
     fetchMock
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => [{ session_id: "session-100", message_count: 1 }],
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => [
-          { text: "restored", sender: "user", session_id: "session-100" },
-        ],
+        json: async () => [{ text: "restored", sender: "user", session_id: "debug-session" }],
       })
       .mockResolvedValueOnce({
         ok: true,
@@ -134,106 +126,83 @@ describe("ChatView", () => {
       });
     vi.stubGlobal("fetch", fetchMock);
 
-    const wrapper = mount(ChatView, {
-      props: {
-        wsUrl: "ws://127.0.0.1:8000/ws",
-        token: "test-token",
-      },
-    });
-
-    await flushUi();
-    await flushUi();
-    await flushUi();
-
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:8000/api/sessions?token=test-token",
-    );
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:8000/api/sessions/session-100/messages?token=test-token",
-    );
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:8000/api/sessions/session-100/tool-invocations?token=test-token",
-    );
-    expect(
-      wrapper.find('[data-testid="session-item-session-100"]').exists(),
-    ).toBe(true);
-    expect(wrapper.text()).toContain("restored");
-  });
-
-  it("switches session and renders the selected history", async () => {
-    const fetchMock = vi.fn();
-    fetchMock
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => [{ session_id: "s1" }, { session_id: "s2" }],
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => [{ text: "one", sender: "user", session_id: "s1" }],
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => [],
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => [{ text: "two", sender: "user", session_id: "s2" }],
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => [],
-      });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const wrapper = mount(ChatView, {
+    mount(ChatView, {
       props: {
         wsUrl: "ws://localhost:8000/ws",
         token: "test-token",
         apiBase: "http://localhost:8000/api",
+        sessionId: "debug-session",
       },
     });
 
     await flushUi();
     await flushUi();
     await flushUi();
-    expect(wrapper.text()).toContain("one");
-
-    await wrapper.get('[data-testid="session-item-s2"]').trigger("click");
-    await flushUi();
-    await flushUi();
-    await flushUi();
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:8000/api/sessions/s2/messages?token=test-token",
+      "http://localhost:8000/api/sessions/debug-session/messages?token=test-token",
     );
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:8000/api/sessions/s2/tool-invocations?token=test-token",
+      "http://localhost:8000/api/sessions/debug-session/tool-invocations?token=test-token",
     );
-    expect(wrapper.text()).toContain("two");
   });
 
-  it("loads merged message and tool invocation history on session switch", async () => {
+  it("hides the session sidebar and new-session controls", async () => {
+    const wrapper = mount(ChatView, {
+      props: {
+        wsUrl: "ws://localhost:8000/ws",
+        token: "test-token",
+      },
+    });
+
+    await flushUi();
+    expect(wrapper.find('[data-testid="new-session-button"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="session-sidebar"]').exists()).toBe(false);
+  });
+
+  it("renders welcome shortcuts when the main session is empty", async () => {
+    const wrapper = mount(ChatView, {
+      props: {
+        wsUrl: "ws://localhost:8000/ws",
+        token: "test-token",
+      },
+    });
+
+    await flushUi();
+    await flushUi();
+
+    expect(wrapper.text()).toContain("Hi，我是 Hypo-Agent");
+    expect(wrapper.text()).toContain("帮我看看邮件");
+    expect(wrapper.text()).toContain("今天有什么任务");
+  });
+
+  it("fills the composer when a welcome shortcut is clicked", async () => {
+    const wrapper = mount(ChatView, {
+      props: {
+        wsUrl: "ws://localhost:8000/ws",
+        token: "test-token",
+      },
+    });
+
+    await flushUi();
+    await flushUi();
+
+    await wrapper.get('[data-testid="quick-prompt-0"]').trigger("click");
+
+    const textarea = wrapper.get("textarea");
+    expect((textarea.element as HTMLTextAreaElement).value).toBe("📧 帮我看看邮件");
+  });
+
+  it("loads merged message and tool invocation history for the active session", async () => {
     const fetchMock = vi.fn();
     fetchMock
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => [{ session_id: "s1" }, { session_id: "s2" }],
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => [{ text: "hello", sender: "user", session_id: "s1" }],
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => [],
-      })
       .mockResolvedValueOnce({
         ok: true,
         json: async () => [
           {
             text: "请读取本系统的cpuinfo",
             sender: "user",
-            session_id: "s2",
+            session_id: "main",
             timestamp: "2026-03-06T10:00:00+00:00",
           },
         ],
@@ -243,7 +212,7 @@ describe("ChatView", () => {
         json: async () => [
           {
             id: 42,
-            session_id: "s2",
+            session_id: "main",
             tool_name: "run_command",
             skill_name: "tmux",
             params_json: "{\"command\":\"echo hi\"}",
@@ -270,17 +239,7 @@ describe("ChatView", () => {
     await flushUi();
     await flushUi();
     await flushUi();
-    await wrapper.get('[data-testid="session-item-s2"]').trigger("click");
-    await flushUi();
-    await flushUi();
-    await flushUi();
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:8000/api/sessions/s2/messages?token=test-token",
-    );
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:8000/api/sessions/s2/tool-invocations?token=test-token",
-    );
     expect(wrapper.text()).toContain("请读取本系统的cpuinfo");
 
     const vmMessages = (wrapper.vm as { messages?: unknown }).messages;
@@ -296,22 +255,44 @@ describe("ChatView", () => {
       (item) => item.text === "请读取本系统的cpuinfo",
     );
     expect(userIndex).toBeGreaterThan(-1);
-    expect(startIndex).toBeGreaterThan(-1);
     expect(startIndex).toBeGreaterThan(userIndex);
     expect(resultIndex).toBeGreaterThan(startIndex);
+  });
 
-    const start = timeline[startIndex] ?? {};
-    const result = timeline[resultIndex] ?? {};
-    expect(start.tool_call_id).toBe("inv_42");
-    expect(start.arguments).toEqual({ command: "echo hi" });
-    expect(result.tool_call_id).toBe("inv_42");
-    expect(result.result).toBe("{\"stdout\":\"ok\"}");
-    expect(result.metadata).toEqual({});
-    expect(result.compressed_meta).toEqual({
-      cache_id: "cache-1",
-      original_chars: 1000,
-      compressed_chars: 120,
+  it("renders a QQ source badge for synced qq messages", async () => {
+    const fetchMock = vi.fn();
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            text: "你好，来自 QQ",
+            sender: "user",
+            session_id: "main",
+            channel: "qq",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [],
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(ChatView, {
+      props: {
+        wsUrl: "ws://localhost:8000/ws",
+        token: "test-token",
+        apiBase: "http://localhost:8000/api",
+      },
     });
+
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    expect(wrapper.text()).toContain("via QQ");
+    expect(wrapper.text()).toContain("你好，来自 QQ");
   });
 
   it("hides runtime tool events when marked ephemeral", async () => {
@@ -321,6 +302,8 @@ describe("ChatView", () => {
         token: "test-token",
       },
     });
+    await flushUi();
+    await flushUi();
     await flushUi();
 
     const ws = MockWebSocket.instances[0];
@@ -334,7 +317,7 @@ describe("ChatView", () => {
         tool_name: "run_code",
         tool_call_id: "call_1",
         arguments: { code: "print(1)" },
-        session_id: "session-1",
+        session_id: "main",
       }),
     );
     ws.emitMessage(
@@ -346,7 +329,7 @@ describe("ChatView", () => {
         result: { stdout: "1" },
         error_info: "",
         metadata: { ephemeral: true },
-        session_id: "session-1",
+        session_id: "main",
       }),
     );
     ws.emitMessage(
@@ -354,14 +337,14 @@ describe("ChatView", () => {
         type: "assistant_chunk",
         text: "现在是 10:00",
         sender: "assistant",
-        session_id: "session-1",
+        session_id: "main",
       }),
     );
     ws.emitMessage(
       JSON.stringify({
         type: "assistant_done",
         sender: "assistant",
-        session_id: "session-1",
+        session_id: "main",
       }),
     );
 
@@ -370,5 +353,138 @@ describe("ChatView", () => {
 
     expect(wrapper.text()).toContain("现在是 10:00");
     expect(wrapper.text()).not.toContain("🔧 执行了 run_code");
+  });
+
+  it("hides legacy tool status messages from the chat timeline", async () => {
+    const wrapper = mount(ChatView, {
+      props: {
+        wsUrl: "ws://localhost:8000/ws",
+        token: "test-token",
+      },
+    });
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+    ws.emitMessage(
+      JSON.stringify({
+        text: "⏳ 正在处理...",
+        sender: "assistant",
+        session_id: "main",
+        message_tag: "tool_status",
+        metadata: { ephemeral: true },
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "narration",
+        text: "我先去翻一下收件箱。",
+        session_id: "main",
+      }),
+    );
+
+    await flushUi();
+    await flushUi();
+
+    expect(wrapper.text()).toContain("我先去翻一下收件箱。");
+    expect(wrapper.text()).not.toContain("⏳ 正在处理...");
+  });
+
+  it("renders narration messages with a weaker dedicated style and keeps them after reply", async () => {
+    const wrapper = mount(ChatView, {
+      props: {
+        wsUrl: "ws://localhost:8000/ws",
+        token: "test-token",
+      },
+    });
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+    ws.emitMessage(
+      JSON.stringify({
+        type: "narration",
+        text: "我去翻一下你的收件箱。",
+        session_id: "main",
+        timestamp: "2026-03-13T10:00:00+08:00",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "assistant_chunk",
+        text: "已经帮你扫了一遍。",
+        sender: "assistant",
+        session_id: "main",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "assistant_done",
+        sender: "assistant",
+        session_id: "main",
+      }),
+    );
+
+    await flushUi();
+    await flushUi();
+
+    const narration = wrapper.get('[data-message-tag="narration"]');
+    expect(narration.text()).toContain("我去翻一下你的收件箱。");
+    expect(narration.find(".bubble-avatar").exists()).toBe(false);
+    expect(wrapper.text()).toContain("已经帮你扫了一遍。");
+  });
+
+  it("inserts a time separator when visible messages are more than five minutes apart", async () => {
+    const fetchMock = vi.fn();
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            text: "第一条",
+            sender: "user",
+            session_id: "main",
+            timestamp: "2026-03-14T10:00:00Z",
+          },
+          {
+            text: "第二条",
+            sender: "assistant",
+            session_id: "main",
+            timestamp: "2026-03-14T10:06:00Z",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [],
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(ChatView, {
+      props: {
+        wsUrl: "ws://localhost:8000/ws",
+        token: "test-token",
+        apiBase: "http://localhost:8000/api",
+      },
+    });
+
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    const separators = wrapper.findAll('[data-testid="message-time-separator"]');
+    expect(separators.length).toBeGreaterThanOrEqual(2);
+    expect(wrapper.text()).toContain("第一条");
+    expect(wrapper.text()).toContain("第二条");
   });
 });

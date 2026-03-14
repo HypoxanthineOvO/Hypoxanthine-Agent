@@ -1,4 +1,7 @@
+from pathlib import Path
+
 from pydantic import ValidationError
+import yaml
 
 from hypo_agent.core.logging import configure_logging
 from hypo_agent.models import (
@@ -221,6 +224,7 @@ def test_secrets_config_accepts_services_qq():
             "services": {
                 "qq": {
                     "napcat_ws_url": "ws://localhost:3001",
+                    "napcat_ws_token": "ws-token-xyz",
                     "napcat_http_url": "http://localhost:3000",
                     "napcat_http_token": "token-abc",
                     "bot_qq": "123456789",
@@ -233,7 +237,22 @@ def test_secrets_config_accepts_services_qq():
     assert config.services is not None
     assert config.services.qq is not None
     assert config.services.qq.bot_qq == "123456789"
+    assert config.services.qq.napcat_ws_token == "ws-token-xyz"
     assert config.services.qq.napcat_http_token == "token-abc"
+    assert config.services.qq.allowed_users == ["10001"]
+
+
+def test_secrets_yaml_example_includes_qq_template() -> None:
+    example_path = Path(__file__).resolve().parents[1] / "config" / "secrets.yaml.example"
+    payload = yaml.safe_load(example_path.read_text(encoding="utf-8"))
+
+    config = SecretsConfig.model_validate(payload)
+
+    assert config.services is not None
+    assert config.services.qq is not None
+    assert config.services.qq.napcat_ws_url == "ws://127.0.0.1:3009/onebot/v11/ws"
+    assert config.services.qq.napcat_ws_token == ""
+    assert config.services.qq.bot_qq == "123456789"
     assert config.services.qq.allowed_users == ["10001"]
 
 

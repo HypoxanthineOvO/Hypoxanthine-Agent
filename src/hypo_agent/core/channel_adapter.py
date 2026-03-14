@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from hypo_agent.core.rich_response import RichResponse
+from hypo_agent.core.time_utils import utc_isoformat, utc_now
 
 
 class ChannelAdapter(Protocol):
@@ -39,6 +40,7 @@ class WebUIAdapter:
                 "text": event.text,
                 "sender": sender,
                 "session_id": session_id,
+                "timestamp": utc_isoformat(utc_now()),
             }
 
         if event_type == "assistant_done":
@@ -46,6 +48,7 @@ class WebUIAdapter:
                 "type": "assistant_done",
                 "sender": sender,
                 "session_id": session_id,
+                "timestamp": utc_isoformat(utc_now()),
             }
 
         tool_call = event.tool_calls[0] if event.tool_calls else {}

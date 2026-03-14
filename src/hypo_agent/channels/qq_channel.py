@@ -7,6 +7,7 @@ import structlog
 
 from hypo_agent.channels.onebot11 import parse_onebot_private_message
 from hypo_agent.channels.qq_adapter import QQAdapter
+from hypo_agent.core.time_utils import unix_seconds_to_utc_datetime, utc_now
 from hypo_agent.models import Message
 
 logger = structlog.get_logger("hypo_agent.channels.qq")
@@ -21,6 +22,7 @@ class QQChannelService:
         bot_qq: str,
         allowed_users: set[str],
         default_session_id: str = "main",
+        on_message_sent: Any | None = None,
     ) -> None:
         self.adapter = QQAdapter(
             napcat_http_url=napcat_http_url,
@@ -29,6 +31,7 @@ class QQChannelService:
         self.bot_qq = str(bot_qq).strip()
         self.allowed_users = {item.strip() for item in allowed_users if item and item.strip()}
         self.default_session_id = default_session_id
+        self._on_message_sent = on_message_sent
 
     def is_allowed_user(self, user_id: str) -> bool:
         return user_id in self.allowed_users
@@ -49,7 +52,16 @@ class QQChannelService:
             session_id=self.default_session_id,
             channel="qq",
             sender_id=user_id,
+            timestamp=self._resolve_inbound_timestamp(parsed.raw_event),
         )
+        callback = getattr(pipeline, "on_proactive_message", None)
+        if callable(callback):
+            try:
+                result = callback(inbound, exclude_channels={"qq"})
+            except TypeError:
+                result = callback(inbound)
+            if inspect.isawaitable(result):
+                await result
         await self._run_pipeline_for_user(user_id=user_id, inbound=inbound, pipeline=pipeline)
         return True
 
@@ -64,6 +76,8 @@ class QQChannelService:
             target_users = sorted(self.allowed_users)
         for user_id in target_users:
             await self.adapter.send_message(user_id=user_id, message=message)
+            if callable(self._on_message_sent):
+                self._on_message_sent()
 
     async def _run_pipeline_for_user(self, *, user_id: str, inbound: Message, pipeline: Any) -> None:
         async def emit(event: dict[str, Any]) -> None:
@@ -80,6 +94,8 @@ class QQChannelService:
                         sender_id=user_id,
                     ),
                 )
+                if callable(self._on_message_sent):
+                    self._on_message_sent()
 
         enqueue_user_message = getattr(pipeline, "enqueue_user_message", None)
         if callable(enqueue_user_message):
@@ -90,3 +106,8 @@ class QQChannelService:
 
         async for event in pipeline.stream_reply(inbound):
             await emit(event)
+
+    def _resolve_inbound_timestamp(self, payload: dict[str, Any]) -> object:
+        if payload.get("timestamp"):
+            return payload.get("timestamp")
+        return unix_seconds_to_utc_datetime(payload.get("time")) or utc_now()

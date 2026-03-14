@@ -102,10 +102,14 @@ def test_qq_whitelist_allows_user_and_sends_reply() -> None:
         assert len(pipeline.inbounds) == 1
         assert pipeline.inbounds[0].channel == "qq"
         assert pipeline.inbounds[0].sender_id == "10001"
-        assert len(broadcasted) == 1
-        assert broadcasted[0].text == "收到"
+        assert len(broadcasted) == 2
+        assert broadcasted[0].text == "你好"
+        assert broadcasted[0].sender == "user"
         assert broadcasted[0].channel == "qq"
         assert broadcasted[0].sender_id == "10001"
+        assert broadcasted[1].text == "收到"
+        assert broadcasted[1].channel == "qq"
+        assert broadcasted[1].sender_id == "10001"
 
     asyncio.run(_run())
 

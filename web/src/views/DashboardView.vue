@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { NCard, NDataTable, NGrid, NGridItem, NTag } from "naive-ui";
+import { NButton, NCard, NDataTable, NGrid, NGridItem, NTag } from "naive-ui";
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import VChart from "vue-echarts";
 import { use } from "echarts/core";
@@ -69,6 +69,55 @@ interface SkillRow {
   tools: string[];
 }
 
+interface WebUiChannelStatus {
+  status: string;
+  active_connections: number;
+  last_message_at: string | null;
+}
+
+interface QQChannelStatus {
+  status: string;
+  bot_qq: string;
+  napcat_ws_url: string;
+  connected_at: string | null;
+  last_message_at: string | null;
+  messages_received: number;
+  messages_sent: number;
+}
+
+interface EmailChannelStatus {
+  status: string;
+  accounts: string[];
+  last_scan_at: string | null;
+  next_scan_at: string | null;
+  emails_processed: number;
+}
+
+interface HeartbeatChannelStatus {
+  status: string;
+  last_heartbeat_at: string | null;
+  active_tasks: number;
+}
+
+interface ChannelsStatusResponse {
+  channels: {
+    webui: WebUiChannelStatus;
+    qq: QQChannelStatus;
+    email: EmailChannelStatus;
+    heartbeat: HeartbeatChannelStatus;
+  };
+}
+
+interface ChannelCard {
+  key: string;
+  icon: string;
+  name: string;
+  status: string;
+  statusLabel: string;
+  tagType: "success" | "warning" | "error" | "default";
+  details: string[];
+}
+
 const normalizedApiBase = computed(() => {
   const explicitBase = props.apiBase.trim();
   if (explicitBase) {
@@ -89,7 +138,9 @@ const tokenStats = ref<TokenStatsRow[]>([]);
 const latencyStats = ref<LatencyStatsRow[]>([]);
 const recentTasks = ref<RecentTaskRow[]>([]);
 const skills = ref<SkillRow[]>([]);
+const channels = ref<ChannelsStatusResponse["channels"] | null>(null);
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
+let channelRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let themeObserver: MutationObserver | null = null;
 
 const themeMode = ref<"light" | "dark">(
@@ -113,6 +164,130 @@ const normalizeDateKey = (raw: string): string => {
   const match = value.match(/^(\d{4}-\d{2}-\d{2})/);
   return match?.[1] ?? value;
 };
+
+const formatRelativeTime = (raw: string | null | undefined): string => {
+  if (!raw) {
+    return "暂无";
+  }
+  const timestamp = new Date(raw).getTime();
+  if (Number.isNaN(timestamp)) {
+    return raw;
+  }
+  const diff = timestamp - Date.now();
+  const absDiff = Math.abs(diff);
+  if (absDiff < 60_000) {
+    return "刚刚";
+  }
+  const minutes = Math.round(absDiff / 60_000);
+  if (minutes < 60) {
+    return diff >= 0 ? `${minutes} 分钟后` : `${minutes} 分钟前`;
+  }
+  const hours = Math.round(absDiff / 3_600_000);
+  if (hours < 24) {
+    return diff >= 0 ? `${hours} 小时后` : `${hours} 小时前`;
+  }
+  const days = Math.round(absDiff / 86_400_000);
+  return diff >= 0 ? `${days} 天后` : `${days} 天前`;
+};
+
+const channelTagType = (
+  status: string,
+): "success" | "warning" | "error" | "default" => {
+  if (["connected", "running", "enabled"].includes(status)) {
+    return "success";
+  }
+  if (["connecting", "scanning"].includes(status)) {
+    return "warning";
+  }
+  if (["disconnected", "error", "open"].includes(status)) {
+    return "error";
+  }
+  return "default";
+};
+
+const channelStatusLabel = (status: string): string => {
+  switch (status) {
+    case "connected":
+      return "🟢 已连接";
+    case "running":
+      return "🟢 运行中";
+    case "enabled":
+      return "🟢 已启用";
+    case "connecting":
+      return "🟡 连接中";
+    case "scanning":
+      return "🟡 扫描中";
+    case "disconnected":
+      return "🔴 未连接";
+    case "error":
+      return "🔴 异常";
+    case "disabled":
+      return "⚪ 已禁用";
+    default:
+      return status || "未知";
+  }
+};
+
+const channelCards = computed<ChannelCard[]>(() => {
+  const payload = channels.value;
+  if (!payload) {
+    return [];
+  }
+  return [
+    {
+      key: "webui",
+      icon: "🖥️",
+      name: "WebUI",
+      status: payload.webui.status,
+      statusLabel: channelStatusLabel(payload.webui.status),
+      tagType: channelTagType(payload.webui.status),
+      details: [
+        `活跃连接 ${payload.webui.active_connections}`,
+        `最后消息 ${formatRelativeTime(payload.webui.last_message_at)}`,
+      ],
+    },
+    {
+      key: "qq",
+      icon: "🐧",
+      name: "QQ",
+      status: payload.qq.status,
+      statusLabel: channelStatusLabel(payload.qq.status),
+      tagType: channelTagType(payload.qq.status),
+      details: [
+        `Bot QQ ${payload.qq.bot_qq || "未配置"}`,
+        payload.qq.napcat_ws_url || "未配置 WS URL",
+        `收 ${payload.qq.messages_received} / 发 ${payload.qq.messages_sent}`,
+        `最后消息 ${formatRelativeTime(payload.qq.last_message_at)}`,
+      ],
+    },
+    {
+      key: "email",
+      icon: "📧",
+      name: "邮箱",
+      status: payload.email.status,
+      statusLabel: channelStatusLabel(payload.email.status),
+      tagType: channelTagType(payload.email.status),
+      details: [
+        payload.email.accounts.join(", ") || "未配置邮箱账号",
+        `上次扫描 ${formatRelativeTime(payload.email.last_scan_at)}`,
+        `下次扫描 ${formatRelativeTime(payload.email.next_scan_at)}`,
+        `累计处理 ${payload.email.emails_processed} 封`,
+      ],
+    },
+    {
+      key: "heartbeat",
+      icon: "💓",
+      name: "心跳",
+      status: payload.heartbeat.status,
+      statusLabel: channelStatusLabel(payload.heartbeat.status),
+      tagType: channelTagType(payload.heartbeat.status),
+      details: [
+        `最后心跳 ${formatRelativeTime(payload.heartbeat.last_heartbeat_at)}`,
+        `active tasks ${payload.heartbeat.active_tasks}`,
+      ],
+    },
+  ];
+});
 
 const tokenChartOption = computed(() => {
   const dates = [...new Set(tokenStats.value.map((item) => normalizeDateKey(item.date)))].sort((a, b) =>
@@ -265,6 +440,11 @@ const loadDashboard = async (): Promise<void> => {
   }
 };
 
+const loadChannels = async (): Promise<void> => {
+  const response = await apiGetJson<ChannelsStatusResponse>(withToken("channels/status"));
+  channels.value = response.channels;
+};
+
 onMounted(() => {
   syncThemeMode();
   themeObserver = new MutationObserver(() => {
@@ -275,9 +455,13 @@ onMounted(() => {
     attributeFilter: ["data-theme"],
   });
   void loadDashboard();
+  void loadChannels();
   refreshTimer = setInterval(() => {
     void loadDashboard();
   }, 5000);
+  channelRefreshTimer = setInterval(() => {
+    void loadChannels();
+  }, 30000);
 });
 
 onUnmounted(() => {
@@ -287,12 +471,49 @@ onUnmounted(() => {
   if (refreshTimer !== null) {
     clearInterval(refreshTimer);
   }
+  if (channelRefreshTimer !== null) {
+    clearInterval(channelRefreshTimer);
+  }
 });
 </script>
 
 <template>
   <section class="dashboard-view">
     <n-grid :x-gap="12" :y-gap="12" cols="1 s:1 m:2 l:2" responsive="screen">
+      <n-grid-item span="2 m:2 l:2">
+        <n-card :bordered="false">
+          <template #header>
+            <div class="card-header-row">
+              <span>渠道状态</span>
+              <n-button size="small" tertiary @click="void loadChannels()">刷新渠道状态</n-button>
+            </div>
+          </template>
+          <div class="channel-grid">
+            <n-card
+              v-for="channel in channelCards"
+              :key="channel.key"
+              size="small"
+              embedded
+              class="channel-card"
+            >
+              <div class="channel-card-header">
+                <div class="channel-title-wrap">
+                  <span class="channel-icon">{{ channel.icon }}</span>
+                  <div>
+                    <p class="channel-name">{{ channel.name }}</p>
+                    <p class="channel-status-text">{{ channel.statusLabel }}</p>
+                  </div>
+                </div>
+                <n-tag :type="channel.tagType">{{ channel.statusLabel }}</n-tag>
+              </div>
+              <ul class="channel-details">
+                <li v-for="detail in channel.details" :key="detail">{{ detail }}</li>
+              </ul>
+            </n-card>
+          </div>
+        </n-card>
+      </n-grid-item>
+
       <n-grid-item>
         <n-card title="系统状态" :bordered="false">
           <div v-if="status" class="status-grid">
@@ -367,6 +588,62 @@ onUnmounted(() => {
   overflow: auto;
 }
 
+.card-header-row {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.channel-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.channel-card {
+  min-height: 168px;
+}
+
+.channel-card-header {
+  align-items: flex-start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.channel-title-wrap {
+  align-items: flex-start;
+  display: flex;
+  gap: 10px;
+}
+
+.channel-icon {
+  font-size: 20px;
+  line-height: 1;
+}
+
+.channel-name {
+  font-size: 15px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.channel-status-text {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 4px 0 0;
+}
+
+.channel-details {
+  color: var(--muted);
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+}
+
 .status-grid {
   display: grid;
   gap: 10px;
@@ -413,6 +690,10 @@ onUnmounted(() => {
 
 @media (max-width: 767px) {
   .status-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .channel-grid {
     grid-template-columns: 1fr;
   }
 }

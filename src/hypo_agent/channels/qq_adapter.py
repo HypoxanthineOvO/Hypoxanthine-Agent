@@ -115,10 +115,13 @@ class QQAdapter:
     def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         url = self._build_request_url(path)
+        headers = {"Content-Type": "application/json"}
+        if self.napcat_http_token is not None:
+            headers["Authorization"] = f"Bearer {self.napcat_http_token}"
         req = urllib_request.Request(
             url=url,
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         try:

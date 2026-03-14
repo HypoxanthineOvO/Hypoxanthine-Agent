@@ -18,6 +18,14 @@ class StubStore:
 class StubScheduler:
     def __init__(self, running: bool = True) -> None:
         self.is_running = running
+        self._has_heartbeat_job = running
+        self._active_jobs = 1 if running else 0
+
+    def has_job_id(self, job_id: str) -> bool:
+        return job_id == "heartbeat" and self._has_heartbeat_job
+
+    def get_active_job_count(self) -> int:
+        return self._active_jobs
 
 
 class StubRouter:
@@ -108,3 +116,60 @@ def test_heartbeat_register_event_source_invokes_callbacks() -> None:
         assert set(called) == {"async_source", "sync_source"}
 
     asyncio.run(_run())
+
+
+def test_heartbeat_uses_custom_prompt_template_with_runtime_values() -> None:
+    async def _run() -> None:
+        queue = EventQueue()
+        store = StubStore(overdue_rows=[{"id": 1, "title": "过期提醒"}])
+        router = StubRouter({"should_push": False, "summary": "一切正常"})
+        scheduler = StubScheduler(running=True)
+        service = HeartbeatService(
+            structured_store=store,
+            model_router=router,
+            message_queue=queue,
+            scheduler=scheduler,
+            default_session_id="main",
+            decision_prompt_template=(
+                "你是自定义心跳判定器。\n"
+                "checks=${checks}\n"
+                "overdue=${overdue}\n"
+                "sources=${sources}"
+            ),
+        )
+
+        await service.run()
+
+        assert len(router.prompts) == 1
+        assert "你是自定义心跳判定器。" in router.prompts[0]
+        assert "${checks}" not in router.prompts[0]
+        assert '"db_ok": true' in router.prompts[0]
+        assert '"title": "过期提醒"' in router.prompts[0]
+
+    asyncio.run(_run())
+
+
+def test_heartbeat_status_reports_running_when_scheduler_has_active_jobs() -> None:
+    service = HeartbeatService(
+        structured_store=StubStore(overdue_rows=[]),
+        model_router=None,
+        message_queue=EventQueue(),
+        scheduler=StubScheduler(running=True),
+        default_session_id="main",
+    )
+    service.last_heartbeat_at = "2026-03-13T12:00:00+00:00"
+
+    class SchedulerWithoutDedicatedHeartbeatJob:
+        is_running = True
+
+        def has_job_id(self, job_id: str) -> bool:
+            del job_id
+            return False
+
+        def get_active_job_count(self) -> int:
+            return 2
+
+    status = service.get_status(scheduler=SchedulerWithoutDedicatedHeartbeatJob())
+
+    assert status["status"] == "running"
+    assert status["active_tasks"] == 2

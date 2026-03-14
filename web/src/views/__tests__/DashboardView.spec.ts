@@ -40,6 +40,36 @@ describe("DashboardView", () => {
   const mockDashboardFetch = (
     tokenRows: Array<Record<string, unknown>>,
     latencyRows: Array<Record<string, unknown>>,
+    channels = {
+      channels: {
+        webui: {
+          status: "connected",
+          active_connections: 1,
+          last_message_at: new Date().toISOString(),
+        },
+        qq: {
+          status: "connected",
+          bot_qq: "3637647606",
+          napcat_ws_url: "ws://127.0.0.1:3009/onebot/v11/ws",
+          connected_at: new Date().toISOString(),
+          last_message_at: new Date().toISOString(),
+          messages_received: 42,
+          messages_sent: 38,
+        },
+        email: {
+          status: "enabled",
+          accounts: ["hyx021203@shanghaitech.edu.cn"],
+          last_scan_at: new Date().toISOString(),
+          next_scan_at: new Date().toISOString(),
+          emails_processed: 15,
+        },
+        heartbeat: {
+          status: "running",
+          last_heartbeat_at: new Date().toISOString(),
+          active_tasks: 2,
+        },
+      },
+    },
   ): ReturnType<typeof vi.fn> => {
     const fetchMock = vi.fn();
     fetchMock
@@ -70,6 +100,10 @@ describe("DashboardView", () => {
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({ data: [{ name: "tmux", status: "healthy", tools: ["run_command"] }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => channels,
       });
     vi.stubGlobal("fetch", fetchMock);
     return fetchMock;
@@ -97,8 +131,38 @@ describe("DashboardView", () => {
         ([url]) => String(url) === "http://localhost:8000/api/dashboard/status?token=test-token",
       ),
     ).toBe(true);
+    expect(
+      fetchMock.mock.calls.some(
+        ([url]) => String(url) === "http://localhost:8000/api/channels/status?token=test-token",
+      ),
+    ).toBe(true);
     expect(wrapper.text()).toContain("0:00:12");
     expect(wrapper.text()).toContain("tmux");
+  });
+
+  it("renders channel status cards with qq and email details", async () => {
+    mockDashboardFetch(
+      [{ date: "2026-03-06", model: "Gemini3Pro", total_tokens: 100 }],
+      [{ date: "2026-03-06", p50_ms: 50, p95_ms: 80, p99_ms: 120 }],
+    );
+
+    const wrapper = mount(DashboardView, {
+      props: {
+        token: "test-token",
+        apiBase: "http://localhost:8000/api",
+      },
+    });
+
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    expect(wrapper.text()).toContain("渠道状态");
+    expect(wrapper.text()).toContain("QQ");
+    expect(wrapper.text()).toContain("3637647606");
+    expect(wrapper.text()).toContain("收 42 / 发 38");
+    expect(wrapper.text()).toContain("hyx021203@shanghaitech.edu.cn");
+    expect(wrapper.text()).toContain("active tasks");
   });
 
   it("builds token chart with date xAxis and model-based series", async () => {

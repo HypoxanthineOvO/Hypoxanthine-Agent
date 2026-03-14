@@ -28,3 +28,6 @@ memory/knowledge/*
 !memory/sessions/
 memory/sessions/*
 !memory/sessions/.gitkeep
+
+# Scripts
+.playwright-cli/

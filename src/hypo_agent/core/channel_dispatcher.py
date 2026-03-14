@@ -30,13 +30,22 @@ class ChannelDispatcher:
         message: Message,
         *,
         exclude_channels: set[str] | None = None,
+        exclude_client_ids: set[str] | None = None,
     ) -> None:
         excluded = {str(item).strip() for item in (exclude_channels or set()) if str(item).strip()}
         for channel, sink in list(self._sinks.items()):
             if channel in excluded:
                 continue
             try:
-                result = sink(message)
+                if channel == "webui" and exclude_client_ids:
+                    try:
+                        result = sink(message, exclude_client_ids=exclude_client_ids)
+                    except TypeError as exc:
+                        if "exclude_client_ids" not in str(exc):
+                            raise
+                        result = sink(message)
+                else:
+                    result = sink(message)
                 if inspect.isawaitable(result):
                     await result
             except Exception:

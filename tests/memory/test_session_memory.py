@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import json
+from pathlib import Path
 
 from hypo_agent.memory.session import SessionMemory
 from hypo_agent.models import Message
@@ -32,6 +34,8 @@ def test_session_memory_appends_and_restores_jsonl(tmp_path) -> None:
     assert [m.sender for m in messages] == ["user", "assistant"]
     assert messages[0].text == "你好"
     assert messages[1].text == "在的"
+    assert messages[0].timestamp == datetime(2026, 3, 3, 10, 0, tzinfo=UTC)
+    assert messages[1].timestamp == datetime(2026, 3, 3, 10, 1, tzinfo=UTC)
 
 
 def test_session_memory_keeps_only_recent_n_in_buffer(tmp_path) -> None:
@@ -108,3 +112,58 @@ def test_session_memory_clear_session_removes_buffer_and_jsonl(tmp_path) -> None
     assert store.get_recent_messages("to-clear") == []
     assert store.get_messages("to-clear") == []
     assert store.list_sessions() == []
+
+
+def test_session_memory_migrates_legacy_session_file_to_main(tmp_path: Path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    legacy_message = Message(
+        text="legacy",
+        sender="user",
+        session_id="session-1",
+        timestamp=datetime(2026, 3, 3, 10, 0, tzinfo=UTC),
+    )
+    legacy_file = sessions_dir / "session-1.jsonl"
+    legacy_file.write_text(f"{legacy_message.model_dump_json()}\n", encoding="utf-8")
+
+    store = SessionMemory(sessions_dir=sessions_dir, buffer_limit=20)
+
+    assert legacy_file.exists()
+    main_messages = store.get_messages("main")
+    assert (sessions_dir / "main.jsonl").exists()
+    assert [message.text for message in main_messages] == ["legacy"]
+    assert [message.session_id for message in main_messages] == ["main"]
+
+
+def test_session_memory_writes_timestamp_to_jsonl(tmp_path: Path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    store = SessionMemory(sessions_dir=sessions_dir, buffer_limit=20)
+    store.append(
+        Message(
+            text="hello",
+            sender="user",
+            session_id="main",
+            timestamp=datetime(2026, 3, 3, 10, 0, tzinfo=UTC),
+        )
+    )
+
+    raw = (sessions_dir / "main.jsonl").read_text(encoding="utf-8").strip()
+    payload = json.loads(raw)
+
+    assert payload["timestamp"] == "2026-03-03T10:00:00Z"
+
+
+def test_session_memory_keeps_legacy_messages_without_timestamp_empty(tmp_path: Path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    (sessions_dir / "main.jsonl").write_text(
+        '{"text":"legacy","sender":"user","session_id":"main","channel":"webui","metadata":{}}\n',
+        encoding="utf-8",
+    )
+
+    store = SessionMemory(sessions_dir=sessions_dir, buffer_limit=20)
+    messages = store.get_messages("main")
+
+    assert len(messages) == 1
+    assert messages[0].text == "legacy"
+    assert messages[0].timestamp is None

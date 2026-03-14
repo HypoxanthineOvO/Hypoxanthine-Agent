@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from collections import deque
+import json
 from pathlib import Path
 from urllib.parse import quote
 
 from hypo_agent.core.config_loader import get_memory_dir
+from hypo_agent.core.time_utils import utc_isoformat, utc_now
 from hypo_agent.models import Message
+
+DEFAULT_SESSION_ID = "main"
+LEGACY_SESSION_ID = "session-1"
 
 
 class SessionMemory:
@@ -22,11 +27,14 @@ class SessionMemory:
 
         self.sessions_dir = Path(sessions_dir)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_main_session()
         self.buffer_limit = buffer_limit
         self._buffers: dict[str, deque[Message]] = {}
         self._loaded: set[str] = set()
 
     def append(self, message: Message) -> None:
+        if message.timestamp is None:
+            message = message.model_copy(update={"timestamp": utc_now()})
         self._ensure_loaded(message.session_id)
         self._append_to_buffer(message)
 
@@ -76,15 +84,15 @@ class SessionMemory:
             sessions.append(
                 {
                     "session_id": first.session_id,
-                    "created_at": first.timestamp.isoformat(),
-                    "updated_at": last.timestamp.isoformat(),
+                    "created_at": utc_isoformat(first.timestamp),
+                    "updated_at": utc_isoformat(last.timestamp),
                     "message_count": len(messages),
                 }
             )
 
         sessions.sort(
             key=lambda item: (
-                str(item["updated_at"]),
+                str(item["updated_at"] or ""),
                 str(item["session_id"]),
             ),
             reverse=True,
@@ -107,7 +115,7 @@ class SessionMemory:
                 stripped = line.strip()
                 if not stripped:
                     continue
-                buffer.append(Message.model_validate_json(stripped))
+                buffer.append(self._parse_session_message(stripped))
 
         self._buffers[session_id] = buffer
         self._loaded.add(session_id)
@@ -122,10 +130,44 @@ class SessionMemory:
             stripped = line.strip()
             if not stripped:
                 continue
-            messages.append(Message.model_validate_json(stripped))
+            messages.append(self._parse_session_message(stripped))
         return messages
+
+    def _migrate_legacy_main_session(self) -> None:
+        main_file = self._session_file(DEFAULT_SESSION_ID)
+        legacy_file = self._session_file(LEGACY_SESSION_ID)
+        if main_file.exists() or not legacy_file.exists():
+            return
+
+        lines = legacy_file.read_text(encoding="utf-8").splitlines()
+        migrated_lines: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                message = self._parse_session_message(stripped)
+            except Exception:
+                main_file.write_text(legacy_file.read_text(encoding="utf-8"), encoding="utf-8")
+                return
+            migrated_lines.append(
+                message.model_copy(update={"session_id": DEFAULT_SESSION_ID}).model_dump_json()
+            )
+
+        content = "\n".join(migrated_lines)
+        if content:
+            content += "\n"
+        main_file.write_text(content, encoding="utf-8")
 
     def _session_file(self, session_id: str) -> Path:
         # Encode session IDs to avoid path traversal and unsafe file names.
         safe_session = quote(session_id, safe="")
         return self.sessions_dir / f"{safe_session}.jsonl"
+
+    def _parse_session_message(self, line: str) -> Message:
+        payload = json.loads(line)
+        if not isinstance(payload, dict):
+            raise ValueError("session message must be an object")
+        if "timestamp" not in payload:
+            payload["timestamp"] = None
+        return Message.model_validate(payload)

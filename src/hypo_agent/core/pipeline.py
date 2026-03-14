@@ -5,12 +5,14 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 import inspect
 import json
+from time import perf_counter
 from typing import Any, Protocol
 
 import structlog
 
 from hypo_agent.core.channel_adapter import ChannelAdapter, WebUIAdapter
 from hypo_agent.core.rich_response import RichResponse
+from hypo_agent.core.time_utils import utc_isoformat, utc_now
 from hypo_agent.memory.session import SessionMemory
 from hypo_agent.models import Message, SkillOutput
 
@@ -142,6 +144,9 @@ class ChatPipeline:
         channel_adapter: ChannelAdapter | None = None,
         event_queue: Any | None = None,
         on_proactive_message: Any | None = None,
+        persona_system_prompt: str = "",
+        narration_observer: Any | None = None,
+        on_narration: Any | None = None,
     ) -> None:
         self.router = router
         self.chat_model = chat_model
@@ -156,6 +161,9 @@ class ChatPipeline:
         self.channel_adapter = channel_adapter or WebUIAdapter()
         self.event_queue = event_queue
         self.on_proactive_message = on_proactive_message
+        self.persona_system_prompt = persona_system_prompt.strip()
+        self.narration_observer = narration_observer
+        self.on_narration = on_narration
         self._event_consumer_task: asyncio.Task[None] | None = None
 
     async def start_event_consumer(self) -> None:
@@ -202,7 +210,11 @@ class ChatPipeline:
                 channel=inbound.channel,
                 sender_id=inbound.sender_id,
             )
-            await self._broadcast_message(outbound, origin_channel=inbound.channel)
+            await self._broadcast_message(
+                outbound,
+                origin_channel=inbound.channel,
+                origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
+            )
             return outbound
 
         if self._kill_switch_active():
@@ -215,7 +227,11 @@ class ChatPipeline:
                 sender_id=inbound.sender_id,
             )
             self.session_memory.append(outbound)
-            await self._broadcast_message(outbound, origin_channel=inbound.channel)
+            await self._broadcast_message(
+                outbound,
+                origin_channel=inbound.channel,
+                origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
+            )
             return outbound
 
         llm_messages = self._build_llm_messages(inbound)
@@ -229,298 +245,379 @@ class ChatPipeline:
             sender_id=inbound.sender_id,
         )
         self.session_memory.append(outbound)
-        await self._broadcast_message(outbound, origin_channel=inbound.channel)
+        await self._broadcast_message(
+            outbound,
+            origin_channel=inbound.channel,
+            origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
+        )
         return outbound
 
     async def stream_reply(self, inbound: Message) -> AsyncIterator[dict[str, Any]]:
-        slash_result = await self._try_handle_slash(inbound)
-        if slash_result is not None:
-            yield self._format_event(
-                event_type="assistant_chunk",
-                response=RichResponse(text=slash_result),
-                session_id=inbound.session_id,
-            )
-            outbound = Message(
-                text=slash_result,
-                sender="assistant",
-                session_id=inbound.session_id,
-                channel=inbound.channel,
-                sender_id=inbound.sender_id,
-            )
-            await self._broadcast_message(outbound, origin_channel=inbound.channel)
-            yield self._format_event(
-                event_type="assistant_done",
-                response=RichResponse(),
-                session_id=inbound.session_id,
-            )
-            return
-
-        if self._kill_switch_active():
-            self.session_memory.append(inbound)
-            kill_text = KILL_SWITCH_MESSAGE
-            yield self._format_event(
-                event_type="assistant_chunk",
-                response=RichResponse(text=kill_text),
-                session_id=inbound.session_id,
-            )
-            outbound = Message(
-                text=kill_text,
-                sender="assistant",
-                session_id=inbound.session_id,
-                channel=inbound.channel,
-                sender_id=inbound.sender_id,
-            )
-            self.session_memory.append(outbound)
-            await self._broadcast_message(outbound, origin_channel=inbound.channel)
-            yield self._format_event(
-                event_type="assistant_done",
-                response=RichResponse(),
-                session_id=inbound.session_id,
-            )
-            return
-
-        use_tools = (
-            self.skill_manager is not None
-            and self.max_react_rounds > 0
-        )
-        llm_messages = self._build_llm_messages(inbound, use_tools=use_tools)
-        self.session_memory.append(inbound)
-
-        full_text = ""
-        killed = False
-        session_fused = False
-        last_compressed_meta: dict[str, Any] | None = None
-
-        if use_tools:
-            assert self.skill_manager is not None
-            tools = self.skill_manager.get_tools_schema()
-            react_messages: list[dict[str, Any]] = list(llm_messages)
-            reached_round_limit = True
-            logger.info(
-                "react.start",
-                session_id=inbound.session_id,
-                max_rounds=self.max_react_rounds,
-            )
-
-            for round_num in range(1, self.max_react_rounds + 1):
-                if self._kill_switch_active():
-                    full_text = KILL_SWITCH_MESSAGE
-                    yield self._format_event(
-                        event_type="assistant_chunk",
-                        response=RichResponse(text=full_text),
-                        session_id=inbound.session_id,
-                    )
-                    killed = True
-                    break
-                decision = await self.router.call_with_tools(
-                    self.chat_model,
-                    react_messages,
-                    tools=tools,
+        narration_tasks: set[asyncio.Task[None]] = set()
+        try:
+            slash_result = await self._try_handle_slash(inbound)
+            if slash_result is not None:
+                yield self._format_event(
+                    event_type="assistant_chunk",
+                    response=RichResponse(text=slash_result),
                     session_id=inbound.session_id,
                 )
-                tool_calls = decision.get("tool_calls") or []
+                outbound = Message(
+                    text=slash_result,
+                    sender="assistant",
+                    session_id=inbound.session_id,
+                    channel=inbound.channel,
+                    sender_id=inbound.sender_id,
+                )
+                await self._broadcast_message(
+                    outbound,
+                    origin_channel=inbound.channel,
+                    origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
+                )
+                yield self._format_event(
+                    event_type="assistant_done",
+                    response=RichResponse(),
+                    session_id=inbound.session_id,
+                )
+                return
+
+            if self._kill_switch_active():
+                self.session_memory.append(inbound)
+                kill_text = KILL_SWITCH_MESSAGE
+                yield self._format_event(
+                    event_type="assistant_chunk",
+                    response=RichResponse(text=kill_text),
+                    session_id=inbound.session_id,
+                )
+                outbound = Message(
+                    text=kill_text,
+                    sender="assistant",
+                    session_id=inbound.session_id,
+                    channel=inbound.channel,
+                    sender_id=inbound.sender_id,
+                )
+                self.session_memory.append(outbound)
+                await self._broadcast_message(
+                    outbound,
+                    origin_channel=inbound.channel,
+                    origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
+                )
+                yield self._format_event(
+                    event_type="assistant_done",
+                    response=RichResponse(),
+                    session_id=inbound.session_id,
+                )
+                return
+
+            use_tools = (
+                self.skill_manager is not None
+                and self.max_react_rounds > 0
+            )
+            llm_messages = self._build_llm_messages(inbound, use_tools=use_tools)
+            self.session_memory.append(inbound)
+
+            full_text = ""
+            killed = False
+            session_fused = False
+            last_compressed_meta: dict[str, Any] | None = None
+
+            if use_tools:
+                assert self.skill_manager is not None
+                tools = self.skill_manager.get_tools_schema()
+                react_messages: list[dict[str, Any]] = list(llm_messages)
+                reached_round_limit = True
                 logger.info(
-                    "react.round",
-                    round=round_num,
-                    tool_calls=len(tool_calls),
+                    "react.start",
+                    session_id=inbound.session_id,
+                    max_rounds=self.max_react_rounds,
                 )
-                if not tool_calls:
-                    reached_round_limit = False
-                    text = str(decision.get("text") or "")
-                    if text:
-                        full_text = text
-                        yield self._format_event(
-                            event_type="assistant_chunk",
-                            response=RichResponse(text=text),
-                            session_id=inbound.session_id,
-                        )
-                    else:
-                        async for chunk in self.router.stream(
-                            self.chat_model,
-                            react_messages,
-                            session_id=inbound.session_id,
-                            tools=tools,
-                        ):
-                            if self._kill_switch_active():
-                                full_text = KILL_SWITCH_MESSAGE
-                                yield self._format_event(
-                                    event_type="assistant_chunk",
-                                    response=RichResponse(text=full_text),
-                                    session_id=inbound.session_id,
-                                )
-                                killed = True
-                                break
-                            if not chunk:
-                                continue
-                            full_text += chunk
-                            yield self._format_event(
-                                event_type="assistant_chunk",
-                                response=RichResponse(text=chunk),
-                                session_id=inbound.session_id,
-                            )
-                        if killed:
-                            break
-                    break
 
-                react_messages.append(
-                    {
-                        "role": "assistant",
-                        "content": decision.get("text", ""),
-                        "tool_calls": tool_calls,
-                    }
-                )
-                for tool_call in tool_calls:
-                    tool_name = self._extract_tool_name(tool_call)
-                    tool_call_id = str(tool_call.get("id") or "")
-                    arguments = self._parse_tool_arguments(tool_call)
-                    await self._send_tool_status(
-                        tool_name=tool_name,
-                        status="start",
-                        session_id=inbound.session_id,
-                    )
-                    yield self._format_event(
-                        event_type="tool_call_start",
-                        response=RichResponse(
-                            tool_calls=[
-                                {
-                                    "tool_name": tool_name,
-                                    "tool_call_id": tool_call_id,
-                                    "arguments": arguments,
-                                }
-                            ]
-                        ),
-                        session_id=inbound.session_id,
-                    )
-
-                    try:
-                        output = await self.skill_manager.invoke(
-                            tool_name,
-                            arguments,
-                            session_id=inbound.session_id,
-                        )
-                    except Exception as exc:
-                        await self._send_tool_status(
-                            tool_name=tool_name,
-                            status="fail",
-                            session_id=inbound.session_id,
-                            error=str(exc),
-                        )
-                        raise
-
-                    if output.status == "success":
-                        await self._send_tool_status(
-                            tool_name=tool_name,
-                            status="ok",
-                            session_id=inbound.session_id,
-                        )
-                    else:
-                        await self._send_tool_status(
-                            tool_name=tool_name,
-                            status="fail",
-                            session_id=inbound.session_id,
-                            error=output.error_info,
-                        )
-                    serialized_output = json.dumps(
-                        output.model_dump(mode="json"),
-                        ensure_ascii=False,
-                    )
-                    tool_content = serialized_output
-                    tool_result_for_event: Any = output.result
-                    tool_metadata_for_event = dict(output.metadata)
-                    tool_metadata_for_event["ephemeral"] = True
-                    compressed_meta_for_event: dict[str, Any] | None = None
-                    if self.output_compressor is not None:
-                        compression_metadata: dict[str, Any] = {
-                            "session_id": inbound.session_id,
-                            "tool_name": tool_name,
-                            "tool_call_id": tool_call_id,
-                        }
-                        tool_content, was_compressed = await self.output_compressor.compress_if_needed(
-                            serialized_output,
-                            compression_metadata,
-                        )
-                        if was_compressed:
-                            tool_result_for_event = tool_content
-                            tool_metadata_for_event["compressed"] = True
-                            tool_metadata_for_event["original_chars"] = len(serialized_output)
-                            tool_metadata_for_event["compressed_chars"] = len(tool_content)
-                            compressed_meta = compression_metadata.get("compressed_meta")
-                            if isinstance(compressed_meta, dict):
-                                compressed_meta_for_event = dict(compressed_meta)
-                                last_compressed_meta = dict(compressed_meta)
-                                await self._persist_tool_invocation_compressed_meta(
-                                    output=output,
-                                    compressed_meta=compressed_meta_for_event,
-                                )
-                    yield self._format_event(
-                        event_type="tool_call_result",
-                        response=RichResponse(
-                            compressed_meta=compressed_meta_for_event,
-                            tool_calls=[
-                                {
-                                    "tool_name": tool_name,
-                                    "tool_call_id": tool_call_id,
-                                    "status": output.status,
-                                    "result": tool_result_for_event,
-                                    "error_info": output.error_info,
-                                    "metadata": tool_metadata_for_event,
-                                }
-                            ],
-                        ),
-                        session_id=inbound.session_id,
-                    )
-                    react_messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call_id,
-                            "content": tool_content,
-                        }
-                    )
-                    if output.status == "fused" and "session circuit breaker" in output.error_info.lower():
-                        session_fused = True
-                        full_text = SESSION_FUSED_MESSAGE
+                for round_num in range(1, self.max_react_rounds + 1):
+                    if self._kill_switch_active():
+                        full_text = KILL_SWITCH_MESSAGE
                         yield self._format_event(
                             event_type="assistant_chunk",
                             response=RichResponse(text=full_text),
                             session_id=inbound.session_id,
                         )
+                        killed = True
                         break
-                if session_fused:
-                    break
+                    decision = await self.router.call_with_tools(
+                        self.chat_model,
+                        react_messages,
+                        tools=tools,
+                        session_id=inbound.session_id,
+                    )
+                    tool_calls = decision.get("tool_calls") or []
+                    logger.info(
+                        "react.round",
+                        round=round_num,
+                        tool_calls=len(tool_calls),
+                    )
+                    if not tool_calls:
+                        reached_round_limit = False
+                        text = str(decision.get("text") or "")
+                        if text:
+                            full_text = text
+                            yield self._format_event(
+                                event_type="assistant_chunk",
+                                response=RichResponse(text=text),
+                                session_id=inbound.session_id,
+                            )
+                        else:
+                            async for chunk in self.router.stream(
+                                self.chat_model,
+                                react_messages,
+                                session_id=inbound.session_id,
+                                tools=tools,
+                            ):
+                                if self._kill_switch_active():
+                                    full_text = KILL_SWITCH_MESSAGE
+                                    yield self._format_event(
+                                        event_type="assistant_chunk",
+                                        response=RichResponse(text=full_text),
+                                        session_id=inbound.session_id,
+                                    )
+                                    killed = True
+                                    break
+                                if not chunk:
+                                    continue
+                                full_text += chunk
+                                yield self._format_event(
+                                    event_type="assistant_chunk",
+                                    response=RichResponse(text=chunk),
+                                    session_id=inbound.session_id,
+                                )
+                            if killed:
+                                break
+                        break
 
-            if reached_round_limit:
-                logger.warning("react.round_limit", session_id=inbound.session_id)
-                full_text = "Stopped due to max ReAct rounds limit."
-                yield self._format_event(
-                    event_type="assistant_chunk",
-                    response=RichResponse(text=full_text),
-                    session_id=inbound.session_id,
-                )
-        else:
-            async for chunk in self.router.stream(
-                self.chat_model,
-                llm_messages,
-                session_id=inbound.session_id,
-            ):
-                if self._kill_switch_active():
-                    full_text = KILL_SWITCH_MESSAGE
+                    react_messages.append(
+                        {
+                            "role": "assistant",
+                            "content": decision.get("text", ""),
+                            "tool_calls": tool_calls,
+                        }
+                    )
+                    for tool_call in tool_calls:
+                        tool_name = self._extract_tool_name(tool_call)
+                        tool_call_id = str(tool_call.get("id") or "")
+                        arguments = self._parse_tool_arguments(tool_call)
+                        narration_task = self._schedule_narration_task(
+                            inbound=inbound,
+                            tool_name=tool_name,
+                            arguments=arguments,
+                        )
+                        if narration_task is not None:
+                            narration_tasks.add(narration_task)
+                            narration_task.add_done_callback(narration_tasks.discard)
+                        await self._send_tool_status(
+                            tool_name=tool_name,
+                            status="start",
+                            session_id=inbound.session_id,
+                        )
+                        yield self._format_event(
+                            event_type="tool_call_start",
+                            response=RichResponse(
+                                tool_calls=[
+                                    {
+                                        "tool_name": tool_name,
+                                        "tool_call_id": tool_call_id,
+                                        "arguments": arguments,
+                                    }
+                                ]
+                            ),
+                            session_id=inbound.session_id,
+                        )
+
+                        started_at = perf_counter()
+                        try:
+                            output = await self.skill_manager.invoke(
+                                tool_name,
+                                arguments,
+                                session_id=inbound.session_id,
+                            )
+                        except Exception as exc:
+                            await self._send_tool_status(
+                                tool_name=tool_name,
+                                status="fail",
+                                session_id=inbound.session_id,
+                                error=str(exc),
+                            )
+                            raise
+                        finally:
+                            self._cancel_fast_qq_narration(
+                                task=narration_task,
+                                inbound=inbound,
+                                started_at=started_at,
+                            )
+
+                        if output.status == "success":
+                            await self._send_tool_status(
+                                tool_name=tool_name,
+                                status="ok",
+                                session_id=inbound.session_id,
+                            )
+                        else:
+                            await self._send_tool_status(
+                                tool_name=tool_name,
+                                status="fail",
+                                session_id=inbound.session_id,
+                                error=output.error_info,
+                            )
+                        serialized_output = json.dumps(
+                            output.model_dump(mode="json"),
+                            ensure_ascii=False,
+                        )
+                        tool_content = serialized_output
+                        tool_result_for_event: Any = output.result
+                        tool_metadata_for_event = dict(output.metadata)
+                        tool_metadata_for_event["ephemeral"] = True
+                        compressed_meta_for_event: dict[str, Any] | None = None
+                        if self.output_compressor is not None:
+                            compression_metadata: dict[str, Any] = {
+                                "session_id": inbound.session_id,
+                                "tool_name": tool_name,
+                                "tool_call_id": tool_call_id,
+                            }
+                            tool_content, was_compressed = await self.output_compressor.compress_if_needed(
+                                serialized_output,
+                                compression_metadata,
+                            )
+                            if was_compressed:
+                                tool_result_for_event = tool_content
+                                tool_metadata_for_event["compressed"] = True
+                                tool_metadata_for_event["original_chars"] = len(serialized_output)
+                                tool_metadata_for_event["compressed_chars"] = len(tool_content)
+                                compressed_meta = compression_metadata.get("compressed_meta")
+                                if isinstance(compressed_meta, dict):
+                                    compressed_meta_for_event = dict(compressed_meta)
+                                    last_compressed_meta = dict(compressed_meta)
+                                    await self._persist_tool_invocation_compressed_meta(
+                                        output=output,
+                                        compressed_meta=compressed_meta_for_event,
+                                    )
+                        yield self._format_event(
+                            event_type="tool_call_result",
+                            response=RichResponse(
+                                compressed_meta=compressed_meta_for_event,
+                                tool_calls=[
+                                    {
+                                        "tool_name": tool_name,
+                                        "tool_call_id": tool_call_id,
+                                        "status": output.status,
+                                        "result": tool_result_for_event,
+                                        "error_info": output.error_info,
+                                        "metadata": tool_metadata_for_event,
+                                    }
+                                ],
+                            ),
+                            session_id=inbound.session_id,
+                        )
+                        react_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call_id,
+                                "content": tool_content,
+                            }
+                        )
+                        if (
+                            output.status == "fused"
+                            and "session circuit breaker" in output.error_info.lower()
+                        ):
+                            session_fused = True
+                            full_text = SESSION_FUSED_MESSAGE
+                            yield self._format_event(
+                                event_type="assistant_chunk",
+                                response=RichResponse(text=full_text),
+                                session_id=inbound.session_id,
+                            )
+                            break
+                    if session_fused:
+                        break
+
+                if reached_round_limit:
+                    logger.warning("react.round_limit", session_id=inbound.session_id)
+                    full_text = "Stopped due to max ReAct rounds limit."
                     yield self._format_event(
                         event_type="assistant_chunk",
                         response=RichResponse(text=full_text),
                         session_id=inbound.session_id,
                     )
-                    killed = True
-                    break
-                if not chunk:
-                    continue
-                full_text += chunk
+            else:
+                async for chunk in self.router.stream(
+                    self.chat_model,
+                    llm_messages,
+                    session_id=inbound.session_id,
+                ):
+                    if self._kill_switch_active():
+                        full_text = KILL_SWITCH_MESSAGE
+                        yield self._format_event(
+                            event_type="assistant_chunk",
+                            response=RichResponse(text=full_text),
+                            session_id=inbound.session_id,
+                        )
+                        killed = True
+                        break
+                    if not chunk:
+                        continue
+                    full_text += chunk
+                    yield self._format_event(
+                        event_type="assistant_chunk",
+                        response=RichResponse(text=chunk),
+                        session_id=inbound.session_id,
+                    )
+
+            if session_fused:
+                outbound = Message(
+                    text=full_text,
+                    sender="assistant",
+                    session_id=inbound.session_id,
+                    channel=inbound.channel,
+                    sender_id=inbound.sender_id,
+                )
+                self.session_memory.append(outbound)
+                await self._broadcast_message(
+                    outbound,
+                    origin_channel=inbound.channel,
+                    origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
+                )
+                yield self._format_event(
+                    event_type="assistant_done",
+                    response=RichResponse(),
+                    session_id=inbound.session_id,
+                )
+                return
+
+            if killed:
+                outbound = Message(
+                    text=full_text,
+                    sender="assistant",
+                    session_id=inbound.session_id,
+                    channel=inbound.channel,
+                    sender_id=inbound.sender_id,
+                )
+                self.session_memory.append(outbound)
+                await self._broadcast_message(outbound, origin_channel=inbound.channel)
+                yield self._format_event(
+                    event_type="assistant_done",
+                    response=RichResponse(),
+                    session_id=inbound.session_id,
+                )
+                return
+
+            extra_chunk = self._apply_compression_marker(
+                text=full_text,
+                compressed_meta=last_compressed_meta,
+            )
+            if extra_chunk is not None:
+                full_text += extra_chunk
                 yield self._format_event(
                     event_type="assistant_chunk",
-                    response=RichResponse(text=chunk),
+                    response=RichResponse(text=extra_chunk),
                     session_id=inbound.session_id,
                 )
 
-        if session_fused:
             outbound = Message(
                 text=full_text,
                 sender="assistant",
@@ -529,57 +626,18 @@ class ChatPipeline:
                 sender_id=inbound.sender_id,
             )
             self.session_memory.append(outbound)
-            await self._broadcast_message(outbound, origin_channel=inbound.channel)
+            await self._broadcast_message(
+                outbound,
+                origin_channel=inbound.channel,
+                origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
+            )
             yield self._format_event(
                 event_type="assistant_done",
                 response=RichResponse(),
                 session_id=inbound.session_id,
             )
-            return
-
-        if killed:
-            outbound = Message(
-                text=full_text,
-                sender="assistant",
-                session_id=inbound.session_id,
-                channel=inbound.channel,
-                sender_id=inbound.sender_id,
-            )
-            self.session_memory.append(outbound)
-            await self._broadcast_message(outbound, origin_channel=inbound.channel)
-            yield self._format_event(
-                event_type="assistant_done",
-                response=RichResponse(),
-                session_id=inbound.session_id,
-            )
-            return
-
-        extra_chunk = self._apply_compression_marker(
-            text=full_text,
-            compressed_meta=last_compressed_meta,
-        )
-        if extra_chunk is not None:
-            full_text += extra_chunk
-            yield self._format_event(
-                event_type="assistant_chunk",
-                response=RichResponse(text=extra_chunk),
-                session_id=inbound.session_id,
-            )
-
-        outbound = Message(
-            text=full_text,
-            sender="assistant",
-            session_id=inbound.session_id,
-            channel=inbound.channel,
-            sender_id=inbound.sender_id,
-        )
-        self.session_memory.append(outbound)
-        await self._broadcast_message(outbound, origin_channel=inbound.channel)
-        yield self._format_event(
-            event_type="assistant_done",
-            response=RichResponse(),
-            session_id=inbound.session_id,
-        )
+        finally:
+            await self._cancel_pending_narration_tasks(narration_tasks)
 
     def _extract_tool_name(self, tool_call: dict[str, Any]) -> str:
         function_payload = tool_call.get("function") or {}
@@ -611,6 +669,8 @@ class ChatPipeline:
             raise ValueError("text is required for M2 chat pipeline")
 
         llm_messages: list[dict[str, str]] = []
+        if self.persona_system_prompt:
+            llm_messages.append({"role": "system", "content": self.persona_system_prompt})
         if use_tools:
             llm_messages.append({"role": "system", "content": TOOL_USE_SYSTEM_PROMPT})
         llm_messages.append({"role": "system", "content": self._system_time_context()})
@@ -672,18 +732,29 @@ class ChatPipeline:
         message: Message,
         *,
         origin_channel: str | None,
+        origin_client_id: str | None = None,
     ) -> None:
         callback = self.on_proactive_message
         if callback is None:
             return
         exclude_channels: set[str] | None = None
+        exclude_client_ids: set[str] | None = None
         channel = str(origin_channel or "").strip().lower()
         if channel == "webui":
-            exclude_channels = {"webui"}
+            exclude_channels = {"qq"}
+            if origin_client_id:
+                exclude_client_ids = {origin_client_id}
         try:
-            result = callback(message, exclude_channels=exclude_channels)
+            result = callback(
+                message,
+                exclude_channels=exclude_channels,
+                exclude_client_ids=exclude_client_ids,
+            )
         except TypeError:
-            result = callback(message)
+            try:
+                result = callback(message, exclude_channels=exclude_channels)
+            except TypeError:
+                result = callback(message)
         if inspect.isawaitable(result):
             await result
 
@@ -793,6 +864,8 @@ class ChatPipeline:
         callback = self.on_proactive_message
         if callback is None:
             return
+        if self._tool_status_suppressed():
+            return
 
         templates = TOOL_STATUS_TEMPLATES.get(tool_name) or TOOL_STATUS_TEMPLATES["_default"]
         template = templates.get(status)
@@ -812,6 +885,118 @@ class ChatPipeline:
         callback_result = callback(status_message)
         if inspect.isawaitable(callback_result):
             await callback_result
+
+    def _tool_status_suppressed(self) -> bool:
+        observer = self.narration_observer
+        if observer is None:
+            return False
+        return bool(getattr(observer, "enabled", False))
+
+    def _schedule_narration_task(
+        self,
+        *,
+        inbound: Message,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> asyncio.Task[None] | None:
+        observer = self.narration_observer
+        callback = self.on_narration
+        if observer is None or callback is None:
+            return None
+
+        user_message = str(inbound.text or "").strip()
+        if not user_message:
+            return None
+
+        async def _runner() -> None:
+            try:
+                narration = await observer.maybe_narrate(
+                    tool_name=tool_name,
+                    tool_args=arguments,
+                    user_message_context=user_message,
+                    session_id=inbound.session_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "narration.emit.failed",
+                    session_id=inbound.session_id,
+                    tool_name=tool_name,
+                )
+                return
+
+            if not narration:
+                return
+
+            payload = {
+                "type": "narration",
+                "text": narration,
+                "session_id": inbound.session_id,
+                "timestamp": utc_isoformat(utc_now()),
+            }
+
+            try:
+                result = callback(
+                    payload,
+                    origin_channel=inbound.channel,
+                    sender_id=inbound.sender_id,
+                )
+            except TypeError:
+                try:
+                    result = callback(payload)
+                except Exception:
+                    logger.exception(
+                        "narration.callback.failed",
+                        session_id=inbound.session_id,
+                        tool_name=tool_name,
+                    )
+                    return
+            except Exception:
+                logger.exception(
+                    "narration.callback.failed",
+                    session_id=inbound.session_id,
+                    tool_name=tool_name,
+                )
+                return
+            if inspect.isawaitable(result):
+                try:
+                    await result
+                except Exception:
+                    logger.exception(
+                        "narration.callback.failed",
+                        session_id=inbound.session_id,
+                        tool_name=tool_name,
+                    )
+
+        return asyncio.create_task(_runner())
+
+    def _cancel_fast_qq_narration(
+        self,
+        *,
+        task: asyncio.Task[None] | None,
+        inbound: Message,
+        started_at: float,
+    ) -> None:
+        if task is None or task.done():
+            return
+        if str(inbound.channel or "").strip().lower() != "qq":
+            return
+        if perf_counter() - started_at >= 1.0:
+            return
+        task.cancel()
+
+    async def _cancel_pending_narration_tasks(
+        self,
+        tasks: set[asyncio.Task[None]],
+    ) -> None:
+        if not tasks:
+            return
+        pending = [task for task in tasks if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def _consume_event_loop(self) -> None:
         logger.info("event_consumer.started")

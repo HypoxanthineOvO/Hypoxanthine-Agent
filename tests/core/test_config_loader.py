@@ -3,7 +3,10 @@ from pathlib import Path
 import pytest
 
 from hypo_agent.core.config_loader import (
+    load_persona_config,
     get_memory_dir,
+    load_narration_config,
+    render_persona_system_prompt,
     load_runtime_model_config,
     load_tasks_config,
 )
@@ -162,16 +165,24 @@ providers:
         load_runtime_model_config(models_yaml, secrets_yaml)
 
 
-def test_load_tasks_config_accepts_heartbeat_and_email_scan(tmp_path: Path) -> None:
+def test_load_tasks_config_accepts_heartbeat_prompt_and_email_scan(tmp_path: Path) -> None:
     tasks_yaml = tmp_path / "tasks.yaml"
     tasks_yaml.write_text(
         """
 heartbeat:
   enabled: true
   interval_minutes: 1
+  prompt_template: |
+    你是心跳判定器。
+    checks=${checks}
 email_scan:
   enabled: true
   interval_minutes: 5
+email_store:
+  enabled: true
+  max_entries: 4000
+  retention_days: 60
+  warmup_hours: 72
 """.strip(),
         encoding="utf-8",
     )
@@ -180,8 +191,13 @@ email_scan:
 
     assert tasks.heartbeat.enabled is True
     assert tasks.heartbeat.interval_minutes == 1
+    assert "checks=${checks}" in tasks.heartbeat.prompt_template
     assert tasks.email_scan.enabled is True
     assert tasks.email_scan.interval_minutes == 5
+    assert tasks.email_store.enabled is True
+    assert tasks.email_store.max_entries == 4000
+    assert tasks.email_store.retention_days == 60
+    assert tasks.email_store.warmup_hours == 72
 
 
 def test_memory_dir_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -193,3 +209,80 @@ def test_memory_dir_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     target = tmp_path / "mem-root"
     monkeypatch.setenv("HYPO_MEMORY_DIR", str(target))
     assert get_memory_dir() == target.resolve(strict=False)
+
+
+def test_render_persona_system_prompt_injects_runtime_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = tmp_path / "Hypo-Agent"
+    repo_root.mkdir(parents=True)
+    persona_yaml = tmp_path / "persona.yaml"
+    persona_yaml.write_text(
+        """
+name: Hypo
+aliases: [hypo]
+personality: [pragmatic]
+speaking_style:
+  tone: direct
+system_prompt_template: |
+  你是 Hypo。
+
+  ## 环境信息
+  - 代码仓库：${HYPO_AGENT_ROOT}
+  - 服务器：${HYPO_SERVER_NAME}
+  - 用户名：${HYPO_USERNAME}
+  - Conda：${HYPO_CONDA_ENV}
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HYPO_AGENT_ROOT", str(repo_root))
+    monkeypatch.setenv("HYPO_SERVER_NAME", "Genesis")
+    monkeypatch.setenv("CONDA_DEFAULT_ENV", "HypoAgent")
+
+    persona = load_persona_config(persona_yaml)
+    rendered = render_persona_system_prompt(persona)
+
+    assert "## 环境信息" in rendered
+    assert str(repo_root) in rendered
+    assert "Genesis" in rendered
+    assert "HypoAgent" in rendered
+    assert "${HYPO_AGENT_ROOT}" not in rendered
+
+
+def test_default_persona_mentions_directory_index_knowledge_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HYPO_AGENT_ROOT", "/home/heyx/Hypo-Agent")
+
+    rendered = render_persona_system_prompt(load_persona_config(Path("config/persona.yaml")))
+
+    assert "memory/knowledge/directory_index.yaml" in rendered
+
+
+def test_load_narration_config_accepts_tool_levels(tmp_path: Path) -> None:
+    narration_yaml = tmp_path / "narration.yaml"
+    narration_yaml.write_text(
+        """
+enabled: true
+model: DeepseekV3_2
+tool_levels:
+  heavy:
+    - scan_emails
+    - run_command
+  medium:
+    - write_file
+debounce_seconds: 2
+max_narration_length: 80
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_narration_config(narration_yaml)
+
+    assert config.enabled is True
+    assert config.model == "DeepseekV3_2"
+    assert config.tool_levels.heavy == ["scan_emails", "run_command"]
+    assert config.tool_levels.medium == ["write_file"]
+    assert config.debounce_seconds == 2
+    assert config.max_narration_length == 80

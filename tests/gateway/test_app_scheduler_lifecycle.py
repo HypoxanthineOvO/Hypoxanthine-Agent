@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import threading
+
 from fastapi.testclient import TestClient
 
 from hypo_agent.core.event_queue import EventQueue
@@ -206,6 +209,49 @@ email_scan:
         assert scheduler.interval_jobs == [("heartbeat", 1)]
 
 
+def test_app_applies_heartbeat_prompt_template_from_tasks_config(tmp_path) -> None:
+    scheduler = RecordingScheduler()
+    pipeline = RecordingPipeline()
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "tasks.yaml").write_text(
+        """
+heartbeat:
+  enabled: true
+  interval_minutes: 1
+  prompt_template: |
+    你是自定义 heartbeat 判定器。
+    checks=${checks}
+email_scan:
+  enabled: false
+  interval_minutes: 5
+""".strip(),
+        encoding="utf-8",
+    )
+
+    class DummyHeartbeatService:
+        def __init__(self) -> None:
+            self.decision_prompt_template = ""
+
+        async def run(self) -> None:
+            return None
+
+    heartbeat_service = DummyHeartbeatService()
+    deps = AppDeps(
+        session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+        structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        scheduler=scheduler,
+        event_queue=DummyEventQueue(),
+        heartbeat_service=heartbeat_service,
+    )
+    app = create_app(auth_token="test-token", pipeline=pipeline, deps=deps)
+    app.state.config_dir = config_dir
+
+    with TestClient(app):
+        assert "你是自定义 heartbeat 判定器。" in heartbeat_service.decision_prompt_template
+
+
 def test_app_registers_email_scan_interval_job(tmp_path) -> None:
     scheduler = RecordingScheduler()
     pipeline = RecordingPipeline()
@@ -244,3 +290,181 @@ email_scan:
 
     with TestClient(app):
         assert ("email_scan", 1) in scheduler.interval_jobs
+
+
+def test_app_lifespan_starts_and_stops_napcat_websocket_client(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, str] | str] = []
+
+    class FakeNapCatWebSocketClient:
+        def __init__(
+            self,
+            *,
+            url,
+            bot_qq="",
+            token,
+            service_getter,
+            pipeline_getter,
+            reconnect_delay_seconds=5.0,
+            connect_timeout_seconds=5.0,
+        ) -> None:
+            del service_getter, pipeline_getter, reconnect_delay_seconds, connect_timeout_seconds
+            calls.append(("init", url))
+            calls.append(("bot_qq", bot_qq))
+            calls.append(("token", token))
+
+        async def start(self) -> None:
+            calls.append("start")
+
+        async def stop(self) -> None:
+            calls.append("stop")
+
+    monkeypatch.setattr("hypo_agent.gateway.app.NapCatWebSocketClient", FakeNapCatWebSocketClient)
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "skills.yaml").write_text(
+        """
+default_timeout_seconds: 30
+skills:
+  qq:
+    enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+    (config_dir / "secrets.yaml").write_text(
+        """
+providers: {}
+services:
+  qq:
+    napcat_ws_url: ws://127.0.0.1:3009/onebot/v11/ws
+    napcat_ws_token: ws-token-123
+    napcat_http_url: http://127.0.0.1:3008
+    bot_qq: "123456789"
+    allowed_users:
+      - "10001"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    deps = AppDeps(
+        session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+        structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        scheduler=RecordingScheduler(),
+        event_queue=DummyEventQueue(),
+    )
+    app = create_app(auth_token="test-token", pipeline=RecordingPipeline(), deps=deps)
+    app.state.config_dir = config_dir
+
+    with TestClient(app):
+        assert ("init", "ws://127.0.0.1:3009/onebot/v11/ws") in calls
+        assert ("bot_qq", "123456789") in calls
+        assert ("token", "ws-token-123") in calls
+        assert "start" in calls
+
+    assert "stop" in calls
+
+
+def test_app_lifespan_schedules_directory_index_refresh_in_background(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    started = threading.Event()
+
+    async def fake_refresh_directory_index(**kwargs) -> bool:
+        del kwargs
+        started.set()
+        await asyncio.sleep(0.5)
+        return True
+
+    monkeypatch.setattr(
+        "hypo_agent.gateway.app.refresh_directory_index",
+        fake_refresh_directory_index,
+    )
+
+    deps = AppDeps(
+        session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+        structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        scheduler=RecordingScheduler(),
+        event_queue=DummyEventQueue(),
+    )
+    app = create_app(auth_token="test-token", pipeline=RecordingPipeline(), deps=deps)
+
+    with TestClient(app):
+        assert started.wait(timeout=1.0) is True
+        task = app.state.directory_index_task
+        assert task is not None
+        assert task.done() is False
+
+
+def test_app_lifespan_warms_email_cache_in_background_when_store_is_stale(
+    tmp_path,
+) -> None:
+    scheduler = RecordingScheduler()
+    pipeline = RecordingPipeline()
+    started = threading.Event()
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "tasks.yaml").write_text(
+        """
+heartbeat:
+  enabled: false
+  interval_minutes: 1
+email_scan:
+  enabled: false
+  interval_minutes: 5
+email_store:
+  enabled: true
+  max_entries: 5000
+  retention_days: 90
+  warmup_hours: 168
+""".strip(),
+        encoding="utf-8",
+    )
+
+    class DummyEmailStore:
+        def needs_warmup(self, *, max_age_hours: int = 24) -> bool:
+            assert max_age_hours == 24
+            return True
+
+    class DummyEmailScanner:
+        def __init__(self) -> None:
+            self.email_store = DummyEmailStore()
+            self.scan_params: list[dict] = []
+
+        def configure_email_store(self, *, max_entries: int, retention_days: int) -> None:
+            assert max_entries == 5000
+            assert retention_days == 90
+
+        async def scan_emails(self, *, params=None) -> dict:
+            self.scan_params.append(dict(params or {}))
+            started.set()
+            await asyncio.sleep(0.5)
+            return {"new_emails": 0, "items": []}
+
+    class DummySkillManager:
+        def __init__(self) -> None:
+            self._skills = {"email_scanner": DummyEmailScanner()}
+
+    skill_manager = DummySkillManager()
+    deps = AppDeps(
+        session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+        structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        scheduler=scheduler,
+        event_queue=DummyEventQueue(),
+        skill_manager=skill_manager,
+    )
+    app = create_app(auth_token="test-token", pipeline=pipeline, deps=deps)
+    app.state.config_dir = config_dir
+
+    with TestClient(app):
+        assert started.wait(timeout=1.0) is True
+        task = app.state.email_cache_warmup_task
+        assert task is not None
+        assert task.done() is False
+        assert skill_manager._skills["email_scanner"].scan_params == [
+            {"hours_back": 168, "triggered_by": "cache_warmup"}
+        ]

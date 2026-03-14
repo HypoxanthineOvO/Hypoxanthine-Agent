@@ -3,6 +3,7 @@ export type MessageTag =
   | "heartbeat"
   | "email_scan"
   | "tool_status"
+  | "narration"
   | string;
 
 export interface Message {
@@ -11,7 +12,7 @@ export interface Message {
   file?: string | null;
   audio?: string | null;
   sender: string;
-  timestamp?: string;
+  timestamp?: string | null;
   session_id: string;
   senderName?: string;
   senderAvatar?: string;
@@ -40,12 +41,14 @@ export interface AssistantChunkEvent {
   text: string;
   sender: "assistant";
   session_id: string;
+  timestamp?: string;
 }
 
 export interface AssistantDoneEvent {
   type: "assistant_done";
   sender: "assistant";
   session_id: string;
+  timestamp?: string;
 }
 
 export interface CompressedMeta {
@@ -82,12 +85,20 @@ export interface WsErrorEvent {
   session_id: string;
 }
 
+export interface NarrationEvent {
+  type: "narration";
+  text: string;
+  session_id: string;
+  timestamp?: string | null;
+}
+
 export type IncomingWsEvent =
   | Message
   | AssistantChunkEvent
   | AssistantDoneEvent
   | ToolCallStartEvent
   | ToolCallResultEvent
+  | NarrationEvent
   | WsErrorEvent;
 
 export type ConnectionStatus =

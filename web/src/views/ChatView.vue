@@ -13,7 +13,12 @@ import ConnectionStatus from "../components/ConnectionStatus.vue";
 import ReconnectBanner from "../components/layout/ReconnectBanner.vue";
 import { useHotkey } from "../composables/useHotkey";
 import { useChatSocket } from "../composables/useChatSocket";
-import type { Message, SessionSummary } from "../types/message";
+import type { Message } from "../types/message";
+import {
+  formatTimeSeparatorLabel,
+  shouldInsertTimeSeparator,
+  toTimestampMs,
+} from "../utils/timeFormat";
 
 const props = withDefaults(
   defineProps<{
@@ -23,17 +28,39 @@ const props = withDefaults(
     apiBase?: string;
   }>(),
   {
-    sessionId: "session-1",
+    sessionId: "main",
     apiBase: "",
   },
 );
+
+const resolveInitialSessionId = (): string => {
+  const querySession = new URLSearchParams(window.location.search).get("session");
+  const normalizedQuery = (querySession ?? "").trim();
+  if (normalizedQuery) {
+    return normalizedQuery;
+  }
+  return props.sessionId.trim() || "main";
+};
+
+const quickPrompts = [
+  "📧 帮我看看邮件",
+  "📁 今天有什么任务？",
+  "🔧 检查系统状态",
+  "💬 随便聊聊",
+] as const;
+
+const capabilitySummary = [
+  "邮件扫描与优先级摘要",
+  "文件管理与代码仓库检索",
+  "QQ 消息同步与通知镜像",
+  "定时提醒与系统巡检",
+] as const;
 
 const draft = ref("");
 const composerExpanded = ref(false);
 const composerRef = ref<HTMLTextAreaElement | null>(null);
 const messagesRef = ref<HTMLElement | null>(null);
-const sessions = ref<SessionSummary[]>([]);
-const activeSessionId = ref(props.sessionId);
+const activeSessionId = ref(resolveInitialSessionId());
 
 const normalizedApiBase = computed(() => {
   const explicitBase = props.apiBase.trim();
@@ -60,8 +87,7 @@ const {
   replaceMessages,
   sendText,
   status,
-} =
-  useChatSocket({
+} = useChatSocket({
   url: props.wsUrl,
   token: props.token,
   sessionId: activeSessionId,
@@ -136,21 +162,21 @@ const parseCompressedMeta = (
   return undefined;
 };
 
-const toTimelineValue = (value: string | undefined): number => {
+const normalizeTimestamp = (value: string | null | undefined): string | undefined => {
   if (!value) {
-    return Number.POSITIVE_INFINITY;
+    return undefined;
   }
   const normalized = value.trim();
-
-  // SQLite datetime('now') commonly uses "YYYY-MM-DD HH:MM:SS" (UTC, no timezone).
-  // Normalize it to ISO UTC to avoid locale-dependent parsing shifts.
   const sqliteUtcPattern = /^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(\.\d+)?$/;
-  const candidate = sqliteUtcPattern.test(normalized)
-    ? `${normalized.replace(/\s+/, "T")}Z`
-    : normalized;
+  if (sqliteUtcPattern.test(normalized)) {
+    return `${normalized.replace(/\s+/, "T")}Z`;
+  }
+  return normalized;
+};
 
-  const epoch = Date.parse(candidate);
-  return Number.isNaN(epoch) ? Number.POSITIVE_INFINITY : epoch;
+const toTimelineValue = (value: string | null | undefined): number => {
+  const epoch = toTimestampMs(normalizeTimestamp(value));
+  return epoch ?? Number.POSITIVE_INFINITY;
 };
 
 const toToolInvocationMessages = (
@@ -165,7 +191,7 @@ const toToolInvocationMessages = (
     messagesFromRows.push({
       sender: "assistant",
       session_id: row.session_id,
-      timestamp: row.created_at,
+      timestamp: normalizeTimestamp(row.created_at),
       event_type: "tool_call_start",
       tool_name: row.tool_name,
       tool_call_id: toolCallId,
@@ -174,7 +200,7 @@ const toToolInvocationMessages = (
     messagesFromRows.push({
       sender: "assistant",
       session_id: row.session_id,
-      timestamp: row.created_at,
+      timestamp: normalizeTimestamp(row.created_at),
       event_type: "tool_call_result",
       tool_name: row.tool_name,
       tool_call_id: toolCallId,
@@ -186,32 +212,6 @@ const toToolInvocationMessages = (
     });
   }
   return messagesFromRows;
-};
-
-const ensureSessionPresent = (sessionId: string): void => {
-  const existingIndex = sessions.value.findIndex(
-    (item) => item.session_id === sessionId,
-  );
-  const now = new Date().toISOString();
-  if (existingIndex === -1) {
-    sessions.value.unshift({
-      session_id: sessionId,
-      created_at: now,
-      updated_at: now,
-      message_count: messages.value.length,
-    });
-    return;
-  }
-
-  const existing = sessions.value[existingIndex];
-  if (!existing) {
-    return;
-  }
-  existing.updated_at = now;
-  existing.message_count = Math.max(existing.message_count + 1, messages.value.length);
-  sessions.value = [...sessions.value].sort((a, b) =>
-    b.updated_at.localeCompare(a.updated_at),
-  );
 };
 
 const loadSessionMessages = async (sessionId: string): Promise<void> => {
@@ -262,67 +262,6 @@ const loadSessionMessages = async (sessionId: string): Promise<void> => {
   replaceMessages(timeline);
 };
 
-const loadSessions = async (): Promise<void> => {
-  const response = await fetch(withApiToken(makeApiUrl("sessions")));
-  if (!response.ok) {
-    sessions.value = [];
-    replaceMessages([]);
-    return;
-  }
-
-  const payload = (await response.json()) as SessionSummary[];
-  if (payload.length === 0) {
-    sessions.value = [
-      {
-        session_id: activeSessionId.value,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        message_count: 0,
-      },
-    ];
-    replaceMessages([]);
-    return;
-  }
-
-  sessions.value = payload;
-  const firstSession = payload[0];
-  if (!firstSession) {
-    replaceMessages([]);
-    return;
-  }
-  activeSessionId.value = firstSession.session_id;
-  await loadSessionMessages(activeSessionId.value);
-};
-
-const selectSession = async (sessionId: string): Promise<void> => {
-  if (activeSessionId.value === sessionId) {
-    return;
-  }
-  activeSessionId.value = sessionId;
-  await loadSessionMessages(sessionId);
-};
-
-const newSession = (): void => {
-  const sessionId = `session-${Date.now()}`;
-  activeSessionId.value = sessionId;
-  sessions.value.unshift({
-    session_id: sessionId,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    message_count: 0,
-  });
-  replaceMessages([]);
-};
-
-const clearCurrentConversation = (): void => {
-  replaceMessages([]);
-  const existing = sessions.value.find((item) => item.session_id === activeSessionId.value);
-  if (existing) {
-    existing.message_count = 0;
-    existing.updated_at = new Date().toISOString();
-  }
-};
-
 const adjustComposerHeight = (): void => {
   const input = composerRef.value;
   if (!input) {
@@ -337,6 +276,14 @@ const adjustComposerHeight = (): void => {
 
 const toggleComposerExpanded = (): void => {
   composerExpanded.value = !composerExpanded.value;
+  void nextTick(() => {
+    adjustComposerHeight();
+    composerRef.value?.focus();
+  });
+};
+
+const applyQuickPrompt = (prompt: string): void => {
+  draft.value = prompt;
   void nextTick(() => {
     adjustComposerHeight();
     composerRef.value?.focus();
@@ -396,11 +343,54 @@ const isEphemeralToolResult = (message: Message): boolean =>
   message.metadata?.ephemeral === true;
 
 const isHiddenSystemToolEvent = (message: Message): boolean =>
-  message.event_type === "tool_call_start" || isEphemeralToolResult(message);
+  message.event_type === "tool_call_start" ||
+  isEphemeralToolResult(message) ||
+  message.message_tag === "tool_status";
 
 const displayedMessages = computed(() =>
   messages.value.filter((message) => !isHiddenSystemToolEvent(message)),
 );
+
+type TimelineItem =
+  | {
+      kind: "separator";
+      key: string;
+      label: string;
+    }
+  | {
+      kind: "message";
+      key: string;
+      message: Message;
+    };
+
+const timelineItems = computed<TimelineItem[]>(() => {
+  const items: TimelineItem[] = [];
+  let previousVisibleTimestamp: string | undefined;
+
+  displayedMessages.value.forEach((message, index) => {
+    const currentTimestamp = normalizeTimestamp(message.timestamp);
+    if (currentTimestamp && shouldInsertTimeSeparator(currentTimestamp, previousVisibleTimestamp)) {
+      items.push({
+        kind: "separator",
+        key: `separator-${index}-${currentTimestamp}`,
+        label: formatTimeSeparatorLabel(currentTimestamp, previousVisibleTimestamp),
+      });
+      previousVisibleTimestamp = currentTimestamp;
+    } else if (currentTimestamp) {
+      previousVisibleTimestamp = currentTimestamp;
+    }
+
+    items.push({
+      kind: "message",
+      key: `${message.session_id}-${message.sender}-${index}`,
+      message,
+    });
+  });
+
+  return items;
+});
+
+const welcomeVisible = computed(() => displayedMessages.value.length === 0);
 
 const isCompressedToolResult = (message: Message): boolean =>
   message.event_type === "tool_call_result" &&
@@ -419,7 +409,6 @@ const onSubmit = (): void => {
   if (!sendText(draft.value)) {
     return;
   }
-  ensureSessionPresent(activeSessionId.value);
   draft.value = "";
   void nextTick(() => {
     adjustComposerHeight();
@@ -435,11 +424,12 @@ const scrollToBottom = (): void => {
 };
 
 onMounted(() => {
-  void loadSessions();
-  connect();
-  void nextTick(() => {
+  void (async () => {
+    await loadSessionMessages(activeSessionId.value);
+    connect();
+    await nextTick();
     adjustComposerHeight();
-  });
+  })();
 });
 
 watch(draft, () => {
@@ -511,13 +501,7 @@ useHotkey([
   {
     combo: "ctrlOrMeta+l",
     handler: () => {
-      clearCurrentConversation();
-    },
-  },
-  {
-    combo: "ctrlOrMeta+n",
-    handler: () => {
-      newSession();
+      replaceMessages([]);
     },
   },
   {
@@ -529,7 +513,7 @@ useHotkey([
   {
     combo: "ctrlOrMeta+k",
     handler: () => {
-      // Reserved for M7b command palette.
+      // Reserved for future command palette work.
     },
   },
 ]);
@@ -537,39 +521,12 @@ useHotkey([
 
 <template>
   <section class="chat-shell">
-    <aside class="session-sidebar">
-      <header class="session-header">
-        <p class="eyebrow">Sessions</p>
-        <button
-          type="button"
-          class="ghost-button"
-          data-testid="new-session-button"
-          @click="newSession"
-        >
-          New Chat
-        </button>
-      </header>
-      <div class="session-list">
-        <button
-          v-for="session in sessions"
-          :key="session.session_id"
-          type="button"
-          class="session-item"
-          :data-active="session.session_id === activeSessionId"
-          :data-testid="`session-item-${session.session_id}`"
-          @click="selectSession(session.session_id)"
-        >
-          <span class="session-name">{{ session.session_id }}</span>
-          <span class="session-meta">{{ session.message_count }} msgs</span>
-        </button>
-      </div>
-    </aside>
-
     <div class="chat-main">
       <header class="chat-header">
         <div class="title-wrap">
           <p class="eyebrow">Hypo-Agent</p>
-          <h1>Gateway LLM Console</h1>
+          <h1>Personal Assistant Workspace</h1>
+          <p class="chat-subtitle">邮件、QQ、文件和提醒汇聚在同一个主会话里。</p>
         </div>
         <div class="status-wrap">
           <ConnectionStatus :status="status" />
@@ -594,52 +551,93 @@ useHotkey([
       />
 
       <main ref="messagesRef" class="messages" aria-live="polite">
-        <MessageBubble
-          v-for="(message, index) in displayedMessages"
-          :key="`${message.session_id}-${message.sender}-${index}`"
-          :message="message"
-        >
-          <CompressedMessage
-            v-if="isCompressedToolResult(message)"
-            :summary="String(message.result ?? '')"
-            :compressed-meta="message.compressed_meta"
-            :api-base="normalizedApiBase"
-            :token="token"
-            :tool-name="message.tool_name"
-            :file-path="resolveCompressedFilePath(message)"
-          />
-          <ToolCallMessage
-            v-else-if="isToolCall(message)"
-            :tool-name="message.tool_name ?? ''"
-            :status="message.status"
-            :params="message.arguments"
-            :result="message.result"
-          />
-          <MarkdownPreview
-            v-else-if="hasMarkdownPreview(message)"
-            :content="message.text ?? ''"
-          />
-          <MediaMessage
-            v-else-if="hasMedia(message)"
-            :src="mediaSource(message)"
-          />
-          <FileAttachment
-            v-else-if="hasCodeFilePreview(message)"
-            :path="message.file ?? ''"
-            :content="message.text ?? ''"
-          />
-          <FileAttachment
-            v-else-if="hasFileAttachment(message)"
-            :path="resolveAssetUrl(message.file)"
-          />
-          <TextMessage
-            v-else
-            :text="message.text ?? ''"
-          />
-        </MessageBubble>
-        <p v-if="displayedMessages.length === 0" class="empty-tip">
-          No messages yet. Connect and send your first line.
-        </p>
+        <section v-if="welcomeVisible" class="welcome-state">
+          <div class="welcome-copy">
+            <p class="eyebrow">Welcome</p>
+            <h2>Hi，我是 Hypo-Agent</h2>
+            <p>
+              你的个人智能助手。你可以直接让我查邮件、同步 QQ、读取文件、检查系统状态，
+              或者像平常聊天一样把任务交给我。
+            </p>
+          </div>
+
+          <div class="quick-prompts">
+            <button
+              v-for="(prompt, index) in quickPrompts"
+              :key="prompt"
+              type="button"
+              class="quick-prompt"
+              :data-testid="`quick-prompt-${index}`"
+              @click="applyQuickPrompt(prompt)"
+            >
+              {{ prompt }}
+            </button>
+          </div>
+
+          <div class="capability-list">
+            <span
+              v-for="item in capabilitySummary"
+              :key="item"
+              class="capability-chip"
+            >
+              {{ item }}
+            </span>
+          </div>
+        </section>
+
+        <template v-else>
+          <template v-for="item in timelineItems" :key="item.key">
+            <div
+              v-if="item.kind === 'separator'"
+              class="message-time-separator"
+              data-testid="message-time-separator"
+            >
+              <span>{{ item.label }}</span>
+            </div>
+            <MessageBubble
+              v-else
+              :message="item.message"
+            >
+            <CompressedMessage
+              v-if="isCompressedToolResult(item.message)"
+              :summary="String(item.message.result ?? '')"
+              :compressed-meta="item.message.compressed_meta"
+              :api-base="normalizedApiBase"
+              :token="token"
+              :tool-name="item.message.tool_name"
+              :file-path="resolveCompressedFilePath(item.message)"
+            />
+            <ToolCallMessage
+              v-else-if="isToolCall(item.message)"
+              :tool-name="item.message.tool_name ?? ''"
+              :status="item.message.status"
+              :params="item.message.arguments"
+              :result="item.message.result"
+            />
+            <MarkdownPreview
+              v-else-if="hasMarkdownPreview(item.message)"
+              :content="item.message.text ?? ''"
+            />
+            <MediaMessage
+              v-else-if="hasMedia(item.message)"
+              :src="mediaSource(item.message)"
+            />
+            <FileAttachment
+              v-else-if="hasCodeFilePreview(item.message)"
+              :path="item.message.file ?? ''"
+              :content="item.message.text ?? ''"
+            />
+            <FileAttachment
+              v-else-if="hasFileAttachment(item.message)"
+              :path="resolveAssetUrl(item.message.file)"
+            />
+            <TextMessage
+              v-else
+              :text="item.message.text ?? ''"
+            />
+            </MessageBubble>
+          </template>
+        </template>
       </main>
 
       <form class="composer" :data-expanded="composerExpanded" @submit.prevent="onSubmit">
@@ -674,85 +672,37 @@ useHotkey([
   box-shadow: 0 24px 60px color-mix(in srgb, black 50%, transparent);
   display: grid;
   gap: 1rem;
-  grid-template-columns: 260px 1fr;
   height: 100%;
   margin: 0 auto;
   min-height: 0;
-  max-width: 1040px;
+  max-width: 1120px;
   padding: 1.2rem;
-}
-
-.session-sidebar {
-  background: color-mix(in srgb, var(--surface) 82%, transparent);
-  border: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
-  border-radius: 0.95rem;
-  display: grid;
-  gap: 0.75rem;
-  grid-template-rows: auto 1fr;
-  min-height: 0;
-  padding: 0.8rem;
-}
-
-.session-header {
-  align-items: center;
-  display: flex;
-  justify-content: space-between;
-}
-
-.session-list {
-  display: grid;
-  gap: 0.5rem;
-  min-height: 0;
-  overflow-y: auto;
-}
-
-.session-item {
-  align-items: baseline;
-  background: color-mix(in srgb, var(--surface) 76%, transparent);
-  border: 1px solid color-mix(in srgb, var(--panel-edge) 88%, transparent);
-  border-radius: 0.7rem;
-  color: var(--text);
-  cursor: pointer;
-  display: grid;
-  gap: 0.1rem;
-  justify-items: start;
-  padding: 0.55rem 0.65rem;
-  text-align: left;
-}
-
-.session-item[data-active="true"] {
-  border-color: color-mix(in srgb, var(--brand) 66%, var(--panel-edge));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand-2) 35%, transparent);
-}
-
-.session-name {
-  font-size: 0.9rem;
-  font-weight: 600;
-}
-
-.session-meta {
-  color: var(--muted);
-  font-size: 0.75rem;
 }
 
 .chat-main {
   display: grid;
   gap: 1rem;
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   min-height: 0;
 }
 
 .chat-header {
   align-items: center;
   display: flex;
-  justify-content: space-between;
   gap: 1rem;
+  justify-content: space-between;
 }
 
 .title-wrap h1 {
-  font-size: clamp(1.2rem, 2.2vw, 1.7rem);
-  letter-spacing: 0.02em;
+  font-size: clamp(1.2rem, 2.2vw, 1.8rem);
+  letter-spacing: 0.01em;
   margin: 0;
+}
+
+.chat-subtitle {
+  color: var(--muted);
+  margin: 0.4rem 0 0;
+  max-width: 40rem;
 }
 
 .eyebrow {
@@ -766,7 +716,9 @@ useHotkey([
 .status-wrap {
   align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
+  justify-content: flex-end;
 }
 
 .ghost-button {
@@ -801,56 +753,99 @@ useHotkey([
   border-radius: 1rem;
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: 0.9rem;
   min-height: 0;
   overflow-y: auto;
   padding: 1rem;
 }
 
-.bubble {
+.message-time-separator {
+  align-items: center;
+  color: color-mix(in srgb, var(--muted) 90%, transparent);
+  display: grid;
+  font-size: 0.75rem;
+  gap: 0.7rem;
+  grid-template-columns: 1fr auto 1fr;
+  margin: 0.1rem 0;
+}
+
+.message-time-separator::before,
+.message-time-separator::after {
+  border-top: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
+  content: "";
+}
+
+.welcome-state {
+  display: grid;
+  gap: 1.2rem;
+  margin: auto 0;
+  min-height: 100%;
+  place-content: center;
+}
+
+.welcome-copy h2 {
+  font-size: clamp(1.6rem, 4vw, 2.35rem);
+  margin: 0;
+}
+
+.welcome-copy p:last-child {
+  color: var(--muted);
+  line-height: 1.6;
+  margin: 0.75rem 0 0;
+  max-width: 42rem;
+}
+
+.quick-prompts {
+  display: grid;
+  gap: 0.8rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.quick-prompt {
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--brand) 18%, transparent), transparent),
+    color-mix(in srgb, var(--surface) 95%, transparent);
+  border: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
   border-radius: 1rem;
-  max-width: min(74ch, 88%);
-  padding: 0.65rem 0.85rem;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  padding: 1rem 1.05rem;
+  text-align: left;
 }
 
-.bubble[data-sender="user"] {
-  align-self: flex-end;
-  background: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--brand) 35%, transparent),
-    color-mix(in srgb, var(--brand-2) 42%, transparent)
-  );
-  border: 1px solid color-mix(in srgb, var(--brand) 60%, transparent);
+.quick-prompt:hover {
+  border-color: color-mix(in srgb, var(--brand) 54%, var(--panel-edge));
+  transform: translateY(-1px);
 }
 
-.bubble[data-sender="assistant"] {
-  align-self: flex-start;
+.capability-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.capability-chip {
   background: color-mix(in srgb, var(--surface) 92%, transparent);
-  border: 1px solid color-mix(in srgb, var(--panel-edge) 95%, transparent);
-}
-
-.bubble-head {
+  border: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
+  border-radius: 999px;
   color: var(--muted);
-  font-size: 0.78rem;
-  letter-spacing: 0.08em;
-  margin-bottom: 0.35rem;
-  text-transform: uppercase;
-}
-
-.bubble-body {
-  line-height: 1.45;
-}
-
-.empty-tip {
-  color: var(--muted);
-  margin: auto;
+  font-size: 0.84rem;
+  padding: 0.42rem 0.72rem;
 }
 
 .composer {
-  align-items: flex-end;
+  backdrop-filter: blur(8px);
+  background: color-mix(in srgb, var(--panel) 90%, transparent);
+  border: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
+  border-radius: 1rem;
   display: flex;
   flex-direction: column;
   gap: 0.7rem;
+  padding: 0.85rem;
+  position: sticky;
+  bottom: 0;
 }
 
 .composer[data-expanded="true"] {
@@ -865,9 +860,9 @@ useHotkey([
   font-family: inherit;
   font-size: 1rem;
   min-height: 2.8rem;
+  padding: 0.75rem 0.9rem;
   resize: none;
   width: 100%;
-  padding: 0.75rem 0.9rem;
 }
 
 .composer[data-expanded="true"] .composer-input {
@@ -891,6 +886,7 @@ useHotkey([
   font-family: inherit;
   font-weight: 700;
   min-width: 5.3rem;
+  padding: 0.55rem 0.9rem;
 }
 
 .composer-actions .ghost-button {
@@ -912,13 +908,7 @@ useHotkey([
 @media (max-width: 1023px) {
   .chat-shell {
     border-radius: 0.9rem;
-    grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr);
-    padding: 0.85rem;
-  }
-
-  .session-sidebar {
-    max-height: clamp(8rem, 24vh, 12rem);
+    padding: 0.9rem;
   }
 
   .chat-header {
@@ -926,8 +916,36 @@ useHotkey([
     flex-direction: column;
   }
 
+  .status-wrap {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 767px) {
+  .chat-shell {
+    border-radius: 0;
+    box-shadow: none;
+    padding: 0.75rem;
+  }
+
+  .messages {
+    padding: 0.8rem;
+  }
+
+  .quick-prompts {
+    grid-template-columns: 1fr;
+  }
+
   .composer {
-    align-items: stretch;
+    padding: 0.7rem;
+  }
+
+  .composer-actions {
+    flex-direction: column;
+  }
+
+  .composer-actions button {
+    width: 100%;
   }
 }
 </style>

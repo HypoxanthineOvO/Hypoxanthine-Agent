@@ -11,6 +11,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, ConfigDict
 
 from hypo_agent.core.config_loader import get_memory_dir
+from hypo_agent.core.time_utils import utc_isoformat
 from hypo_agent.gateway.auth import require_api_token
 from hypo_agent.models import Message
 
@@ -50,6 +51,13 @@ def _safe_file_path(root: Path, relative_path: str) -> Path:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid file path") from exc
     return candidate
+
+
+def _dump_message(message: Message) -> dict[str, Any]:
+    payload = message.model_dump(mode="json")
+    if message.timestamp is None:
+        payload.pop("timestamp", None)
+    return payload
 
 
 async def _list_table_names(db_path: Path) -> list[str]:
@@ -237,14 +245,17 @@ async def export_session(
     if format == "json":
         return {
             "session_id": session_id,
-            "messages": [message.model_dump(mode="json") for message in messages],
+            "messages": [_dump_message(message) for message in messages],
         }
     if format == "markdown":
         lines = [f"# Session {session_id}", ""]
         for message in messages:
             sender = message.sender
-            timestamp = message.timestamp.isoformat()
-            lines.append(f"## {sender} ({timestamp})")
+            timestamp = utc_isoformat(message.timestamp)
+            if timestamp:
+                lines.append(f"## {sender} ({timestamp})")
+            else:
+                lines.append(f"## {sender}")
             lines.append("")
             lines.append(message.text or "")
             lines.append("")

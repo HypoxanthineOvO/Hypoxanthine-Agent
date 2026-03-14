@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import inspect
@@ -14,18 +15,26 @@ import yaml
 
 from hypo_agent.core.config_loader import get_memory_dir
 from hypo_agent.channels.qq_channel import QQChannelService
-from hypo_agent.core.config_loader import load_secrets_config, load_tasks_config
+from hypo_agent.core.config_loader import (
+    load_persona_config,
+    load_secrets_config,
+    load_tasks_config,
+    load_runtime_model_config,
+    render_persona_system_prompt,
+)
 from hypo_agent.core.channel_adapter import WebUIAdapter
 from hypo_agent.core.channel_dispatcher import ChannelDispatcher
-from hypo_agent.core.config_loader import load_runtime_model_config
+from hypo_agent.core.directory_index import refresh_directory_index
 from hypo_agent.core.event_queue import EventQueue
 from hypo_agent.core.heartbeat import HeartbeatService
 from hypo_agent.core.model_router import ModelRouter
+from hypo_agent.core.narration_observer import NarrationObserver
 from hypo_agent.core.output_compressor import OutputCompressor
 from hypo_agent.core.pipeline import ChatPipeline
 from hypo_agent.core.scheduler import SchedulerService
 from hypo_agent.core.slash_commands import SlashCommandHandler
 from hypo_agent.core.skill_manager import SkillManager
+from hypo_agent.core.time_utils import utc_isoformat, utc_now
 from hypo_agent.gateway.config_api import router as config_api_router
 from hypo_agent.gateway.compressed_api import router as compressed_api_router
 from hypo_agent.gateway.dashboard_api import router as dashboard_api_router
@@ -35,10 +44,11 @@ from hypo_agent.gateway.memory_api import router as memory_api_router
 from hypo_agent.gateway.sessions_api import router as sessions_api_router
 from hypo_agent.gateway.middleware import WsTokenAuthMiddleware
 from hypo_agent.gateway.qq_ws import router as qq_ws_router
+from hypo_agent.gateway.qq_ws_client import NapCatWebSocketClient
 from hypo_agent.gateway.settings import load_gateway_settings
-from hypo_agent.gateway.ws import broadcast_message, router as ws_router
+from hypo_agent.gateway.ws import broadcast_message, connection_manager, router as ws_router
 from hypo_agent.memory import SessionMemory, StructuredStore
-from hypo_agent.models import Message, SecurityConfig
+from hypo_agent.models import Message, QQServiceConfig, SecurityConfig
 from hypo_agent.security import CircuitBreaker, PermissionManager
 from hypo_agent.skills import (
     CodeRunSkill,
@@ -96,6 +106,8 @@ def _register_enabled_skills(
     tmux_timeout = int(tmux_cfg.get("timeout_seconds", default_timeout))
     code_run_timeout = int(code_run_cfg.get("timeout_seconds", default_timeout))
     auto_confirm = bool(reminder_cfg.get("auto_confirm", True))
+    if scheduler is not None and hasattr(scheduler, "set_email_scan_executor"):
+        scheduler.set_email_scan_executor(None)
 
     if "tmux" in enabled_skills:
         skill_manager.register(
@@ -130,6 +142,8 @@ def _register_enabled_skills(
             message_queue=message_queue,
         )
         skill_manager.register(email_skill)
+        if scheduler is not None and hasattr(scheduler, "set_email_scan_executor"):
+            scheduler.set_email_scan_executor(email_skill.scan_emails)
         if (
             heartbeat_service is not None
             and hasattr(heartbeat_service, "register_event_source")
@@ -213,6 +227,13 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
 
     runtime_config = load_runtime_model_config()
     router = ModelRouter(runtime_config, on_stream_success=on_stream_success)
+    persona_system_prompt = ""
+    persona_path = Path("config/persona.yaml")
+    if persona_path.exists():
+        try:
+            persona_system_prompt = render_persona_system_prompt(load_persona_config(persona_path))
+        except Exception:
+            logger.exception("persona.render.failed", path=str(persona_path))
     if deps.scheduler is not None:
         deps.scheduler.model_router = router
     if deps.heartbeat_service is not None and hasattr(deps.heartbeat_service, "model_router"):
@@ -253,6 +274,7 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
         output_compressor=deps.output_compressor,
         channel_adapter=WebUIAdapter(),
         event_queue=deps.event_queue,
+        persona_system_prompt=persona_system_prompt,
     )
 
 
@@ -278,7 +300,11 @@ def _ensure_pipeline_lifecycle_hooks(pipeline_obj: Any) -> None:
             setattr(pipeline_obj, method_name, _wrapped)
 
 
-def _build_qq_channel_service(config_dir: Path) -> QQChannelService | None:
+def _load_enabled_qq_service_config(config_dir: Path) -> QQServiceConfig | None:
+    enabled_skills = SkillManager.find_enabled_skills(config_dir / "skills.yaml")
+    if "qq" not in enabled_skills:
+        return None
+
     secrets_path = config_dir / "secrets.yaml"
     try:
         secrets = load_secrets_config(secrets_path)
@@ -293,6 +319,10 @@ def _build_qq_channel_service(config_dir: Path) -> QQChannelService | None:
     if qq_cfg is None:
         return None
 
+    return qq_cfg
+
+
+def _build_qq_channel_service(qq_cfg: QQServiceConfig) -> QQChannelService:
     allowed_users = {item.strip() for item in qq_cfg.allowed_users if item and item.strip()}
     return QQChannelService(
         napcat_http_url=qq_cfg.napcat_http_url,
@@ -344,6 +374,12 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await resolved_deps.structured_store.init()
+        current_config_snapshot = str(
+            Path(getattr(app.state, "config_dir", Path("config"))).resolve(strict=False)
+        )
+        refresh_narration_observer()
+        if getattr(app.state, "qq_config_dir_snapshot", None) != current_config_snapshot:
+            refresh_qq_channel_service()
         if resolved_deps.scheduler is not None:
             await resolved_deps.scheduler.start()
             tasks_path = Path(getattr(app.state, "config_dir", Path("config"))) / "tasks.yaml"
@@ -352,7 +388,25 @@ def create_app(
                     tasks_cfg = load_tasks_config(tasks_path)
                 except Exception:
                     tasks_cfg = None
+                app.state.tasks_config = tasks_cfg
                 if tasks_cfg is not None:
+                    if (
+                        resolved_deps.skill_manager is not None
+                        and hasattr(resolved_deps.skill_manager, "_skills")
+                    ):
+                        email_skill = resolved_deps.skill_manager._skills.get("email_scanner")
+                        if email_skill is not None and hasattr(email_skill, "configure_email_store"):
+                            email_skill.configure_email_store(
+                                max_entries=tasks_cfg.email_store.max_entries,
+                                retention_days=tasks_cfg.email_store.retention_days,
+                            )
+                    if (
+                        resolved_deps.heartbeat_service is not None
+                        and hasattr(resolved_deps.heartbeat_service, "decision_prompt_template")
+                    ):
+                        resolved_deps.heartbeat_service.decision_prompt_template = (
+                            tasks_cfg.heartbeat.prompt_template
+                        )
                     if (
                         tasks_cfg.heartbeat.enabled
                         and resolved_deps.heartbeat_service is not None
@@ -376,10 +430,30 @@ def create_app(
                                 tasks_cfg.email_scan.interval_minutes,
                                 email_skill.scheduled_scan,
                             )
+            else:
+                app.state.tasks_config = None
         await app.state.pipeline.start_event_consumer()
+        await restart_qq_ws_client()
+        app.state.directory_index_task = asyncio.create_task(run_directory_index_refresh())
+        app.state.email_cache_warmup_task = asyncio.create_task(run_email_cache_warmup())
         try:
             yield
         finally:
+            email_cache_warmup_task = getattr(app.state, "email_cache_warmup_task", None)
+            if email_cache_warmup_task is not None:
+                if not email_cache_warmup_task.done():
+                    email_cache_warmup_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await email_cache_warmup_task
+            directory_index_task = getattr(app.state, "directory_index_task", None)
+            if directory_index_task is not None:
+                if not directory_index_task.done():
+                    directory_index_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await directory_index_task
+            qq_ws_client = getattr(app.state, "qq_ws_client", None)
+            if qq_ws_client is not None:
+                await qq_ws_client.stop()
             await app.state.pipeline.stop_event_consumer()
             if resolved_deps.scheduler is not None:
                 await resolved_deps.scheduler.stop()
@@ -408,34 +482,269 @@ def create_app(
     app.state.scheduler = resolved_deps.scheduler
     app.state.heartbeat_service = resolved_deps.heartbeat_service
     app.state.pipeline = pipeline_instance
+    connection_manager.reset()
+    app.state.ws_connection_manager = connection_manager
     app.state.channel_dispatcher = ChannelDispatcher()
     app.state.qq_channel_service = None
+    app.state.qq_ws_client = None
+    app.state.qq_ws_url = None
+    app.state.qq_ws_token = ""
+    app.state.qq_config_dir_snapshot = None
+    app.state.directory_index_task = None
+    app.state.email_cache_warmup_task = None
+    app.state.narration_observer = None
+    app.state.tasks_config = None
 
-    async def push_ws_message(payload: dict[str, object]) -> None:
-        await broadcast_message(payload)
+    if (
+        app.state.scheduler is not None
+        and hasattr(app.state.scheduler, "set_email_scan_executor")
+    ):
+        email_skill = None
+        if app.state.skill_manager is not None and hasattr(app.state.skill_manager, "_skills"):
+            email_skill = app.state.skill_manager._skills.get("email_scanner")
+        executor = getattr(email_skill, "scan_emails", None) if email_skill is not None else None
+        app.state.scheduler.set_email_scan_executor(executor if callable(executor) else None)
 
-    async def push_webui_message(message: Message) -> None:
-        await push_ws_message(message.model_dump(mode="json"))
+    async def push_ws_message(
+        payload: dict[str, object],
+        *,
+        exclude_client_ids: set[str] | None = None,
+    ) -> None:
+        await broadcast_message(payload, exclude_client_ids=exclude_client_ids)
+
+    async def push_webui_message(
+        message: Message,
+        *,
+        exclude_client_ids: set[str] | None = None,
+    ) -> None:
+        await push_ws_message(
+            message.model_dump(mode="json"),
+            exclude_client_ids=exclude_client_ids,
+        )
 
     app.state.channel_dispatcher.register("webui", push_webui_message)
+
+    def qq_runtime_connected() -> bool:
+        service = getattr(app.state, "qq_channel_service", None)
+        client = getattr(app.state, "qq_ws_client", None)
+        if service is None or client is None:
+            return False
+        if hasattr(client, "get_status"):
+            try:
+                status = client.get_status()
+            except Exception:
+                return False
+            return str(status.get("status") or "").strip().lower() == "connected"
+        return str(getattr(client, "status", "")).strip().lower() == "connected"
+
+    async def mirror_webui_message_to_qq(message: Message) -> None:
+        if str(message.channel).strip().lower() != "webui":
+            return
+        service = getattr(app.state, "qq_channel_service", None)
+        if service is None or not qq_runtime_connected():
+            return
+        if not callable(getattr(service, "send_message", None)):
+            return
+
+        raw_text = str(message.text or "").strip()
+        if not raw_text:
+            return
+        if bool(message.metadata.get("ephemeral")):
+            return
+
+        prefix = "[WebUI] Assistant: "
+        if message.sender == "user":
+            prefix = "[WebUI] User: "
+        elif message.sender != "assistant":
+            return
+
+        text = raw_text
+        if message.sender == "assistant" and len(text) > 500:
+            text = f"{text[:500]}... [完整内容请查看 WebUI]"
+
+        await service.send_message(
+            Message(
+                text=f"{prefix}{text}",
+                sender="assistant",
+                session_id=message.session_id,
+                channel="webui",
+            )
+        )
+
+    async def emit_narration(
+        payload: dict[str, Any],
+        *,
+        origin_channel: str | None = None,
+        sender_id: str | None = None,
+    ) -> None:
+        session_id = str(payload.get("session_id") or "main")
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            return
+
+        event_payload = {
+            "type": "narration",
+            "text": text,
+            "session_id": session_id,
+            "timestamp": str(payload.get("timestamp") or utc_isoformat(utc_now())),
+        }
+        await push_ws_message(event_payload)
+
+        if str(origin_channel or "").strip().lower() != "qq":
+            return
+        service = getattr(app.state, "qq_channel_service", None)
+        if service is None or not qq_runtime_connected():
+            return
+        if not callable(getattr(service, "send_message", None)):
+            return
+        await service.send_message(
+            Message(
+                text=text,
+                sender="assistant",
+                session_id=session_id,
+                channel="qq",
+                sender_id=sender_id,
+            )
+        )
+
+    def refresh_narration_observer() -> None:
+        observer = None
+        router = getattr(app.state.pipeline, "router", None)
+        config_path = Path(getattr(app.state, "config_dir", Path("config"))) / "narration.yaml"
+        if config_path.exists() and router is not None and callable(getattr(router, "call", None)):
+            try:
+                candidate = NarrationObserver(router=router, config_path=config_path)
+            except Exception:
+                logger.exception("narration.config.load_failed", path=str(config_path))
+            else:
+                if candidate.enabled:
+                    observer = candidate
+        app.state.narration_observer = observer
+        setattr(app.state.pipeline, "narration_observer", observer)
+        setattr(app.state.pipeline, "on_narration", emit_narration)
 
     def refresh_qq_channel_service() -> None:
         app.state.channel_dispatcher.unregister("qq")
         config_dir = Path(getattr(app.state, "config_dir", Path("config")))
-        service = _build_qq_channel_service(config_dir)
+        app.state.qq_config_dir_snapshot = str(config_dir.resolve(strict=False))
+        qq_cfg = _load_enabled_qq_service_config(config_dir)
+        app.state.qq_ws_url = None
+        app.state.qq_ws_token = ""
+        if qq_cfg is None:
+            app.state.qq_channel_service = None
+            logger.info("qq.channel.disabled", config_dir=str(config_dir))
+            return
+
+        def on_message_sent() -> None:
+            client = getattr(app.state, "qq_ws_client", None)
+            if client is not None and hasattr(client, "record_message_sent"):
+                client.record_message_sent()
+
+        service = QQChannelService(
+            napcat_http_url=qq_cfg.napcat_http_url,
+            napcat_http_token=qq_cfg.napcat_http_token,
+            bot_qq=qq_cfg.bot_qq,
+            allowed_users={item.strip() for item in qq_cfg.allowed_users if item and item.strip()},
+            on_message_sent=on_message_sent,
+        )
         app.state.qq_channel_service = service
-        if service is not None:
-            app.state.channel_dispatcher.register("qq", service.send_message)
+        app.state.qq_ws_url = qq_cfg.napcat_ws_url
+        app.state.qq_ws_token = qq_cfg.napcat_ws_token
+        app.state.channel_dispatcher.register("qq", service.send_message)
+        logger.info(
+            "qq.channel.enabled",
+            config_dir=str(config_dir),
+            napcat_ws_url=qq_cfg.napcat_ws_url,
+            napcat_http_url=qq_cfg.napcat_http_url,
+            allowed_users=len(service.allowed_users),
+        )
+
+    async def restart_qq_ws_client() -> None:
+        existing_client = getattr(app.state, "qq_ws_client", None)
+        if existing_client is not None:
+            await existing_client.stop()
+            app.state.qq_ws_client = None
+
+        service = getattr(app.state, "qq_channel_service", None)
+        url = str(getattr(app.state, "qq_ws_url", "") or "").strip()
+        if service is None or not url:
+            return
+
+        client = NapCatWebSocketClient(
+            url=url,
+            bot_qq=str(getattr(service, "bot_qq", "") or ""),
+            token=str(getattr(app.state, "qq_ws_token", "") or ""),
+            service_getter=lambda: getattr(app.state, "qq_channel_service", None),
+            pipeline_getter=lambda: getattr(app.state, "pipeline", None),
+        )
+        app.state.qq_ws_client = client
+        await client.start()
+
+    async def run_directory_index_refresh() -> None:
+        index_file = Path(app.state.knowledge_dir) / "directory_index.yaml"
+        try:
+            await refresh_directory_index(index_file=index_file)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "directory_index.refresh.failed",
+                index_file=str(index_file),
+            )
+
+    async def run_email_cache_warmup() -> None:
+        tasks_cfg = getattr(app.state, "tasks_config", None)
+        if tasks_cfg is None or not getattr(tasks_cfg.email_store, "enabled", False):
+            return
+        skill_manager = getattr(app.state, "skill_manager", None)
+        if skill_manager is None or not hasattr(skill_manager, "_skills"):
+            return
+        email_skill = skill_manager._skills.get("email_scanner")
+        if email_skill is None:
+            return
+        email_store = getattr(email_skill, "email_store", None)
+        if email_store is None or not hasattr(email_store, "needs_warmup"):
+            return
+        try:
+            should_warm = bool(email_store.needs_warmup(max_age_hours=24))
+        except Exception:
+            logger.exception("email.cache_warmup.check_failed")
+            return
+        if not should_warm or not callable(getattr(email_skill, "scan_emails", None)):
+            return
+        try:
+            await email_skill.scan_emails(
+                params={
+                    "hours_back": tasks_cfg.email_store.warmup_hours,
+                    "triggered_by": "cache_warmup",
+                }
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("email.cache_warmup.failed")
 
     async def on_proactive_message(
         message: Message,
         *,
         exclude_channels: set[str] | None = None,
+        exclude_client_ids: set[str] | None = None,
     ) -> None:
-        await app.state.channel_dispatcher.broadcast(message, exclude_channels=exclude_channels)
+        merged_exclusions = {item for item in (exclude_channels or set()) if item}
+        if str(message.channel).strip().lower() == "webui":
+            merged_exclusions.add("qq")
+        await app.state.channel_dispatcher.broadcast(
+            message,
+            exclude_channels=merged_exclusions,
+            exclude_client_ids=exclude_client_ids,
+        )
+        await mirror_webui_message_to_qq(message)
 
     app.state.push_ws_message = push_ws_message
+    app.state.mirror_webui_message_to_qq = mirror_webui_message_to_qq
     setattr(app.state.pipeline, "on_proactive_message", on_proactive_message)
+    app.state.emit_narration = emit_narration
+    refresh_narration_observer()
 
     async def reload_config() -> None:
         settings = load_gateway_settings()
@@ -466,9 +775,11 @@ def create_app(
         app.state.pipeline = _build_default_pipeline(deps)
         _ensure_pipeline_lifecycle_hooks(app.state.pipeline)
         setattr(app.state.pipeline, "on_proactive_message", on_proactive_message)
-        refresh_qq_channel_service()
         app.state.output_compressor = deps.output_compressor
+        refresh_narration_observer()
         await app.state.pipeline.start_event_consumer()
+        refresh_qq_channel_service()
+        await restart_qq_ws_client()
 
     resolved_deps.reload_config = reload_config
     app.state.reload_config = reload_config

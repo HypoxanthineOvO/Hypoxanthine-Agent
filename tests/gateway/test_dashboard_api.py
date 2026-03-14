@@ -138,6 +138,34 @@ skills:
     assert row["status"] == "disabled"
 
 
+def test_dashboard_skills_shows_enabled_qq_channel_from_gateway_runtime(tmp_path) -> None:
+    client = _build_client(tmp_path)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "skills.yaml").write_text(
+        """
+skills:
+  qq:
+    enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with client:
+        client.app.state.config_dir = config_dir
+        client.app.state.qq_channel_service = object()
+        response = client.get(
+            "/api/dashboard/skills",
+            params={"token": "test-token"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    row = next(item for item in payload["data"] if item["name"] == "qq")
+    assert row["enabled"] is True
+    assert row["status"] == "healthy"
+
+
 def test_dashboard_stats_pass_since_filter_to_store(tmp_path) -> None:
     client = _build_client(tmp_path)
     captured: dict[str, str | None] = {"token_since": None, "invocation_since": None}

@@ -1,0 +1,18 @@
+enabled: true
+
+# 轻量模型别名；可改成具体模型名，或使用 lightweight 走 task_routing.lightweight
+model: lightweight
+
+tool_levels:
+  heavy:
+    - scan_emails
+    - search_emails
+    - run_command
+    - run_code
+    - web_search
+  medium:
+    - write_file
+    - create_file
+
+debounce_seconds: 2
+max_narration_length: 80

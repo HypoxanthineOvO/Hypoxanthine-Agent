@@ -5,6 +5,7 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict
 
+from hypo_agent.core.config_loader import expand_runtime_payload
 from hypo_agent.models import SecurityConfig
 
 
@@ -17,6 +18,7 @@ class GatewaySettings(BaseModel):
 
 def load_gateway_settings(path: Path | str = "config/security.yaml") -> GatewaySettings:
     payload = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    payload = expand_runtime_payload(payload)
     token = str(payload.get("auth_token", "")).strip()
     if not token:
         raise ValueError("auth_token is required in security.yaml")

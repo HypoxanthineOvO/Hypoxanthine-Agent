@@ -50,12 +50,11 @@ def test_webui_adapter_formats_assistant_chunk_from_rich_response() -> None:
         session_id="s1",
     )
 
-    assert formatted == {
-        "type": "assistant_chunk",
-        "text": "chunk-1",
-        "sender": "assistant",
-        "session_id": "s1",
-    }
+    assert formatted["type"] == "assistant_chunk"
+    assert formatted["text"] == "chunk-1"
+    assert formatted["sender"] == "assistant"
+    assert formatted["session_id"] == "s1"
+    assert formatted["timestamp"].endswith("Z")
 
 
 def test_webui_adapter_formats_tool_result_with_compressed_meta() -> None:

@@ -1,12 +1,24 @@
 from __future__ import annotations
 
+import getpass
 import os
 from pathlib import Path
+import platform
+import re
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
-from hypo_agent.models import ModelConfig, SecretsConfig, TasksConfig
+from hypo_agent.models import (
+    ModelConfig,
+    NarrationConfig,
+    PersonaConfig,
+    SecretsConfig,
+    TasksConfig,
+)
+
+_PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 
 
 class ResolvedModelConfig(BaseModel):
@@ -36,6 +48,81 @@ def _load_yaml(path: Path) -> dict:
     payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(payload, dict):
         raise ValueError(f"Expected YAML mapping in {path}")
+    return payload
+
+
+def _looks_like_agent_root(path: Path) -> bool:
+    return (path / "src").exists() and (path / "config").exists()
+
+
+def _read_os_summary() -> str:
+    os_release = Path("/etc/os-release")
+    if os_release.exists():
+        for line in os_release.read_text(encoding="utf-8").splitlines():
+            if line.startswith("PRETTY_NAME="):
+                return line.split("=", 1)[1].strip().strip('"')
+    return platform.platform()
+
+
+def get_agent_root() -> Path:
+    raw = os.getenv("HYPO_AGENT_ROOT", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve(strict=False)
+
+    cwd = Path.cwd().resolve(strict=False)
+    if _looks_like_agent_root(cwd):
+        return cwd
+
+    project_root = Path(__file__).resolve().parents[3]
+    if _looks_like_agent_root(project_root):
+        return project_root
+
+    return cwd
+
+
+def build_runtime_template_context(
+    extra_context: dict[str, str] | None = None,
+) -> dict[str, str]:
+    context = {
+        "HYPO_AGENT_ROOT": str(get_agent_root()),
+        "HYPO_OS": _read_os_summary(),
+        "HYPO_USERNAME": getpass.getuser(),
+        "HYPO_CONDA_ENV": os.getenv("CONDA_DEFAULT_ENV", "").strip() or "HypoAgent",
+        "HYPO_SERVER_NAME": os.getenv("HYPO_SERVER_NAME", "").strip() or "Genesis",
+    }
+    if extra_context:
+        context.update({key: str(value) for key, value in extra_context.items()})
+    return context
+
+
+def expand_runtime_placeholders(
+    value: str,
+    *,
+    extra_context: dict[str, str] | None = None,
+) -> str:
+    context = build_runtime_template_context(extra_context)
+
+    def _replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        return context.get(key, match.group(0))
+
+    return _PLACEHOLDER_PATTERN.sub(_replace, value)
+
+
+def expand_runtime_payload(
+    payload: Any,
+    *,
+    extra_context: dict[str, str] | None = None,
+) -> Any:
+    if isinstance(payload, str):
+        return expand_runtime_placeholders(payload, extra_context=extra_context)
+    if isinstance(payload, list):
+        return [expand_runtime_payload(item, extra_context=extra_context) for item in payload]
+    if isinstance(payload, dict):
+        return {
+            key: expand_runtime_payload(value, extra_context=extra_context)
+            for key, value in payload.items()
+        }
     return payload
 
 
@@ -114,6 +201,44 @@ def load_secrets_config(
 ) -> SecretsConfig:
     secrets_payload = _load_yaml(Path(secrets_path))
     return SecretsConfig.model_validate(secrets_payload)
+
+
+def load_persona_config(
+    persona_path: Path | str = "config/persona.yaml",
+) -> PersonaConfig:
+    persona_payload = _load_yaml(Path(persona_path))
+    return PersonaConfig.model_validate(persona_payload)
+
+
+def load_narration_config(
+    narration_path: Path | str = "config/narration.yaml",
+) -> NarrationConfig:
+    narration_payload = _load_yaml(Path(narration_path))
+    return NarrationConfig.model_validate(narration_payload)
+
+
+def render_persona_system_prompt(
+    persona: PersonaConfig | Path | str = "config/persona.yaml",
+    *,
+    extra_context: dict[str, str] | None = None,
+) -> str:
+    persona_config = (
+        load_persona_config(persona)
+        if isinstance(persona, (str, Path))
+        else persona
+    )
+
+    template = persona_config.system_prompt_template.strip()
+    if template:
+        return expand_runtime_placeholders(template, extra_context=extra_context).strip()
+
+    lines = [f"你是 {persona_config.name}。"]
+    if persona_config.personality:
+        lines.append("人格特征：" + "、".join(persona_config.personality))
+    tone = persona_config.speaking_style.get("tone")
+    if tone:
+        lines.append(f"表达风格：{tone}")
+    return "\n".join(lines).strip()
 
 
 def load_tasks_config(

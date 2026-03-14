@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email import message_from_bytes
 from email.header import decode_header, make_header
 from email.message import Message as EmailMessage
@@ -15,6 +16,7 @@ from typing import Any
 import yaml
 
 from hypo_agent.core.config_loader import get_memory_dir
+from hypo_agent.memory.email_store import EmailStore
 from hypo_agent.models import SkillOutput
 from hypo_agent.skills.base import BaseSkill
 
@@ -44,6 +46,7 @@ class EmailScannerSkill(BaseSkill):
         security_config_path: Path | str = "config/security.yaml",
         imap_client_factory: Any | None = None,
         attachments_root: Path | str | None = None,
+        email_store: EmailStore | None = None,
     ) -> None:
         self.structured_store = structured_store
         self.model_router = model_router
@@ -56,8 +59,15 @@ class EmailScannerSkill(BaseSkill):
         if attachments_root is None:
             attachments_root = get_memory_dir() / "email_attachments"
         self.attachments_root = Path(attachments_root)
-        self._rules: list[EmailRule] = self._load_rules()
+        self.email_store = email_store or EmailStore(root=get_memory_dir() / "emails")
+        self._rules, self._user_preferences = self._load_rule_config()
         self._bootstrap_drafts: dict[str, str] = {}
+        self.last_scan_at: str | None = None
+        self.emails_processed = 0
+        self._scan_in_progress = False
+        self._last_heartbeat_push_at: datetime | None = None
+        self._recent_reported_message_ids: deque[str] = deque()
+        self._recent_reported_message_id_set: set[str] = set()
 
     @property
     def tools(self) -> list[dict[str, Any]]:
@@ -66,12 +76,26 @@ class EmailScannerSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "scan_emails",
-                    "description": "Scan configured mailboxes and summarize new emails.",
+                    "description": (
+                        "扫描邮箱收件箱，拉取最近一段时间的邮件并按用户偏好分类和摘要。"
+                        "默认查看最近 24 小时。用户说'看邮件'、'查邮件'、"
+                        "'有什么新邮件'、'帮我看最近三天的邮件'时调用此工具。"
+                        "扫描结果会自动缓存，后续搜索会更快更准。"
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "bootstrap_confirm": {"type": "boolean", "default": False},
                             "draft_id": {"type": "string"},
+                            "hours_back": {
+                                "type": "integer",
+                                "default": 24,
+                                "minimum": 1,
+                            },
+                            "unread_only": {
+                                "type": "boolean",
+                                "default": False,
+                            },
                         },
                     },
                 },
@@ -80,10 +104,25 @@ class EmailScannerSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "search_emails",
-                    "description": "Search processed emails by keyword.",
+                    "description": (
+                        "搜索邮件。优先从本地缓存搜索，缓存不足时自动从邮箱补充。"
+                        "如果搜索结果不理想，你应该："
+                        "1. 换不同的关键词重试（比如用发件人名字、邮件主题的部分词）；"
+                        "2. 用 list_emails 拉最近几天的邮件列表，自己浏览判断；"
+                        "3. 扩大时间范围（hours_back 参数）；"
+                        "4. 反问用户：你记得大概是什么时候的邮件？发件人是谁？"
+                        "不要在第一次搜索失败后就告诉用户搜不到。"
+                    ),
                     "parameters": {
                         "type": "object",
-                        "properties": {"query": {"type": "string"}},
+                        "properties": {
+                            "query": {"type": "string"},
+                            "hours_back": {
+                                "type": "integer",
+                                "default": 168,
+                                "minimum": 1,
+                            },
+                        },
                         "required": ["query"],
                     },
                 },
@@ -91,8 +130,42 @@ class EmailScannerSkill(BaseSkill):
             {
                 "type": "function",
                 "function": {
+                    "name": "list_emails",
+                    "description": (
+                        "列出最近的邮件概览（标题、发件人、时间）。"
+                        "这是你的邮件数据源。当用户说帮我找某封邮件时，你可以："
+                        "1. 先用 list_emails 拉最近几天的列表；"
+                        "2. 自己根据用户描述判断哪些邮件可能相关；"
+                        "3. 用 get_email_detail 展开看正文确认；"
+                        "4. 如果列表里没找到，扩大 hours_back 或反问用户更多线索。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "hours_back": {
+                                "type": "integer",
+                                "default": 72,
+                                "minimum": 1,
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "default": 30,
+                                "minimum": 1,
+                            },
+                            "from_filter": {"type": "string"},
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "get_email_detail",
-                    "description": "Get processed email detail by message id.",
+                    "description": (
+                        "获取某封邮件的完整内容。用户说'看一下这封邮件的详情'、"
+                        "'展开这封邮件'时调用此工具。参数：message_id（从 scan 或 search 结果中获取）。"
+                        "获取的正文会缓存到本地，下次可以直接搜索到正文内容。"
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {"message_id": {"type": "string"}},
@@ -107,26 +180,33 @@ class EmailScannerSkill(BaseSkill):
             result = await self.scan_emails(params=params)
             return SkillOutput(status="success", result=result)
         if tool_name == "search_emails":
-            return SkillOutput(
-                status="success",
-                result={"items": [], "query": str(params.get("query") or "")},
+            result = await self.search_emails(
+                query=str(params.get("query") or ""),
+                hours_back=params.get("hours_back", 168),
             )
+            return SkillOutput(status="success", result=result)
+        if tool_name == "list_emails":
+            result = await self.list_emails(
+                hours_back=params.get("hours_back", 72),
+                limit=params.get("limit", 30),
+                from_filter=params.get("from_filter"),
+            )
+            return SkillOutput(status="success", result=result)
         if tool_name == "get_email_detail":
-            return SkillOutput(
-                status="success",
-                result={"message_id": str(params.get("message_id") or ""), "detail": None},
-            )
+            result = await self.get_email_detail(message_id=str(params.get("message_id") or ""))
+            return SkillOutput(status="success", result=result)
         return SkillOutput(status="error", error_info=f"Unsupported tool '{tool_name}'")
 
-    def _load_rules(self) -> list[EmailRule]:
+    def _load_rule_config(self) -> tuple[list[EmailRule], str]:
         if not self.rules_path.exists():
-            return []
+            return [], ""
         payload = yaml.safe_load(self.rules_path.read_text(encoding="utf-8")) or {}
         if not isinstance(payload, dict):
-            return []
+            return [], ""
         raw_rules = payload.get("rules", [])
+        raw_preferences = payload.get("user_preferences", "")
         if not isinstance(raw_rules, list):
-            return []
+            raw_rules = []
 
         rules: list[EmailRule] = []
         for item in raw_rules:
@@ -149,7 +229,21 @@ class EmailScannerSkill(BaseSkill):
                     skip_llm=bool(item.get("skip_llm", False)),
                 )
             )
-        return rules
+        preferences = ""
+        if isinstance(raw_preferences, str):
+            preferences = raw_preferences.strip()
+        elif isinstance(raw_preferences, list):
+            preferences = "\n".join(str(item).strip() for item in raw_preferences if str(item).strip())
+        return rules, preferences
+
+    def _reload_rule_config(self) -> None:
+        self._rules, self._user_preferences = self._load_rule_config()
+
+    def configure_email_store(self, *, max_entries: int, retention_days: int) -> None:
+        self.email_store.configure(
+            max_entries=max_entries,
+            retention_days=retention_days,
+        )
 
     def _apply_layer1_rules(self, email_payload: dict[str, Any]) -> dict[str, Any]:
         sender = str(email_payload.get("from") or "")
@@ -224,6 +318,12 @@ class EmailScannerSkill(BaseSkill):
         prompt = (
             "你是邮件分类器。只输出 JSON，字段包含 category/confidence/reason。"
             "category 只能是 important/system/low_priority/archive。"
+        )
+        if self._user_preferences:
+            prompt += f"\n\n{self._user_preferences}"
+        prompt += (
+            f"\n\nLayer1 分类结果: matched={layer1.get('matched')} "
+            f"category={layer1.get('category')} skip_llm={layer1.get('skip_llm')}"
             f"\nfrom={email_payload.get('from', '')}"
             f"\nsubject={email_payload.get('subject', '')}"
             f"\nbody={str(email_payload.get('body', ''))[:600]}"
@@ -283,81 +383,107 @@ class EmailScannerSkill(BaseSkill):
 
     async def scan_emails(self, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
-        if self._parse_bool(params.get("bootstrap_confirm")):
-            draft_id = str(params.get("draft_id") or "").strip()
-            if draft_id and draft_id in self._bootstrap_drafts:
-                yaml_content = self._bootstrap_drafts[draft_id]
-                self._write_rules_atomically(yaml_content)
-                self._rules = self._load_rules()
-                return {
-                    "bootstrap_confirmed": True,
-                    "draft_id": draft_id,
-                    "summary": "✅ 已写入 email_rules.yaml",
-                }
-            return {
-                "bootstrap_confirmed": False,
-                "summary": "❌ draft_id 无效或已过期",
-            }
-
-        if not self._rules:
-            draft = await self.bootstrap_rules()
-            return {
-                "requires_confirmation": True,
-                "draft_id": draft["draft_id"],
-                "yaml_content": draft["yaml_content"],
-                "summary": "📂 未检测到有效规则，已生成草稿，确认后写入。",
-            }
-
-        accounts = self._load_accounts()
-        accounts_scanned = 0
-        accounts_failed = 0
-        new_emails = 0
-        duplicate_emails = 0
-        items: list[dict[str, Any]] = []
-
-        for account in accounts:
-            try:
-                scanned_items, scanned_duplicates = await self._scan_single_account(account)
-            except Exception as exc:
-                accounts_failed += 1
-                items.append(
-                    {
-                        "account_name": account.get("name", ""),
-                        "status": "failed",
-                        "error": str(exc),
+        self._reload_rule_config()
+        self._scan_in_progress = True
+        try:
+            if self._parse_bool(params.get("bootstrap_confirm")):
+                draft_id = str(params.get("draft_id") or "").strip()
+                if draft_id and draft_id in self._bootstrap_drafts:
+                    yaml_content = self._bootstrap_drafts[draft_id]
+                    self._write_rules_atomically(yaml_content)
+                    self._reload_rule_config()
+                    return {
+                        "bootstrap_confirmed": True,
+                        "draft_id": draft_id,
+                        "summary": "✅ 已写入 email_rules.yaml",
                     }
+                return {
+                    "bootstrap_confirmed": False,
+                    "summary": "❌ draft_id 无效或已过期",
+                }
+
+            triggered_by = self._parse_triggered_by(params.get("triggered_by"))
+            unread_only = self._parse_bool(params.get("unread_only"))
+            hours_back = self._parse_hours_back(params.get("hours_back"))
+            scan_started_at = datetime.now(UTC)
+            cutoff_dt = self._resolve_scan_cutoff(
+                triggered_by=triggered_by,
+                hours_back=hours_back,
+                now=scan_started_at,
+            )
+            dedupe_message_ids = (
+                self._recent_reported_message_id_set
+                if triggered_by == "heartbeat"
+                else None
+            )
+            accounts = self._load_accounts()
+            accounts_scanned = 0
+            accounts_failed = 0
+            new_emails = 0
+            duplicate_emails = 0
+            items: list[dict[str, Any]] = []
+
+            for account in accounts:
+                try:
+                    scanned_items, scanned_duplicates = await self._scan_single_account(
+                        account,
+                        cutoff_dt=cutoff_dt,
+                        unread_only=unread_only,
+                        dedupe_message_ids=dedupe_message_ids,
+                    )
+                except Exception as exc:
+                    accounts_failed += 1
+                    items.append(
+                        {
+                            "account_name": account.get("name", ""),
+                            "status": "failed",
+                            "error": str(exc),
+                        }
+                    )
+                    continue
+
+                accounts_scanned += 1
+                new_emails += len(scanned_items)
+                duplicate_emails += scanned_duplicates
+                items.extend(scanned_items)
+
+            category_counts = {"important": 0, "low_priority": 0, "archive": 0, "system": 0}
+            for item in items:
+                category = str(item.get("category") or "")
+                if category in category_counts:
+                    category_counts[category] += 1
+
+            summary = (
+                "📧 邮件扫描完成："
+                f"🔴 {category_counts['important']} 封重要；"
+                f"⚪ {category_counts['low_priority']} 封普通；"
+                f"📂 {category_counts['archive']} 封归档"
+            )
+            self.last_scan_at = datetime.now(UTC).isoformat()
+            self.emails_processed += new_emails
+            if triggered_by == "heartbeat" and items:
+                self._remember_reported_message_ids(
+                    str(item.get("message_id") or "")
+                    for item in items
                 )
-                continue
-
-            accounts_scanned += 1
-            new_emails += len(scanned_items)
-            duplicate_emails += scanned_duplicates
-            items.extend(scanned_items)
-
-        category_counts = {"important": 0, "low_priority": 0, "archive": 0, "system": 0}
-        for item in items:
-            category = str(item.get("category") or "")
-            if category in category_counts:
-                category_counts[category] += 1
-
-        summary = (
-            "📧 邮件扫描完成："
-            f"🔴 {category_counts['important']} 封重要；"
-            f"⚪ {category_counts['low_priority']} 封普通；"
-            f"📂 {category_counts['archive']} 封归档"
-        )
-        return {
-            "accounts_scanned": accounts_scanned,
-            "accounts_failed": accounts_failed,
-            "new_emails": new_emails,
-            "duplicate_emails": duplicate_emails,
-            "items": items,
-            "summary": summary,
-        }
+                self._last_heartbeat_push_at = scan_started_at
+            return {
+                "accounts_scanned": accounts_scanned,
+                "accounts_failed": accounts_failed,
+                "new_emails": new_emails,
+                "duplicate_emails": duplicate_emails,
+                "items": items,
+                "summary": summary,
+                "triggered_by": triggered_by,
+                "hours_back": hours_back,
+                "unread_only": unread_only,
+            }
+        finally:
+            self._scan_in_progress = False
 
     async def scheduled_scan(self) -> dict[str, Any]:
-        result = await self.scan_emails(params={})
-        if self.message_queue is not None:
+        result = await self.scan_emails(params={"triggered_by": "heartbeat"})
+        if self.message_queue is not None and int(result.get("new_emails") or 0) > 0:
             await self.message_queue.put(
                 {
                     "event_type": "email_scan_trigger",
@@ -367,6 +493,114 @@ class EmailScannerSkill(BaseSkill):
                 }
             )
         return result
+
+    async def search_emails(
+        self,
+        *,
+        query: str,
+        hours_back: Any = 168,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        cleaned_query = str(query or "").strip()
+        parsed_hours_back = self._parse_hours_back(hours_back)
+        parsed_limit = self._parse_limit(limit, default=20, maximum=50)
+        await self._warm_cache_if_needed(hours_back=parsed_hours_back)
+
+        local_items = [
+            self._record_to_overview(item, source="local_cache")
+            for item in self.email_store.search_local(
+                cleaned_query,
+                limit=parsed_limit,
+                hours_back=parsed_hours_back,
+            )
+        ]
+        results = list(local_items)
+        if len(results) < 3:
+            imap_items = await self._imap_subject_search(
+                query=cleaned_query,
+                hours_back=parsed_hours_back,
+                limit=parsed_limit - len(results),
+            )
+            seen_ids = {str(item.get("message_id") or "") for item in results}
+            for item in imap_items:
+                message_id = str(item.get("message_id") or "")
+                if not message_id or message_id in seen_ids:
+                    continue
+                results.append(item)
+                seen_ids.add(message_id)
+                if len(results) >= parsed_limit:
+                    break
+
+        return {
+            "query": cleaned_query,
+            "hours_back": parsed_hours_back,
+            "items": results[:parsed_limit],
+        }
+
+    async def list_emails(
+        self,
+        *,
+        hours_back: Any = 72,
+        limit: Any = 30,
+        from_filter: Any = None,
+    ) -> dict[str, Any]:
+        parsed_hours_back = self._parse_hours_back(hours_back)
+        parsed_limit = self._parse_limit(limit, default=30, maximum=100)
+        await self._warm_cache_if_needed(hours_back=parsed_hours_back)
+
+        items = [
+            self._record_to_overview(item, source="local_cache")
+            for item in self.email_store.list_recent(
+                hours_back=parsed_hours_back,
+                limit=parsed_limit,
+                from_filter=str(from_filter or "").strip() or None,
+            )
+        ]
+        return {
+            "hours_back": parsed_hours_back,
+            "limit": parsed_limit,
+            "items": items,
+        }
+
+    async def get_email_detail(self, *, message_id: str) -> dict[str, Any]:
+        key = str(message_id or "").strip()
+        if not key:
+            return {"message_id": "", "detail": None}
+
+        metadata = self.email_store.get_metadata(key) or {"message_id": key}
+        cached_body = self.email_store.get_body(key)
+        if cached_body is not None:
+            return {
+                "message_id": key,
+                "source": "local_cache",
+                "detail": {
+                    **metadata,
+                    "body": cached_body,
+                },
+            }
+
+        fetched = await self._fetch_email_by_message_id(key)
+        if fetched is None:
+            return {"message_id": key, "detail": None}
+
+        body = str(fetched.get("body") or "")
+        self.email_store.upsert(
+            self._build_email_store_record(
+                fetched,
+                category=str(metadata.get("category") or ""),
+                attachment_paths=metadata.get("attachment_paths"),
+            )
+        )
+        self.email_store.upsert_body(key, body)
+        merged = self.email_store.get_metadata(key) or metadata
+        return {
+            "message_id": key,
+            "source": "imap",
+            "detail": {
+                **merged,
+                "body": body,
+            },
+        }
 
     async def _check_new_emails(self) -> dict[str, Any]:
         # Lightweight event source used by HeartbeatService.
@@ -440,7 +674,14 @@ class EmailScannerSkill(BaseSkill):
             )
         return normalized
 
-    async def _scan_single_account(self, account: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
+    async def _scan_single_account(
+        self,
+        account: dict[str, Any],
+        *,
+        cutoff_dt: datetime | None,
+        unread_only: bool,
+        dedupe_message_ids: set[str] | None,
+    ) -> tuple[list[dict[str, Any]], int]:
         host = str(account.get("host") or "")
         port = int(account.get("port") or 993)
         if not host:
@@ -452,66 +693,87 @@ class EmailScannerSkill(BaseSkill):
         folder = str(account.get("folder") or "INBOX")
         account_name = str(account.get("name") or username or host)
         client.login(username, password)
-        client.select(folder)
+        try:
+            try:
+                client.select(folder, readonly=True)
+            except TypeError:
+                client.select(folder)
 
-        status, search_data = client.search(None, "UNSEEN")
-        if status != "OK":
-            client.logout()
-            raise RuntimeError(f"imap search failed for account={account_name}")
-
-        ids_blob = search_data[0] if search_data else b""
-        msg_ids = [item for item in ids_blob.split() if item]
-        processed_items: list[dict[str, Any]] = []
-        duplicate_count = 0
-
-        for msg_num in msg_ids:
-            fetch_status, fetched = client.fetch(msg_num, "(RFC822)")
-            if fetch_status != "OK" or not fetched:
-                continue
-            raw_bytes = fetched[0][1] if isinstance(fetched[0], tuple) else None
-            if not isinstance(raw_bytes, (bytes, bytearray)):
-                continue
-            parsed = message_from_bytes(raw_bytes)
-            payload = self._extract_email_payload(parsed, account_name=account_name, msg_num=msg_num)
-
-            if await self.structured_store.has_processed_email(account_name, payload["message_id"]):
-                duplicate_count += 1
-                continue
-
-            classification = await self._classify_email(payload)
-            category = str(classification.get("category") or "low_priority")
-            attachment_paths = self._save_attachments(
-                parsed,
-                account_name=account_name,
-                received_at=payload.get("received_at"),
+            search_criteria = self._build_search_criteria(
+                cutoff_dt=cutoff_dt,
+                unread_only=unread_only,
             )
-            item = {
-                "account_name": account_name,
-                "message_id": payload["message_id"],
-                "from": payload["from"],
-                "subject": payload["subject"],
-                "category": category,
-                "summary": str(classification.get("summary") or payload["subject"] or "(no subject)"),
-                "attachment_paths": attachment_paths,
-            }
-            inserted = await self.structured_store.insert_processed_email(
-                account_name=account_name,
-                message_id=payload["message_id"],
-                subject=payload["subject"],
-                sender=payload["from"],
-                received_at=payload.get("received_at"),
-                category=category,
-                summary=item["summary"],
-                attachment_paths=attachment_paths,
-            )
-            if inserted:
+            status, search_data = client.search(None, *search_criteria)
+            if status != "OK":
+                raise RuntimeError(f"imap search failed for account={account_name}")
+
+            ids_blob = search_data[0] if search_data else b""
+            msg_ids = [item for item in ids_blob.split() if item]
+            processed_items: list[dict[str, Any]] = []
+            duplicate_count = 0
+
+            for msg_num in msg_ids:
+                fetch_status, fetched = client.fetch(msg_num, "(BODY.PEEK[])")
+                if fetch_status != "OK" or not fetched:
+                    continue
+                raw_bytes = fetched[0][1] if isinstance(fetched[0], tuple) else None
+                if not isinstance(raw_bytes, (bytes, bytearray)):
+                    continue
+                parsed = message_from_bytes(raw_bytes)
+                payload = self._extract_email_payload(parsed, account_name=account_name, msg_num=msg_num)
+                received_dt = self._parse_received_datetime(payload.get("received_at"))
+                if not self._is_within_cutoff(received_dt, cutoff_dt):
+                    continue
+
+                message_id = payload["message_id"]
+                if dedupe_message_ids is not None and message_id in dedupe_message_ids:
+                    duplicate_count += 1
+                    continue
+
+                classification = await self._classify_email(payload)
+                category = str(classification.get("category") or "low_priority")
+                attachment_paths = self._save_attachments(
+                    parsed,
+                    account_name=account_name,
+                    received_at=payload.get("received_at"),
+                )
+                item = {
+                    "account_name": account_name,
+                    "message_id": message_id,
+                    "from": payload["from"],
+                    "subject": payload["subject"],
+                    "received_at": payload.get("received_at"),
+                    "category": category,
+                    "summary": str(classification.get("summary") or payload["subject"] or "(no subject)"),
+                    "attachment_paths": attachment_paths,
+                }
+                if hasattr(self.structured_store, "insert_processed_email"):
+                    await self.structured_store.insert_processed_email(
+                        account_name=account_name,
+                        message_id=message_id,
+                        subject=payload["subject"],
+                        sender=payload["from"],
+                        received_at=payload.get("received_at"),
+                        category=category,
+                        summary=item["summary"],
+                        attachment_paths=attachment_paths,
+                    )
+                self.email_store.upsert(
+                    self._build_email_store_record(
+                        payload,
+                        category=category,
+                        attachment_paths=attachment_paths,
+                        account_name=account_name,
+                    )
+                )
                 processed_items.append(item)
 
-            # Mark as read only after successful processing.
-            client.store(msg_num, "+FLAGS", "(\\Seen)")
-
-        client.logout()
-        return processed_items, duplicate_count
+            return processed_items, duplicate_count
+        finally:
+            try:
+                client.logout()
+            except Exception:
+                pass
 
     def _extract_email_payload(
         self,
@@ -523,6 +785,7 @@ class EmailScannerSkill(BaseSkill):
         raw_subject = str(parsed.get("Subject") or "")
         subject = str(make_header(decode_header(raw_subject))) if raw_subject else ""
         sender = str(parsed.get("From") or "")
+        recipient = str(parsed.get("To") or "")
         message_id = str(parsed.get("Message-ID") or "").strip()
         if not message_id:
             message_id = f"<{account_name}-{msg_num.decode('utf-8', errors='ignore')}>"
@@ -531,6 +794,7 @@ class EmailScannerSkill(BaseSkill):
         return {
             "message_id": message_id,
             "from": sender,
+            "to": recipient,
             "subject": subject,
             "received_at": received_at,
             "body": body,
@@ -592,6 +856,261 @@ class EmailScannerSkill(BaseSkill):
         cleaned = "".join(ch for ch in cleaned if ch not in {"\0", ":"})
         return cleaned or "attachment.bin"
 
+    async def _warm_cache_if_needed(self, *, hours_back: int) -> None:
+        if self.email_store.count_recent(hours_back=hours_back) >= 20:
+            return
+        await self.scan_emails(
+            params={
+                "hours_back": hours_back,
+                "triggered_by": "cache_warmup",
+            }
+        )
+
+    async def _imap_subject_search(
+        self,
+        *,
+        query: str,
+        hours_back: int,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
+        terms = self._split_query_terms(query)
+        if not terms:
+            return []
+        cutoff_dt = datetime.now(UTC) - timedelta(hours=max(1, hours_back))
+        accounts = self._load_accounts()
+        results: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for account in accounts:
+            host = str(account.get("host") or "")
+            port = int(account.get("port") or 993)
+            if not host:
+                continue
+            client = self.imap_client_factory(host, port)
+            try:
+                client.login(str(account.get("username") or ""), str(account.get("password") or ""))
+                try:
+                    client.select(str(account.get("folder") or "INBOX"), readonly=True)
+                except TypeError:
+                    client.select(str(account.get("folder") or "INBOX"))
+
+                candidate_ids: list[bytes] = []
+                for term in terms:
+                    status, search_data = client.search(None, "SUBJECT", term)
+                    if status != "OK":
+                        continue
+                    ids_blob = search_data[0] if search_data else b""
+                    candidate_ids.extend(item for item in ids_blob.split() if item)
+
+                for msg_num in candidate_ids:
+                    fetch_status, fetched = client.fetch(msg_num, "(BODY.PEEK[])")
+                    if fetch_status != "OK" or not fetched:
+                        continue
+                    raw_bytes = fetched[0][1] if isinstance(fetched[0], tuple) else None
+                    if not isinstance(raw_bytes, (bytes, bytearray)):
+                        continue
+                    parsed = message_from_bytes(raw_bytes)
+                    payload = self._extract_email_payload(
+                        parsed,
+                        account_name=str(account.get("name") or host),
+                        msg_num=msg_num,
+                    )
+                    message_id = str(payload.get("message_id") or "").strip()
+                    if not message_id or message_id in seen_ids:
+                        continue
+                    received_dt = self._parse_received_datetime(payload.get("received_at"))
+                    if not self._is_within_cutoff(received_dt, cutoff_dt):
+                        continue
+                    record = self.email_store.upsert(
+                        self._build_email_store_record(
+                            payload,
+                            category="",
+                            account_name=str(account.get("name") or host),
+                        )
+                    )
+                    results.append(self._record_to_overview(record, source="imap"))
+                    seen_ids.add(message_id)
+                    if len(results) >= limit:
+                        return results
+            except Exception:
+                continue
+            finally:
+                try:
+                    client.logout()
+                except Exception:
+                    pass
+        return results
+
+    async def _fetch_email_by_message_id(self, message_id: str) -> dict[str, Any] | None:
+        key = str(message_id or "").strip()
+        if not key:
+            return None
+        accounts = self._load_accounts()
+        for account in accounts:
+            host = str(account.get("host") or "")
+            port = int(account.get("port") or 993)
+            if not host:
+                continue
+            client = self.imap_client_factory(host, port)
+            try:
+                client.login(str(account.get("username") or ""), str(account.get("password") or ""))
+                try:
+                    client.select(str(account.get("folder") or "INBOX"), readonly=True)
+                except TypeError:
+                    client.select(str(account.get("folder") or "INBOX"))
+                status, search_data = client.search(None, "HEADER", "Message-ID", key)
+                if status != "OK":
+                    continue
+                ids_blob = search_data[0] if search_data else b""
+                msg_ids = [item for item in ids_blob.split() if item]
+                if not msg_ids:
+                    continue
+                fetch_status, fetched = client.fetch(msg_ids[0], "(BODY.PEEK[])")
+                if fetch_status != "OK" or not fetched:
+                    continue
+                raw_bytes = fetched[0][1] if isinstance(fetched[0], tuple) else None
+                if not isinstance(raw_bytes, (bytes, bytearray)):
+                    continue
+                parsed = message_from_bytes(raw_bytes)
+                payload = self._extract_email_payload(
+                    parsed,
+                    account_name=str(account.get("name") or host),
+                    msg_num=msg_ids[0],
+                )
+                payload["account_name"] = str(account.get("name") or host)
+                return payload
+            except Exception:
+                continue
+            finally:
+                try:
+                    client.logout()
+                except Exception:
+                    pass
+        return None
+
+    def _build_email_store_record(
+        self,
+        payload: dict[str, Any],
+        *,
+        category: str,
+        attachment_paths: Any | None = None,
+        account_name: str | None = None,
+    ) -> dict[str, Any]:
+        labels = [category] if str(category or "").strip() else []
+        received_dt = self._parse_received_datetime(payload.get("received_at"))
+        return {
+            "message_id": str(payload.get("message_id") or ""),
+            "subject": str(payload.get("subject") or ""),
+            "from": str(payload.get("from") or ""),
+            "to": str(payload.get("to") or ""),
+            "date": received_dt.isoformat() if received_dt is not None else str(payload.get("received_at") or ""),
+            "snippet": self._build_snippet(str(payload.get("body") or "")),
+            "labels": labels,
+            "cached_at": datetime.now(UTC).isoformat(),
+            "has_body": self.email_store.get_body(str(payload.get("message_id") or "")) is not None,
+            "account_name": account_name or payload.get("account_name"),
+            "attachment_paths": attachment_paths or [],
+            "category": category or payload.get("category"),
+        }
+
+    def _record_to_overview(self, record: dict[str, Any], *, source: str) -> dict[str, Any]:
+        return {
+            "message_id": str(record.get("message_id") or ""),
+            "subject": str(record.get("subject") or ""),
+            "from": str(record.get("from") or ""),
+            "to": str(record.get("to") or ""),
+            "date": str(record.get("date") or ""),
+            "snippet": str(record.get("snippet") or ""),
+            "labels": list(record.get("labels") or []),
+            "source": source,
+        }
+
+    def _build_snippet(self, body: str, *, limit: int = 200) -> str:
+        collapsed = " ".join(str(body or "").split())
+        return collapsed[:limit]
+
+    def _split_query_terms(self, query: str) -> list[str]:
+        cleaned = str(query or "").strip().lower()
+        if not cleaned:
+            return []
+        return [item for item in cleaned.split() if item]
+
+    def _build_search_criteria(
+        self,
+        *,
+        cutoff_dt: datetime | None,
+        unread_only: bool,
+    ) -> list[str]:
+        since_dt = cutoff_dt or (datetime.now(UTC) - timedelta(hours=24))
+        criteria = ["SINCE", since_dt.astimezone(UTC).strftime("%d-%b-%Y")]
+        if unread_only:
+            criteria.append("UNSEEN")
+        return criteria
+
+    def _parse_received_datetime(self, value: str | None) -> datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = parsedate_to_datetime(raw)
+        except Exception:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+
+    def _is_within_cutoff(self, received_dt: datetime | None, cutoff_dt: datetime | None) -> bool:
+        if cutoff_dt is None or received_dt is None:
+            return True
+        return received_dt >= cutoff_dt
+
+    def _parse_hours_back(self, value: Any) -> int:
+        if value is None or value == "":
+            return 24
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 24
+        return max(1, parsed)
+
+    def _parse_triggered_by(self, value: Any) -> str:
+        raw = str(value or "user").strip().lower()
+        if raw in {"heartbeat", "scheduler", "scheduled"}:
+            return "heartbeat"
+        return "user"
+
+    def _parse_limit(self, value: Any, *, default: int, maximum: int) -> int:
+        if value is None or value == "":
+            return default
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(1, min(maximum, parsed))
+
+    def _resolve_scan_cutoff(
+        self,
+        *,
+        triggered_by: str,
+        hours_back: int,
+        now: datetime,
+    ) -> datetime:
+        if triggered_by == "heartbeat" and self._last_heartbeat_push_at is not None:
+            return self._last_heartbeat_push_at
+        return now - timedelta(hours=max(1, hours_back))
+
+    def _remember_reported_message_ids(self, message_ids: Any) -> None:
+        for raw_id in message_ids:
+            message_id = str(raw_id or "").strip()
+            if not message_id or message_id in self._recent_reported_message_id_set:
+                continue
+            self._recent_reported_message_ids.append(message_id)
+            self._recent_reported_message_id_set.add(message_id)
+            while len(self._recent_reported_message_ids) > 200:
+                evicted = self._recent_reported_message_ids.popleft()
+                self._recent_reported_message_id_set.discard(evicted)
+
     def _parse_bool(self, value: Any) -> bool:
         if isinstance(value, bool):
             return value
@@ -606,3 +1125,20 @@ class EmailScannerSkill(BaseSkill):
         tmp = self.rules_path.with_suffix(".tmp")
         tmp.write_text(yaml_content, encoding="utf-8")
         tmp.replace(self.rules_path)
+
+    def get_status(self, *, scheduler: Any | None = None) -> dict[str, Any]:
+        accounts = self._load_accounts()
+        next_scan_at = None
+        if scheduler is not None and hasattr(scheduler, "get_job_next_run_iso"):
+            next_scan_at = scheduler.get_job_next_run_iso("email_scan")
+        return {
+            "status": "scanning" if self._scan_in_progress else "enabled",
+            "accounts": [
+                str(item.get("username") or "")
+                for item in accounts
+                if str(item.get("username") or "").strip()
+            ],
+            "last_scan_at": self.last_scan_at,
+            "next_scan_at": next_scan_at,
+            "emails_processed": self.emails_processed,
+        }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from hypo_agent.core.skill_manager import SkillManager
 from hypo_agent.models import CircuitBreakerConfig, SkillOutput
@@ -121,6 +122,14 @@ skills:
     )
     enabled = SkillManager.find_enabled_skills(config)
     assert enabled == {"email_scanner"}
+
+
+def test_repo_skills_config_enables_qq() -> None:
+    config = Path(__file__).resolve().parents[2] / "config" / "skills.yaml"
+
+    enabled = SkillManager.find_enabled_skills(config)
+
+    assert "qq" in enabled
 
 
 def test_skill_manager_invoke_checks_circuit_breaker_before_execution() -> None:

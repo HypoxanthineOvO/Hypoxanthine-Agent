@@ -1,9 +1,25 @@
 <script setup lang="ts">
+import { computed } from "vue";
+
 import type { Message } from "../../types/message";
+import { formatMessageTime } from "../../utils/timeFormat";
 
 const props = defineProps<{
   message: Message;
 }>();
+
+const isNarration = (): boolean => props.message.message_tag === "narration";
+
+const sourceLabel = (): string => {
+  const channel = String(props.message.channel ?? "").trim().toLowerCase();
+  if (channel === "qq") {
+    return "via QQ";
+  }
+  if (channel === "system") {
+    return "系统";
+  }
+  return "";
+};
 
 const avatarLabel = (): string => {
   if (props.message.senderAvatar) {
@@ -11,6 +27,14 @@ const avatarLabel = (): string => {
   }
   return props.message.sender === "user" ? "U" : "A";
 };
+
+const formattedTime = computed(() => {
+  const raw = props.message.timestamp;
+  if (!raw || isNarration()) {
+    return "";
+  }
+  return formatMessageTime(raw);
+});
 </script>
 
 <template>
@@ -19,15 +43,18 @@ const avatarLabel = (): string => {
     :data-sender="message.sender"
     :data-message-tag="message.message_tag"
   >
-    <div class="bubble-avatar">{{ avatarLabel() }}</div>
+    <div v-if="!isNarration()" class="bubble-avatar">{{ avatarLabel() }}</div>
     <div class="bubble-content">
       <header class="bubble-meta">
-        <span class="sender-name">{{ message.senderName ?? message.sender }}</span>
+        <span class="sender-name">
+          {{ isNarration() ? "旁白" : (message.senderName ?? message.sender) }}
+        </span>
         <span v-if="message.message_tag === 'reminder'" class="message-tag">🔔 提醒</span>
         <span v-else-if="message.message_tag === 'heartbeat'" class="message-tag">💓 巡检</span>
-        <span v-if="message.timestamp" class="sender-time">{{ message.timestamp }}</span>
+        <span v-else-if="sourceLabel()" class="message-tag">{{ sourceLabel() }}</span>
       </header>
       <slot />
+      <div v-if="formattedTime" class="bubble-time">{{ formattedTime }}</div>
     </div>
   </article>
 </template>
@@ -47,6 +74,12 @@ const avatarLabel = (): string => {
 
 .message-bubble[data-sender="assistant"] {
   margin-right: auto;
+}
+
+.message-bubble[data-message-tag="narration"] {
+  gap: 0.25rem;
+  grid-template-columns: minmax(0, 1fr);
+  max-width: min(70ch, 100%);
 }
 
 .bubble-avatar {
@@ -70,6 +103,12 @@ const avatarLabel = (): string => {
   padding: 0.6rem 0.72rem;
 }
 
+.message-bubble[data-message-tag="narration"] .bubble-content {
+  background: transparent;
+  border: none;
+  padding: 0.1rem 0.2rem;
+}
+
 .message-bubble[data-sender="user"] .bubble-content {
   background: linear-gradient(
     135deg,
@@ -91,7 +130,6 @@ const avatarLabel = (): string => {
   color: var(--muted);
   display: flex;
   font-size: 0.75rem;
-  justify-content: space-between;
   margin-bottom: 0.35rem;
 }
 
@@ -104,11 +142,34 @@ const avatarLabel = (): string => {
   color: var(--muted);
   font-size: 0.7rem;
   font-weight: 600;
-  margin-left: auto;
-  margin-right: 0.4rem;
+  margin-left: 0.4rem;
 }
 
-.sender-time {
+.bubble-time {
+  color: color-mix(in srgb, var(--muted) 90%, transparent);
+  display: flex;
+  font-size: 0.75rem;
+  margin-top: 0.45rem;
+}
+
+.message-bubble[data-sender="user"] .bubble-time {
+  justify-content: flex-end;
+}
+
+.message-bubble[data-message-tag="narration"] .bubble-meta {
   font-size: 0.7rem;
+  margin-bottom: 0.15rem;
+}
+
+.message-bubble[data-message-tag="narration"] .sender-name,
+.message-bubble[data-message-tag="narration"] .message-tag,
+.message-bubble[data-message-tag="narration"] .bubble-time {
+  color: color-mix(in srgb, var(--muted) 85%, transparent);
+}
+
+.message-bubble[data-message-tag="narration"] :deep(.text-message) {
+  color: var(--muted);
+  font-size: 0.94rem;
+  font-style: italic;
 }
 </style>

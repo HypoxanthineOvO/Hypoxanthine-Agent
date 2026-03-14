@@ -8,8 +8,10 @@ skills:
     timeout_seconds: 30
   filesystem:
     enabled: true
+  qq:
+    enabled: true
   reminder:
     enabled: true
     auto_confirm: true
   email_scanner:
-    enabled: false
+    enabled: true

@@ -115,19 +115,11 @@ def test_pipeline_stream_reply_uses_call_with_tools_text_without_stream_call() -
         return [event async for event in pipeline.stream_reply(inbound)]
 
     events = asyncio.run(_collect())
-    assert events == [
-        {
-            "type": "assistant_chunk",
-            "text": "direct answer",
-            "sender": "assistant",
-            "session_id": "s1",
-        },
-        {
-            "type": "assistant_done",
-            "sender": "assistant",
-            "session_id": "s1",
-        },
-    ]
+    assert [event["type"] for event in events] == ["assistant_chunk", "assistant_done"]
+    assert events[0]["text"] == "direct answer"
+    assert all(event["sender"] == "assistant" for event in events)
+    assert all(event["session_id"] == "s1" for event in events)
+    assert all(str(event["timestamp"]).endswith("Z") for event in events)
     assert memory.appended[-1].text == "direct answer"
 
 
@@ -238,6 +230,65 @@ def test_pipeline_stream_reply_sends_humanized_tool_status_messages() -> None:
     assert tool_status[0].text == "🔔 正在创建提醒..."
     assert tool_status[1].text == "✅ 提醒创建成功"
     assert tool_status[0].metadata["ephemeral"] is True
+
+
+def test_pipeline_stream_reply_skips_tool_status_messages_when_narration_enabled() -> None:
+    memory = StubSessionMemory()
+    skills = StubSkillManager()
+    pushed: list[Message] = []
+
+    async def on_proactive_message(message: Message) -> None:
+        pushed.append(message)
+
+    class StubNarrationObserver:
+        enabled = True
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "create_reminder",
+                                "arguments": "{\"title\":\"x\",\"schedule_type\":\"once\",\"schedule_value\":\"2026-03-08T15:00:00+08:00\"}",
+                            },
+                        }
+                    ],
+                }
+            return {"text": "done", "tool_calls": []}
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            del model_name, messages, session_id, tools
+            raise AssertionError("stream should not be called")
+            yield ""  # pragma: no cover
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skills,
+        on_proactive_message=on_proactive_message,
+        narration_observer=StubNarrationObserver(),
+        on_narration=lambda payload, **kwargs: None,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="run", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+    assert events[-1]["type"] == "assistant_done"
+    tool_status = [item for item in pushed if item.message_tag == "tool_status"]
+    assert tool_status == []
 
 
 def test_pipeline_stream_reply_respects_max_react_rounds() -> None:
@@ -366,19 +417,11 @@ def test_pipeline_stream_reply_short_circuits_slash_command() -> None:
         return [event async for event in pipeline.stream_reply(inbound)]
 
     events = asyncio.run(_collect())
-    assert events == [
-        {
-            "type": "assistant_chunk",
-            "text": "slash stream ok",
-            "sender": "assistant",
-            "session_id": "s1",
-        },
-        {
-            "type": "assistant_done",
-            "sender": "assistant",
-            "session_id": "s1",
-        },
-    ]
+    assert [event["type"] for event in events] == ["assistant_chunk", "assistant_done"]
+    assert events[0]["text"] == "slash stream ok"
+    assert all(event["sender"] == "assistant" for event in events)
+    assert all(event["session_id"] == "s1" for event in events)
+    assert all(str(event["timestamp"]).endswith("Z") for event in events)
     assert memory.appended == []
 
 

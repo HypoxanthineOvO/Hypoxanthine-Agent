@@ -1,1 +1,62 @@
-rules: []
+user_preferences: |
+  用户邮件分类偏好（用于判断邮件重要性）：
+
+  【关注】：
+  - 社团活动：只关注乒乓球社相关的，其他社团活动忽略
+  - 人文院活动：只关注中国古诗词相关的内容，其他人文院活动不重要
+  - 学生事务通知：只关注研究生必须要做的事情（如注册、选课、答辩等强制性通知），普通通知忽略
+  - 公共服务处：只关注涉及 5 号楼、信息学院三号楼、体育馆的通知，其他不重要
+  - 外部通知：只关注续费类通知，广告和营销内容忽略
+
+  【忽略】：
+  - 书院相关（全部忽略）
+  - 产业报告（全部忽略）
+  - 招聘信息（全部忽略）
+  - 助教相关工作（全部忽略）
+  - 广告和营销邮件（全部忽略）
+
+rules:
+  - name: archive-shuyuan-from
+    from: "书院"
+    category: archive
+    skip_llm: true
+  - name: archive-shuyuan-subject
+    subject_contains: "书院"
+    category: archive
+    skip_llm: true
+  - name: archive-industry-report
+    subject_contains: "产业报告"
+    category: archive
+    skip_llm: true
+  - name: archive-job-zhaopin
+    subject_contains: "招聘"
+    category: archive
+    skip_llm: true
+  - name: archive-job-zhaopinhui
+    subject_contains: "招聘会"
+    category: archive
+    skip_llm: true
+  - name: archive-job-qiuzhi
+    subject_contains: "求职"
+    category: archive
+    skip_llm: true
+  - name: archive-ta-zhujiao
+    subject_contains: "助教"
+    category: archive
+    skip_llm: true
+  - name: archive-ta-short
+    subject_contains: "TA"
+    category: archive
+    skip_llm: true
+  - name: important-pingpong-from
+    from: "乒乓球"
+    category: important
+    skip_llm: true
+  - name: important-pingpong-subject
+    subject_contains: "乒乓球"
+    category: important
+    skip_llm: true
+  - name: important-renewal
+    subject_contains: "续费"
+    category: important
+    skip_llm: true

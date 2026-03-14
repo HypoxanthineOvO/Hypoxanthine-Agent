@@ -52,4 +52,35 @@ describe("MessageBubble", () => {
 
     expect(wrapper.find(".message-tag").exists()).toBe(false);
   });
+
+  it("renders formatted time for normal messages and hides it for narration", () => {
+    const normal = mount(MessageBubble, {
+      props: {
+        message: {
+          text: "普通回复",
+          sender: "assistant",
+          session_id: "main",
+          timestamp: "2026-03-14T06:30:00Z",
+        },
+      },
+      slots: { default: "<div>普通内容</div>" },
+    });
+
+    expect(normal.find(".bubble-time").exists()).toBe(true);
+
+    const narration = mount(MessageBubble, {
+      props: {
+        message: {
+          text: "我去看一下。",
+          sender: "assistant",
+          session_id: "main",
+          timestamp: "2026-03-14T06:30:00Z",
+          message_tag: "narration",
+        },
+      },
+      slots: { default: "<div>旁白内容</div>" },
+    });
+
+    expect(narration.find(".bubble-time").exists()).toBe(false);
+  });
 });

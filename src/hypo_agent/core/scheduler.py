@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import imaplib
+import inspect
 import os
 from pathlib import Path
 from urllib import request as urllib_request
@@ -41,6 +43,7 @@ class SchedulerService:
         self._scheduler.add_listener(self._on_job_missed, EVENT_JOB_MISSED)
         self._running = False
         self._interval_job_ids: set[str] = set()
+        self._email_scan_executor: Any | None = None
 
     @property
     def is_running(self) -> bool:
@@ -114,6 +117,21 @@ class SchedulerService:
     def has_job(self, reminder_id: int) -> bool:
         return self._scheduler.get_job(self._job_id(reminder_id)) is not None
 
+    def has_job_id(self, job_id: str) -> bool:
+        return self._scheduler.get_job(str(job_id)) is not None
+
+    def get_job_next_run_iso(self, job_id: str) -> str | None:
+        job = self._scheduler.get_job(str(job_id))
+        if job is None:
+            return None
+        next_run = getattr(job, "next_run_time", None)
+        return next_run.isoformat() if isinstance(next_run, datetime) else None
+
+    def get_active_job_count(self) -> int:
+        if not self._running:
+            return 0
+        return len(self._scheduler.get_jobs())
+
     def register_interval_job(
         self,
         job_id: str,
@@ -139,6 +157,11 @@ class SchedulerService:
             job_id=str(job_id),
             interval_minutes=safe_minutes,
         )
+
+    def set_email_scan_executor(self, executor: Any | None) -> None:
+        if executor is not None and not callable(executor):
+            raise TypeError("email scan executor must be callable")
+        self._email_scan_executor = executor
 
     async def _sweep_expired_once_reminders(self) -> None:
         active_reminders = await self.structured_store.list_reminders(status="active")
@@ -182,26 +205,156 @@ class SchedulerService:
             reminder = await self.structured_store.get_reminder(reminder_id)
         payload = reminder or {}
 
-        heartbeat_config = payload.get("heartbeat_config")
-        if isinstance(heartbeat_config, list) and heartbeat_config:
-            await self._handle_heartbeat_trigger(reminder_id=reminder_id, reminder=payload)
+        if self._is_legacy_email_push_heartbeat(payload):
+            await self._handle_legacy_email_push_heartbeat(reminder_id=reminder_id, reminder=payload)
         else:
-            event = {
-                "event_type": "reminder_trigger",
-                "reminder_id": reminder_id,
-                "session_id": self.default_session_id,
-                "title": payload.get("title", ""),
-                "description": payload.get("description"),
-                "channel": payload.get("channel", "all"),
-                "schedule_type": payload.get("schedule_type", "once"),
-            }
-            await self.event_queue.put(event)
-            logger.info("scheduler.triggered", reminder_id=reminder_id, event_type="reminder_trigger")
+            heartbeat_config = payload.get("heartbeat_config")
+            if isinstance(heartbeat_config, list) and heartbeat_config:
+                await self._handle_heartbeat_trigger(reminder_id=reminder_id, reminder=payload)
+            else:
+                event = {
+                    "event_type": "reminder_trigger",
+                    "reminder_id": reminder_id,
+                    "session_id": self.default_session_id,
+                    "title": payload.get("title", ""),
+                    "description": payload.get("description"),
+                    "channel": payload.get("channel", "all"),
+                    "schedule_type": payload.get("schedule_type", "once"),
+                }
+                await self.event_queue.put(event)
+                logger.info(
+                    "scheduler.triggered",
+                    reminder_id=reminder_id,
+                    event_type="reminder_trigger",
+                )
 
         if str(payload.get("schedule_type") or "").lower() == "once":
             if hasattr(self.structured_store, "mark_reminder_completed"):
                 await self.structured_store.mark_reminder_completed(reminder_id)
             self._remove_job_if_exists(self._job_id(reminder_id))
+
+    async def _handle_legacy_email_push_heartbeat(
+        self,
+        *,
+        reminder_id: int,
+        reminder: dict[str, Any],
+    ) -> None:
+        executor = self._email_scan_executor
+        if executor is None:
+            logger.info("💓 Heartbeat: 邮件技能未启用，跳过")
+            return
+
+        try:
+            try:
+                result = executor(params={"triggered_by": "heartbeat"})
+            except TypeError:
+                result = executor()
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as exc:
+            if self._is_email_connection_error(exc):
+                logger.warning(f"⚠️ Heartbeat: 邮件连接失败，下次重试 - {exc}")
+            else:
+                logger.exception(
+                    "heartbeat.email_scan.unexpected_failed",
+                    reminder_id=reminder_id,
+                    title=reminder.get("title", ""),
+                )
+            return
+
+        if not isinstance(result, dict):
+            logger.warning(
+                "heartbeat.email_scan.invalid_result",
+                reminder_id=reminder_id,
+                result_type=type(result).__name__,
+            )
+            return
+
+        accounts_scanned = int(result.get("accounts_scanned") or 0)
+        accounts_failed = int(result.get("accounts_failed") or 0)
+        new_emails = int(result.get("new_emails") or 0)
+        important_count = self._count_important_emails(result)
+        failure_error = self._extract_email_failure_error(result)
+
+        if accounts_scanned == 0 and accounts_failed > 0:
+            logger.warning(
+                f"⚠️ Heartbeat: 邮件连接失败，下次重试 - {failure_error or 'unknown error'}"
+            )
+            return
+
+        if new_emails <= 0:
+            logger.info("💓 Heartbeat: 邮件扫描完成，无新邮件")
+            return
+
+        logger.info(
+            f"💓 Heartbeat: 邮件扫描完成，{new_emails} 封新邮件（{important_count} 封重要）"
+        )
+        if important_count <= 0:
+            return
+
+        summary = str(result.get("summary") or "").strip()
+        if not summary:
+            summary = f"📧 邮件扫描完成：{new_emails} 封新邮件，{important_count} 封重要"
+        await self.event_queue.put(
+            {
+                "event_type": "email_scan_trigger",
+                "session_id": self.default_session_id,
+                "summary": summary,
+                "details": result,
+                "source": "heartbeat",
+            }
+        )
+        logger.info(
+            "scheduler.triggered",
+            reminder_id=reminder_id,
+            event_type="email_scan_trigger",
+        )
+
+    def _is_legacy_email_push_heartbeat(self, reminder: dict[str, Any]) -> bool:
+        heartbeat_config = reminder.get("heartbeat_config")
+        if not isinstance(heartbeat_config, list):
+            return False
+        for item in heartbeat_config:
+            if not isinstance(item, dict):
+                continue
+            action = str(item.get("action") or "").strip().lower()
+            if action == "push_email_summary":
+                return True
+        return False
+
+    def _count_important_emails(self, result: dict[str, Any]) -> int:
+        items = result.get("items")
+        if not isinstance(items, list):
+            return 0
+        count = 0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            category = str(item.get("category") or "").strip().lower()
+            if category in {"important", "system"}:
+                count += 1
+        return count
+
+    def _extract_email_failure_error(self, result: dict[str, Any]) -> str:
+        items = result.get("items")
+        if not isinstance(items, list):
+            return ""
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            error = str(item.get("error") or "").strip()
+            if error:
+                return error
+        return ""
+
+    def _is_email_connection_error(self, exc: Exception) -> bool:
+        if isinstance(exc, (TimeoutError, ConnectionError, OSError, imaplib.IMAP4.error)):
+            return True
+        lowered = str(exc).strip().lower()
+        return any(
+            token in lowered
+            for token in ("imap", "login", "auth", "ssl", "timeout", "connection")
+        )
 
     async def _handle_heartbeat_trigger(
         self,

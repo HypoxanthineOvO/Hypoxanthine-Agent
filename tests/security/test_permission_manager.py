@@ -184,3 +184,35 @@ def test_permission_manager_can_suppress_allowed_logs(
 
     assert allowed is True
     assert "permission.check.allowed" not in recorder.events
+
+
+def test_permission_manager_supports_hypo_agent_root_placeholder_for_repo_access(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo_root = tmp_path / "Hypo-Agent"
+    config_dir = repo_root / "config"
+    memory_dir = repo_root / "memory"
+    src_dir = repo_root / "src"
+    config_dir.mkdir(parents=True)
+    memory_dir.mkdir(parents=True)
+    src_dir.mkdir(parents=True)
+
+    monkeypatch.setenv("HYPO_AGENT_ROOT", str(repo_root))
+    whitelist = DirectoryWhitelist(
+        rules=[
+            WhitelistRule(path="${HYPO_AGENT_ROOT}", permissions=["read"]),
+            WhitelistRule(path="${HYPO_AGENT_ROOT}/config", permissions=["read", "write"]),
+            WhitelistRule(path="${HYPO_AGENT_ROOT}/memory", permissions=["read", "write"]),
+        ],
+        default_policy="readonly",
+    )
+    manager = PermissionManager(whitelist)
+
+    allowed_repo_read, _ = manager.check_permission(str(src_dir / "app.py"), "read")
+    allowed_config_write, _ = manager.check_permission(str(config_dir / "security.yaml"), "write")
+    allowed_memory_write, _ = manager.check_permission(str(memory_dir / "notes.md"), "write")
+
+    assert allowed_repo_read is True
+    assert allowed_config_write is True
+    assert allowed_memory_write is True

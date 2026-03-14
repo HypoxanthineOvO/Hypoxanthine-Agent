@@ -8,8 +8,40 @@ task_defaults:
   timeout_seconds: 120
   priority: normal
 heartbeat:
-  enabled: false
+  enabled: true
   interval_minutes: 30
+  prompt_template: '你是 Hypo-Agent 的心跳判定器。
+
+    你的目标是判断当前状态是否值得主动推送给用户。
+
+    只有真的需要用户关注时，才返回 should_push=true。
+
+
+    仅返回 JSON：
+
+    {"should_push": true|false, "summary": "一句话概括"}
+
+
+    内置检查：
+
+    ${checks}
+
+
+    过期提醒：
+
+    ${overdue}
+
+
+    事件源结果：
+
+    ${sources}
+
+    '
 email_scan:
-  enabled: false
-  interval_minutes: 15
+  enabled: true
+  interval_minutes: 60
+email_store:
+  enabled: true
+  max_entries: 5000
+  retention_days: 90
+  warmup_hours: 168

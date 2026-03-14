@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+
+from hypo_agent.core.time_utils import normalize_utc_datetime, utc_isoformat, utc_now
 
 
 class Message(BaseModel):
@@ -16,10 +18,19 @@ class Message(BaseModel):
     sender: str
     message_tag: Literal["reminder", "heartbeat", "email_scan", "tool_status"] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    timestamp: datetime | None = Field(default_factory=utc_now)
     session_id: str
     channel: str = "webui"
     sender_id: str | None = None
+
+    @field_validator("timestamp", mode="after")
+    @classmethod
+    def _normalize_timestamp(cls, value: datetime | None) -> datetime | None:
+        return normalize_utc_datetime(value)
+
+    @field_serializer("timestamp", when_used="json")
+    def _serialize_timestamp(self, value: datetime | None) -> str | None:
+        return utc_isoformat(value)
 
 
 class SkillOutput(BaseModel):
@@ -79,6 +90,7 @@ class QQServiceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     napcat_ws_url: str
+    napcat_ws_token: str = ""
     napcat_http_url: str
     napcat_http_token: str | None = None
     bot_qq: str
@@ -106,11 +118,27 @@ class TaskScheduleConfig(BaseModel):
     interval_minutes: int = Field(default=15, ge=1)
 
 
+class HeartbeatTaskConfig(TaskScheduleConfig):
+    model_config = ConfigDict(extra="forbid")
+
+    prompt_template: str = ""
+
+
+class EmailStoreTaskConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    max_entries: int = Field(default=5000, ge=1)
+    retention_days: int = Field(default=90, ge=1)
+    warmup_hours: int = Field(default=168, ge=1)
+
+
 class TasksConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    heartbeat: TaskScheduleConfig = Field(default_factory=TaskScheduleConfig)
+    heartbeat: HeartbeatTaskConfig = Field(default_factory=HeartbeatTaskConfig)
     email_scan: TaskScheduleConfig = Field(default_factory=TaskScheduleConfig)
+    email_store: EmailStoreTaskConfig = Field(default_factory=EmailStoreTaskConfig)
 
 
 class WhitelistRule(BaseModel):
@@ -151,6 +179,24 @@ class PersonaConfig(BaseModel):
     aliases: list[str] = Field(default_factory=list)
     personality: list[str] = Field(default_factory=list)
     speaking_style: dict[str, Any] = Field(default_factory=dict)
+    system_prompt_template: str = ""
+
+
+class NarrationToolLevels(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    heavy: list[str] = Field(default_factory=list)
+    medium: list[str] = Field(default_factory=list)
+
+
+class NarrationConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    model: str = "DeepseekV3_2"
+    tool_levels: NarrationToolLevels = Field(default_factory=NarrationToolLevels)
+    debounce_seconds: float = Field(default=2.0, ge=0.0)
+    max_narration_length: int = Field(default=80, ge=1)
 
 
 class HeartbeatCheck(BaseModel):

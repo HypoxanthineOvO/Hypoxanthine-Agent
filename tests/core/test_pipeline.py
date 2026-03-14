@@ -89,25 +89,15 @@ def test_pipeline_stream_reply_emits_chunk_and_done_events_and_persists() -> Non
         return [event async for event in pipeline.stream_reply(inbound)]
 
     events = asyncio.run(_collect())
-    assert events == [
-        {
-            "type": "assistant_chunk",
-            "text": "He",
-            "sender": "assistant",
-            "session_id": "s1",
-        },
-        {
-            "type": "assistant_chunk",
-            "text": "llo",
-            "sender": "assistant",
-            "session_id": "s1",
-        },
-        {
-            "type": "assistant_done",
-            "sender": "assistant",
-            "session_id": "s1",
-        },
+    assert [event["type"] for event in events] == [
+        "assistant_chunk",
+        "assistant_chunk",
+        "assistant_done",
     ]
+    assert [event.get("text") for event in events[:2]] == ["He", "llo"]
+    assert all(event["sender"] == "assistant" for event in events)
+    assert all(event["session_id"] == "s1" for event in events)
+    assert all(str(event["timestamp"]).endswith("Z") for event in events)
     assert [m.sender for m in memory.appended] == ["user", "assistant"]
     assert memory.appended[1].text == "Hello"
 
@@ -328,7 +318,7 @@ def test_pipeline_broadcasts_reply_for_qq_channel() -> None:
     assert qq_received[0].channel == "qq"
 
 
-def test_pipeline_broadcasts_reply_excluding_webui() -> None:
+def test_pipeline_broadcasts_reply_excluding_qq_for_webui_origin() -> None:
     memory = StubSessionMemory()
     from hypo_agent.core.channel_dispatcher import ChannelDispatcher
 
@@ -369,10 +359,10 @@ def test_pipeline_broadcasts_reply_excluding_webui() -> None:
 
     asyncio.run(_collect())
 
-    assert webui_received == []
-    assert len(qq_received) == 1
-    assert qq_received[0].text == "OK"
-    assert qq_received[0].channel == "webui"
+    assert len(webui_received) == 1
+    assert webui_received[0].text == "OK"
+    assert webui_received[0].channel == "webui"
+    assert qq_received == []
 
 
 def test_preference_injection(tmp_path: Path) -> None:
@@ -406,3 +396,27 @@ def test_preference_injection(tmp_path: Path) -> None:
     )
     system_messages = [item for item in messages if item["role"] == "system"]
     assert any("User Preferences" in item.get("content", "") for item in system_messages)
+
+
+def test_pipeline_includes_persona_system_prompt_when_provided() -> None:
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        async def call(self, model_name, messages):
+            del model_name, messages
+            return "unused"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        persona_system_prompt="[Persona]\n## 环境信息\n代码仓库：/home/heyx/Hypo-Agent",
+    )
+
+    messages = pipeline._build_llm_messages(Message(text="hi", sender="user", session_id="s1"))
+    system_messages = [item for item in messages if item["role"] == "system"]
+
+    assert system_messages[0]["content"].startswith("[Persona]")
+    assert "## 环境信息" in system_messages[0]["content"]
+    assert "/home/heyx/Hypo-Agent" in system_messages[0]["content"]

@@ -200,6 +200,35 @@ describe("useChatSocket", () => {
     expect(socket.messages.value[1]?.message_tag).toBe("email_scan");
   });
 
+  it("converts narration events into ephemeral chat messages", () => {
+    const socket = useChatSocket({
+      url: "ws://localhost:8000/ws",
+      token: "abc123",
+      sessionId: ref("main"),
+    });
+    socket.connect();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+    ws.emitMessage(
+      JSON.stringify({
+        type: "narration",
+        text: "我去翻一下你的收件箱。",
+        session_id: "main",
+        timestamp: "2026-03-13T10:00:00+08:00",
+      }),
+    );
+
+    expect(socket.messages.value).toHaveLength(1);
+    expect(socket.messages.value[0]?.text).toBe("我去翻一下你的收件箱。");
+    expect(socket.messages.value[0]?.message_tag).toBe("narration");
+    expect(socket.messages.value[0]?.metadata?.ephemeral).toBe(true);
+    expect(socket.messages.value[0]?.timestamp).toBe("2026-03-13T10:00:00+08:00");
+  });
+
   it("schedules reconnect with exponential backoff after unexpected close", () => {
     vi.useFakeTimers();
     const socket = useChatSocket({

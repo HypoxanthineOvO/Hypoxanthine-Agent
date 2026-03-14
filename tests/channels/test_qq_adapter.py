@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from urllib import request as urllib_request
+
 from hypo_agent.channels.qq_adapter import QQAdapter
 from hypo_agent.models import Message
 
@@ -73,3 +76,69 @@ def test_qq_adapter_adds_access_token_to_request_url() -> None:
     url = adapter._build_request_url("/send_private_msg")
 
     assert url == "http://localhost:3008/send_private_msg?access_token=token-123"
+
+
+def test_qq_adapter_sets_authorization_header_when_token_configured(monkeypatch) -> None:
+    adapter = QQAdapter(
+        napcat_http_url="http://localhost:3008",
+        napcat_http_token="token-123",
+    )
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({"status": "ok"}).encode("utf-8")
+
+    def fake_urlopen(req: urllib_request.Request, timeout: float):
+        captured["authorization"] = req.headers.get("Authorization")
+        captured["content_type"] = req.headers.get("Content-type")
+        captured["timeout"] = timeout
+        captured["url"] = req.full_url
+        return FakeResponse()
+
+    monkeypatch.setattr("hypo_agent.channels.qq_adapter.urllib_request.urlopen", fake_urlopen)
+
+    result = adapter._post_json("/send_private_msg", {"message": "hello", "user_id": 10001})
+
+    assert result == {"status": "ok"}
+    assert captured["authorization"] == "Bearer token-123"
+    assert captured["content_type"] == "application/json"
+    assert captured["url"] == "http://localhost:3008/send_private_msg?access_token=token-123"
+
+
+def test_qq_adapter_omits_authorization_header_when_token_empty(monkeypatch) -> None:
+    adapter = QQAdapter(
+        napcat_http_url="http://localhost:3008",
+        napcat_http_token="",
+    )
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({"status": "ok"}).encode("utf-8")
+
+    def fake_urlopen(req: urllib_request.Request, timeout: float):
+        captured["authorization"] = req.headers.get("Authorization")
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("hypo_agent.channels.qq_adapter.urllib_request.urlopen", fake_urlopen)
+
+    result = adapter._post_json("/send_private_msg", {"message": "hello", "user_id": 10001})
+
+    assert result == {"status": "ok"}
+    assert captured["authorization"] is None

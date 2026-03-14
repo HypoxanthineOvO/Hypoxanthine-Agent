@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import inspect
 import json
 from pathlib import Path
@@ -8,7 +9,7 @@ from typing import Any, Callable
 
 import structlog
 
-from hypo_agent.core.config_loader import get_memory_dir
+from hypo_agent.core.config_loader import expand_runtime_placeholders, get_memory_dir
 
 logger = structlog.get_logger("hypo_agent.heartbeat")
 
@@ -26,17 +27,20 @@ class HeartbeatService:
         scheduler: Any | None = None,
         default_session_id: str = "main",
         db_path: Path | str | None = None,
+        decision_prompt_template: str = "",
     ) -> None:
         self.structured_store = structured_store
         self.model_router = model_router
         self.message_queue = message_queue
         self.scheduler = scheduler
         self.default_session_id = default_session_id
+        self.decision_prompt_template = str(decision_prompt_template or "")
 
         if db_path is None:
             db_path = get_memory_dir() / "hypo.db"
         self.db_path = Path(db_path)
         self._event_sources: dict[str, EventSourceCallback] = {}
+        self.last_heartbeat_at: str | None = None
 
     def register_event_source(self, name: str, callback: EventSourceCallback) -> None:
         key = str(name).strip()
@@ -66,6 +70,7 @@ class HeartbeatService:
             "event_sources": sources,
             "checks": builtins,
         }
+        self.last_heartbeat_at = datetime.now(UTC).isoformat()
 
         if should_push:
             event = {
@@ -156,12 +161,10 @@ class HeartbeatService:
         if not (self.model_router is not None and hasattr(self.model_router, "call_lightweight_json")):
             return {"should_push": fallback_should_push, "summary": ""}
 
-        prompt = (
-            "你是 heartbeat 判定器。仅返回 JSON 对象，包含 should_push(bool) 与 summary(str)。"
-            "依据以下输入判断是否需要主动推送："
-            f"\nchecks={json.dumps(builtins, ensure_ascii=False)}"
-            f"\noverdue={json.dumps(overdue, ensure_ascii=False)}"
-            f"\nsources={json.dumps(sources, ensure_ascii=False)}"
+        prompt = self._build_decision_prompt(
+            builtins=builtins,
+            overdue=overdue,
+            sources=sources,
         )
         try:
             payload = await self.model_router.call_lightweight_json(
@@ -197,6 +200,46 @@ class HeartbeatService:
             "summary": str(payload.get("summary") or "").strip(),
         }
 
+    def _build_decision_prompt(
+        self,
+        *,
+        builtins: dict[str, Any],
+        overdue: list[dict[str, Any]],
+        sources: list[dict[str, Any]],
+    ) -> str:
+        checks_json = json.dumps(builtins, ensure_ascii=False)
+        overdue_json = json.dumps(overdue, ensure_ascii=False)
+        sources_json = json.dumps(sources, ensure_ascii=False)
+        template = str(self.decision_prompt_template or "").strip()
+        if not template:
+            return (
+                "你是 heartbeat 判定器。仅返回 JSON 对象，包含 should_push(bool) 与 summary(str)。"
+                "依据以下输入判断是否需要主动推送："
+                f"\nchecks={checks_json}"
+                f"\noverdue={overdue_json}"
+                f"\nsources={sources_json}"
+            )
+
+        rendered = expand_runtime_placeholders(template).strip()
+        placeholder_pairs = {
+            "${checks}": checks_json,
+            "${overdue}": overdue_json,
+            "${sources}": sources_json,
+        }
+        has_context_placeholders = any(token in rendered for token in placeholder_pairs)
+        for token, value in placeholder_pairs.items():
+            rendered = rendered.replace(token, value)
+
+        if has_context_placeholders:
+            return rendered
+
+        return (
+            f"{rendered}\n\n"
+            f"checks={checks_json}\n"
+            f"overdue={overdue_json}\n"
+            f"sources={sources_json}"
+        )
+
     def _fallback_summary(
         self,
         *,
@@ -216,3 +259,18 @@ class HeartbeatService:
         if total_new > 0:
             return f"heartbeat 检测到 {total_new} 条新事件"
         return "heartbeat 巡检正常，无需推送"
+
+    def get_status(self, *, scheduler: Any | None = None) -> dict[str, Any]:
+        runtime_scheduler = scheduler or self.scheduler
+        running = bool(getattr(runtime_scheduler, "is_running", False))
+        has_job = False
+        active_tasks = 0
+        if runtime_scheduler is not None and hasattr(runtime_scheduler, "has_job_id"):
+            has_job = bool(runtime_scheduler.has_job_id("heartbeat"))
+        if runtime_scheduler is not None and hasattr(runtime_scheduler, "get_active_job_count"):
+            active_tasks = int(runtime_scheduler.get_active_job_count())
+        return {
+            "status": "running" if running and (has_job or active_tasks > 0) else "disabled",
+            "last_heartbeat_at": self.last_heartbeat_at,
+            "active_tasks": active_tasks,
+        }

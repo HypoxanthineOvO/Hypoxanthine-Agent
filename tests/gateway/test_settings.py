@@ -56,3 +56,40 @@ circuit_breaker:
 
     with pytest.raises(ValueError, match="auth_token"):
         load_gateway_settings(security_yaml)
+
+
+def test_load_gateway_settings_expands_hypo_agent_root_placeholder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = tmp_path / "Hypo-Agent"
+    repo_root.mkdir(parents=True)
+    monkeypatch.setenv("HYPO_AGENT_ROOT", str(repo_root))
+
+    security_yaml = tmp_path / "security.yaml"
+    security_yaml.write_text(
+        """
+auth_token: test-token
+directory_whitelist:
+  rules:
+    - path: "${HYPO_AGENT_ROOT}"
+      permissions: [read]
+    - path: "${HYPO_AGENT_ROOT}/config"
+      permissions: [read, write]
+    - path: "${HYPO_AGENT_ROOT}/memory"
+      permissions: [read, write]
+  default_policy: readonly
+circuit_breaker:
+  tool_level_max_failures: 3
+  session_level_max_failures: 5
+  cooldown_seconds: 120
+  global_kill_switch: false
+""".strip(),
+        encoding="utf-8",
+    )
+
+    settings = load_gateway_settings(security_yaml)
+
+    assert settings.security.directory_whitelist.rules[0].path == str(repo_root)
+    assert settings.security.directory_whitelist.rules[1].path == str(repo_root / "config")
+    assert settings.security.directory_whitelist.rules[2].path == str(repo_root / "memory")

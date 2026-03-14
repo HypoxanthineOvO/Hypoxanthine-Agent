@@ -1,0 +1,20 @@
+[Unit]
+Description=Hypo-Agent FastAPI Gateway
+After=network.target
+
+[Service]
+Type=simple
+User=heyx
+Group=heyx
+WorkingDirectory=/home/heyx/Hypo-Agent
+Environment=PYTHONPATH=/home/heyx/Hypo-Agent/src
+Environment=HYPO_PORT=8765
+Environment=HYPO_MEMORY_DIR=/home/heyx/Hypo-Agent/memory
+ExecStart=/home/heyx/miniconda3/envs/HypoAgent/bin/python -m uvicorn hypo_agent.gateway.main:build_app --factory --host 127.0.0.1 --port 8765 --log-level info
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
