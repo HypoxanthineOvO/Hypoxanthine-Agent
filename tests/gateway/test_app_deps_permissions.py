@@ -71,7 +71,6 @@ skills:
     assert deps.skill_manager._skills["email_scanner"].structured_store is deps.structured_store
     assert deps.event_queue is not None
     assert deps.scheduler is not None
-    assert getattr(deps.scheduler, "_email_scan_executor", None) is not None
 
 
 def test_create_app_exposes_output_compressor_from_deps(tmp_path: Path) -> None:

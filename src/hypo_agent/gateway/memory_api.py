@@ -60,6 +60,18 @@ def _dump_message(message: Message) -> dict[str, Any]:
     return payload
 
 
+async def _load_optional_extensions(request: Request, db: aiosqlite.Connection) -> None:
+    store = getattr(request.app.state, "structured_store", None)
+    loader = getattr(store, "_load_sqlite_vec", None)
+    if callable(loader):
+        try:
+            result = loader(db)
+            if hasattr(result, "__await__"):
+                await result
+        except Exception:
+            return
+
+
 async def _list_table_names(db_path: Path) -> list[str]:
     async with aiosqlite.connect(db_path) as db:
         async with db.execute(
@@ -90,6 +102,7 @@ async def list_memory_tables(request: Request) -> dict[str, Any]:
     table_names = await _list_table_names(db_path)
     rows: list[dict[str, Any]] = []
     async with aiosqlite.connect(db_path) as db:
+        await _load_optional_extensions(request, db)
         db.row_factory = aiosqlite.Row
         for name in table_names:
             async with db.execute(f'SELECT COUNT(*) AS row_count FROM "{name}"') as cursor:
@@ -119,6 +132,7 @@ async def get_memory_table_rows(
 
     offset = (page - 1) * size
     async with aiosqlite.connect(db_path) as db:
+        await _load_optional_extensions(request, db)
         db.row_factory = aiosqlite.Row
         async with db.execute(f'SELECT COUNT(*) AS row_count FROM "{name}"') as cursor:
             count_row = await cursor.fetchone()

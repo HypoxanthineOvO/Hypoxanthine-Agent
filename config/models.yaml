@@ -3,6 +3,7 @@ default_model: KimiK25
 task_routing:
   chat: KimiK25
   lightweight: DeepseekV3_2
+  embedding: VolcanoEmbedding
 
 models:
   KimiK25:
@@ -10,25 +11,9 @@ models:
     provider: "volcengine_coding"
     supports_tool_calling: true
     description: "Kimi K2.5 via 火山引擎 Coding Plan (OpenAI compat)"
-    fallback: GLM4
+    fallback: GLM47
 
-  KimiK2:
-    litellm_model: "openai/moonshot-v1-32k"
-    provider: "volcengine_kimi"
-    supports_tool_calling: true
-    context_window: 32768
-    description: "Kimi（火山引擎部署），支持 function calling"
-    fallback: Gemini3Pro
-
-  MiniMaxM2:
-    litellm_model: "minimax/MiniMax-M2"
-    provider: "minimax"
-    supports_tool_calling: true
-    context_window: 1000000
-    description: "MiniMax M2，原生 Anthropic 兼容接口"
-    fallback: GLM4
-
-  GLM4:
+  GLM47:
     litellm_model: "openai/glm-4.7"
     provider: "volcengine_coding"
     supports_tool_calling: true
@@ -75,3 +60,10 @@ models:
     provider: null
     litellm_model: null
     fallback: KimiK2
+
+  VolcanoEmbedding:
+    type: embedding
+    provider: "volcano"
+    litellm_model: "openai/ep-20250904174839-hhslf"
+    description: "Volcano / Ark embedding model for L3 semantic memory"
+    fallback: null

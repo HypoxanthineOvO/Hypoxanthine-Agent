@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import struct
+from pathlib import Path
 
 import aiosqlite
 
+import hypo_agent.memory.structured_store as structured_store_module
 from hypo_agent.memory.structured_store import StructuredStore
 
 
@@ -267,6 +270,70 @@ def test_structured_store_delete_session_data_cleans_all_related_rows(tmp_path) 
     asyncio.run(_run())
 
 
+def test_structured_store_semantic_keyword_search_sanitizes_fts5_queries(tmp_path: Path) -> None:
+    class RecordingLogger:
+        def __init__(self) -> None:
+            self.debug_calls: list[tuple[str, dict]] = []
+
+        def debug(self, event: str, **kwargs) -> None:
+            self.debug_calls.append((event, kwargs))
+
+    db_path = tmp_path / "hypo.db"
+    logger = RecordingLogger()
+
+    async def _run() -> None:
+        store = StructuredStore(db_path=db_path)
+        await store.init()
+        await store.ensure_semantic_vector_dimensions(1)
+        await store.replace_semantic_chunks(
+            file_path="/tmp/memory/knowledge/sop/重启 Hypo-Agent 服务流程.md",
+            file_hash="hash-1",
+            chunks=[
+                {
+                    "chunk_index": 0,
+                    "chunk_text": "怎么重启 Hypo Agent 服务",
+                    "embedding_blob": struct.pack("f", 0.0),
+                }
+            ],
+        )
+        await store.replace_semantic_chunks(
+            file_path="/tmp/memory/knowledge/notes/greeting.md",
+            file_hash="hash-2",
+            chunks=[
+                {
+                    "chunk_index": 0,
+                    "chunk_text": "请说你好，然后继续。",
+                    "embedding_blob": struct.pack("f", 1.0),
+                }
+            ],
+        )
+
+        original_logger = structured_store_module.logger
+        structured_store_module.logger = logger
+        try:
+            hyphen_rows = await store.semantic_keyword_search("hypo-agent", limit=5)
+            question_rows = await store.semantic_keyword_search("怎么重启？", limit=5)
+            quoted_rows = await store.semantic_keyword_search('说"你好"', limit=5)
+            empty_rows = await store.semantic_keyword_search("", limit=5)
+            sentence_rows = await store.semantic_keyword_search(
+                "OK啊帮我查询一下怎么重启Hypo-Agent？",
+                limit=5,
+            )
+        finally:
+            structured_store_module.logger = original_logger
+
+        assert hyphen_rows
+        assert question_rows
+        assert isinstance(quoted_rows, list)
+        assert empty_rows == []
+        assert sentence_rows
+
+    asyncio.run(_run())
+
+    assert logger.debug_calls
+    assert all(event == "fts5.match_query" for event, _ in logger.debug_calls)
+
+
 def test_structured_store_reminders_crud(tmp_path) -> None:
     db_path = tmp_path / "hypo.db"
 
@@ -323,6 +390,23 @@ def test_structured_store_reminders_crud(tmp_path) -> None:
         deleted = await store.get_reminder(reminder_id)
         assert deleted is not None
         assert deleted["status"] == "deleted"
+
+    asyncio.run(_run())
+
+
+def test_structured_store_tracks_gc_processed_flag(tmp_path) -> None:
+    db_path = tmp_path / "hypo.db"
+
+    async def _run() -> None:
+        store = StructuredStore(db_path=db_path)
+        await store.init()
+        await store.upsert_session("gc-session")
+
+        assert await store.is_session_gc_processed("gc-session") is False
+
+        await store.mark_session_gc_processed("gc-session")
+
+        assert await store.is_session_gc_processed("gc-session") is True
 
     asyncio.run(_run())
 
@@ -460,5 +544,30 @@ def test_save_and_get_preference(tmp_path) -> None:
         await store.init()
         await store.save_preference("favorite_drink", "绿茶")
         assert await store.get_preference("favorite_drink") == "绿茶"
+
+    asyncio.run(_run())
+
+
+def test_structured_store_initializes_semantic_memory_tables(tmp_path: Path) -> None:
+    db_path = tmp_path / "hypo.db"
+
+    async def _run() -> None:
+        store = StructuredStore(db_path=db_path)
+        await store.init()
+        async with aiosqlite.connect(db_path) as db:
+            async with db.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE name IN ('semantic_chunks', 'semantic_chunks_vec', 'semantic_chunks_fts')
+                ORDER BY name
+                """
+            ) as cursor:
+                rows = await cursor.fetchall()
+        assert [row[0] for row in rows] == [
+            "semantic_chunks",
+            "semantic_chunks_fts",
+            "semantic_chunks_vec",
+        ]
 
     asyncio.run(_run())

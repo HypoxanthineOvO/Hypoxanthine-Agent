@@ -10,6 +10,7 @@ __pycache__/
 .vscode/
 .playwright/
 .worktrees/
+.python-version
 
 web/node_modules/
 web/dist/
@@ -31,3 +32,6 @@ memory/sessions/*
 
 # Scripts
 .playwright-cli/
+
+# Test sandbox
+test/sandbox/

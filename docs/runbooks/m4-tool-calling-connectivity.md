@@ -10,14 +10,13 @@
 
 ## Prerequisites
 
-- Conda env: `HypoAgent`
+- Python 3.12 + `uv`
 - 已配置 `config/models.yaml`、`config/secrets.yaml`
 
 ## 1) 单模型工具调用探测
 
 ```bash
-conda activate HypoAgent
-python /tmp/test_litellm_tool_call.py
+uv run python /tmp/test_litellm_tool_call.py
 ```
 
 判定规则：
@@ -29,16 +28,15 @@ python /tmp/test_litellm_tool_call.py
 ## 2) 仓库内全模型巡检
 
 ```bash
-conda activate HypoAgent
-python check_model_connectivity.py
+uv run scripts/check_models.py
 ```
 
 常用参数：
 
 ```bash
-python check_model_connectivity.py --models KimiK25
-python check_model_connectivity.py --timeout 8
-python check_model_connectivity.py --no-color
+uv run scripts/check_models.py --models KimiK25
+uv run scripts/check_models.py --timeout 8
+uv run scripts/check_models.py --no-tool-call
 ```
 
 退出码：
@@ -52,7 +50,7 @@ python check_model_connectivity.py --no-color
 1. 启动后端：
 
 ```bash
-python -m hypo_agent.gateway.main
+uv run python -m hypo_agent
 ```
 
 2. 用 WebSocket 发送：

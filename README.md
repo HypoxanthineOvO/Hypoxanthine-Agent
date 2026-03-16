@@ -19,9 +19,8 @@ Single-user personal AI assistant with layered memory, skills, and a WebUI gatew
 ### Install
 
 ```bash
-# Python deps
-pip install -r requirements.txt
-pip install -e .
+# Python 3.12 + backend deps
+uv sync
 
 # Web deps
 cd web && npm install && cd ..
@@ -38,10 +37,14 @@ cp config/secrets.yaml.example config/secrets.yaml
 
 ```bash
 # Production default: 8765
-python -m hypo_agent.gateway.main
+uv run python -m hypo_agent
 
 # Experimental port: 8766
-HYPO_PORT=8766 python -m hypo_agent.gateway.main
+uv run python -m hypo_agent --port 8766
+
+# Default smoke path: test mode (isolated sandbox data, QQ adapter disabled)
+bash test_run.sh
+HYPO_TEST_MODE=1 uv run python scripts/agent_cli.py --port 8766 smoke
 ```
 
 ## Environment Variables
@@ -61,10 +64,16 @@ HYPO_PORT=8766 python -m hypo_agent.gateway.main
 ## Development
 
 ```bash
-pytest -q
+uv run pytest -q
 cd web && npm run test && cd ..
-python scripts/agent_cli.py smoke
+bash test_run.sh
+HYPO_TEST_MODE=1 uv run python scripts/agent_cli.py --port 8766 smoke
 ```
+
+说明：
+
+- 默认不要对部署中的 `8765` 实例直接跑 smoke。
+- `test_run.sh` 会启用 `HYPO_TEST_MODE=1`，数据写入 `test/sandbox/`，且不会注册 QQ adapter。
 
 ## Port Convention
 

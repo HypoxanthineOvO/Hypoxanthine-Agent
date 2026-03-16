@@ -158,6 +158,38 @@ class SchedulerService:
             interval_minutes=safe_minutes,
         )
 
+    def register_cron_job(
+        self,
+        job_id: str,
+        cron: str,
+        coro: Any,
+        *,
+        replace_existing: bool = True,
+        timezone: str | None = None,
+    ) -> None:
+        if not callable(coro):
+            raise TypeError("coro must be callable")
+        expression = str(cron or "").strip()
+        if not expression:
+            raise ValueError("cron is required")
+        trigger = CronTrigger.from_crontab(
+            expression,
+            timezone=timezone or self.default_timezone,
+        )
+        self._scheduler.add_job(
+            coro,
+            trigger=trigger,
+            id=str(job_id),
+            replace_existing=replace_existing,
+            misfire_grace_time=self._misfire_grace_time_seconds,
+        )
+        logger.info(
+            "scheduler.cron_job_registered",
+            job_id=str(job_id),
+            cron=expression,
+            timezone=timezone or self.default_timezone,
+        )
+
     def set_email_scan_executor(self, executor: Any | None) -> None:
         if executor is not None and not callable(executor):
             raise TypeError("email scan executor must be callable")

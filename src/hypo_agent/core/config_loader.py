@@ -24,6 +24,7 @@ _PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 class ResolvedModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    type: str = "chat"
     provider: str | None = None
     litellm_model: str | None = None
     fallback: str | None = None
@@ -174,6 +175,7 @@ def load_runtime_model_config(
             )
 
         resolved_models[name] = ResolvedModelConfig(
+            type=model.type,
             provider=model.provider,
             litellm_model=model.litellm_model,
             fallback=model.fallback,
@@ -248,6 +250,15 @@ def load_tasks_config(
     return TasksConfig.model_validate(tasks_payload)
 
 
+def is_test_mode() -> bool:
+    return os.getenv("HYPO_TEST_MODE", "").strip() == "1"
+
+
+def get_test_sandbox_dir() -> Path:
+    raw = os.getenv("HYPO_TEST_SANDBOX_DIR", "").strip() or "./test/sandbox"
+    return Path(raw).expanduser().resolve(strict=False)
+
+
 def get_memory_dir() -> Path:
     """Return the configured memory directory (defaults to ./memory).
 
@@ -255,14 +266,32 @@ def get_memory_dir() -> Path:
     override it via HYPO_MEMORY_DIR.
     """
 
-    raw = os.getenv("HYPO_MEMORY_DIR", "").strip() or "./memory"
+    if is_test_mode():
+        return (get_test_sandbox_dir() / "memory").resolve(strict=False)
+
+    raw = os.getenv("HYPO_MEMORY_DIR", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve(strict=False)
+
+    raw = "./memory"
     return Path(raw).expanduser().resolve(strict=False)
+
+
+def get_database_path() -> Path:
+    if is_test_mode():
+        return (get_test_sandbox_dir() / "hypo.db").resolve(strict=False)
+
+    raw = os.getenv("HYPO_DB_PATH", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve(strict=False)
+
+    return (get_memory_dir() / "hypo.db").resolve(strict=False)
 
 
 def get_port(*, default: int = 8765) -> int:
     raw = os.getenv("HYPO_PORT", "").strip()
     if not raw:
-        return default
+        return 8766 if is_test_mode() else default
 
     try:
         port = int(raw)

@@ -3,8 +3,10 @@ from pathlib import Path
 import pytest
 
 from hypo_agent.core.config_loader import (
+    get_database_path,
     load_persona_config,
     get_memory_dir,
+    get_port,
     load_narration_config,
     render_persona_system_prompt,
     load_runtime_model_config,
@@ -19,6 +21,7 @@ def test_load_runtime_model_config_merges_models_and_secrets(tmp_path: Path) -> 
 default_model: Gemini3Pro
 task_routing:
   chat: Gemini3Pro
+  embedding: VolcanoEmbedding
 models:
   Gemini3Pro:
     provider: Hiapi
@@ -27,6 +30,11 @@ models:
   DeepseekV3_2:
     provider: Volcengine
     litellm_model: openai/ep-20251215171209-4z5qk
+    fallback: null
+  VolcanoEmbedding:
+    provider: volcano
+    type: embedding
+    litellm_model: openai/doubao-embedding-text-240715
     fallback: null
 """.strip(),
         encoding="utf-8",
@@ -42,6 +50,9 @@ providers:
   Volcengine:
     api_base: https://ark.cn-beijing.volces.com/api/v3
     api_key: volc-key
+  volcano:
+    api_base: https://ark.cn-beijing.volces.com/api/v3
+    api_key: embed-key
 """.strip(),
         encoding="utf-8",
     )
@@ -51,6 +62,8 @@ providers:
     assert runtime.default_model == "Gemini3Pro"
     assert runtime.models["Gemini3Pro"].api_base == "https://hiapi.online/v1"
     assert runtime.models["DeepseekV3_2"].api_key == "volc-key"
+    assert runtime.task_routing["embedding"] == "VolcanoEmbedding"
+    assert runtime.models["VolcanoEmbedding"].type == "embedding"
 
 
 def test_load_runtime_model_config_requires_existing_secrets_file(
@@ -165,19 +178,13 @@ providers:
         load_runtime_model_config(models_yaml, secrets_yaml)
 
 
-def test_load_tasks_config_accepts_heartbeat_prompt_and_email_scan(tmp_path: Path) -> None:
+def test_load_tasks_config_accepts_heartbeat_and_email_store(tmp_path: Path) -> None:
     tasks_yaml = tmp_path / "tasks.yaml"
     tasks_yaml.write_text(
         """
 heartbeat:
   enabled: true
   interval_minutes: 1
-  prompt_template: |
-    你是心跳判定器。
-    checks=${checks}
-email_scan:
-  enabled: true
-  interval_minutes: 5
 email_store:
   enabled: true
   max_entries: 4000
@@ -191,9 +198,6 @@ email_store:
 
     assert tasks.heartbeat.enabled is True
     assert tasks.heartbeat.interval_minutes == 1
-    assert "checks=${checks}" in tasks.heartbeat.prompt_template
-    assert tasks.email_scan.enabled is True
-    assert tasks.email_scan.interval_minutes == 5
     assert tasks.email_store.enabled is True
     assert tasks.email_store.max_entries == 4000
     assert tasks.email_store.retention_days == 60
@@ -209,6 +213,59 @@ def test_memory_dir_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     target = tmp_path / "mem-root"
     monkeypatch.setenv("HYPO_MEMORY_DIR", str(target))
     assert get_memory_dir() == target.resolve(strict=False)
+
+
+def test_memory_dir_defaults_to_test_sandbox_in_test_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HYPO_MEMORY_DIR", raising=False)
+    monkeypatch.setenv("HYPO_TEST_MODE", "1")
+
+    assert get_memory_dir() == (tmp_path / "test" / "sandbox" / "memory").resolve(strict=False)
+
+
+def test_memory_dir_ignores_custom_env_in_test_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HYPO_MEMORY_DIR", str(tmp_path / "production-memory"))
+    monkeypatch.setenv("HYPO_TEST_MODE", "1")
+
+    assert get_memory_dir() == (tmp_path / "test" / "sandbox" / "memory").resolve(strict=False)
+
+
+def test_database_path_defaults_to_test_sandbox_in_test_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HYPO_DB_PATH", raising=False)
+    monkeypatch.setenv("HYPO_TEST_MODE", "1")
+
+    assert get_database_path() == (tmp_path / "test" / "sandbox" / "hypo.db").resolve(strict=False)
+
+
+def test_database_path_ignores_custom_env_in_test_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HYPO_DB_PATH", str(tmp_path / "production.db"))
+    monkeypatch.setenv("HYPO_TEST_MODE", "1")
+
+    assert get_database_path() == (tmp_path / "test" / "sandbox" / "hypo.db").resolve(strict=False)
+
+
+def test_port_default_switches_to_test_mode_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("HYPO_PORT", raising=False)
+    monkeypatch.setenv("HYPO_TEST_MODE", "1")
+
+    assert get_port() == 8766
 
 
 def test_render_persona_system_prompt_injects_runtime_environment(

@@ -5,9 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 PROJECT_NAME="Hypo-Agent"
-CONDA_ENV_NAME="${HYPO_CONDA_ENV:-HypoAgent}"
-CONDA_BASE="${HYPO_CONDA_BASE:-}"
-CONDA_SH=""
+UV_BIN="${HYPO_UV_BIN:-uv}"
 
 RUN_DIR="${HYPO_RUN_DIR:-$ROOT_DIR/run}"
 LOG_DIR="${HYPO_LOG_DIR:-$ROOT_DIR/logs}"
@@ -51,7 +49,7 @@ Options for start/restart:
 Defaults:
   Backend:  ${BACKEND_URL}
   Frontend: ${FRONTEND_URL}
-  Conda env: ${CONDA_ENV_NAME}
+  Runtime:  ${UV_BIN} run
 EOF
 }
 
@@ -208,20 +206,11 @@ require_port_free() {
   fi
 }
 
-resolve_conda() {
-  if [[ -z "$CONDA_BASE" ]]; then
-    command -v conda >/dev/null 2>&1 || die "conda not found in PATH."
-    CONDA_BASE="$(conda info --base 2>/dev/null | tr -d '[:space:]')"
+resolve_uv() {
+  if ! command -v "$UV_BIN" >/dev/null 2>&1; then
+    die "uv not found in PATH."
   fi
-
-  [[ -n "$CONDA_BASE" ]] || die "failed to resolve conda base path."
-
-  CONDA_SH="$CONDA_BASE/etc/profile.d/conda.sh"
-  [[ -f "$CONDA_SH" ]] || die "conda activation script not found: $CONDA_SH"
-
-  if ! bash -lc "set -euo pipefail; source \"$CONDA_SH\"; conda activate \"$CONDA_ENV_NAME\" >/dev/null"; then
-    die "failed to activate conda environment '$CONDA_ENV_NAME'."
-  fi
+  UV_BIN="$(command -v "$UV_BIN")"
 }
 
 wait_for_service() {
@@ -250,43 +239,29 @@ wait_for_service() {
 start_backend() {
   nohup env \
     ROOT_DIR="$ROOT_DIR" \
-    CONDA_SH="$CONDA_SH" \
-    CONDA_ENV_NAME="$CONDA_ENV_NAME" \
+    UV_BIN="$UV_BIN" \
     MEMORY_DIR="$MEMORY_DIR" \
     BACKEND_HOST="$BACKEND_HOST" \
     BACKEND_PORT="$BACKEND_PORT" \
     bash -lc '
       set -euo pipefail
-      source "$CONDA_SH"
-      conda activate "$CONDA_ENV_NAME"
       cd "$ROOT_DIR"
-      if [[ -n "${PYTHONPATH:-}" ]]; then
-        export PYTHONPATH="$ROOT_DIR/src:$PYTHONPATH"
-      else
-        export PYTHONPATH="$ROOT_DIR/src"
-      fi
       export HYPO_PORT="$BACKEND_PORT"
       export HYPO_MEMORY_DIR="$MEMORY_DIR"
-      exec python -m uvicorn hypo_agent.gateway.main:build_app \
-        --factory \
+      exec "$UV_BIN" run python -m hypo_agent \
         --host "$BACKEND_HOST" \
-        --port "$BACKEND_PORT" \
-        --log-level info
+        --port "$BACKEND_PORT"
     ' >>"$BACKEND_LOG_FILE" 2>&1 &
   echo "$!" >"$BACKEND_PID_FILE"
 }
 
 start_frontend() {
   nohup env \
-    CONDA_SH="$CONDA_SH" \
-    CONDA_ENV_NAME="$CONDA_ENV_NAME" \
     WEB_DIR="$WEB_DIR" \
     FRONTEND_HOST="$FRONTEND_HOST" \
     FRONTEND_PORT="$FRONTEND_PORT" \
     bash -lc '
       set -euo pipefail
-      source "$CONDA_SH"
-      conda activate "$CONDA_ENV_NAME"
       cd "$WEB_DIR"
       setsid npm run dev -- --host "$FRONTEND_HOST" --port "$FRONTEND_PORT" --strictPort &
       child_pid="$!"
@@ -387,7 +362,7 @@ show_logs() {
 
 start_all() {
   ensure_dirs
-  resolve_conda
+  resolve_uv
   refresh_urls
 
   [[ -d "$WEB_DIR" ]] || die "frontend directory not found: $WEB_DIR"

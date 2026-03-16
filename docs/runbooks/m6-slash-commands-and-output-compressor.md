@@ -82,8 +82,8 @@ Used by slash commands:
 ## Verification Commands
 
 ```bash
-pytest tests/core/test_slash_commands.py tests/core/test_pipeline.py tests/core/test_pipeline_tools.py -q
-pytest tests/core/test_output_compressor.py tests/skills/test_tmux_skill.py tests/skills/test_code_run_skill.py -q
-pytest tests/core/test_model_router.py tests/memory/test_structured_store.py -q
-pytest -q
+uv run pytest tests/core/test_slash_commands.py tests/core/test_pipeline.py tests/core/test_pipeline_tools.py -q
+uv run pytest tests/core/test_output_compressor.py tests/skills/test_tmux_skill.py tests/skills/test_code_run_skill.py -q
+uv run pytest tests/core/test_model_router.py tests/memory/test_structured_store.py -q
+uv run pytest -q
 ```

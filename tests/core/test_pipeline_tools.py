@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+import hypo_agent.core.pipeline as pipeline_module
 from hypo_agent.core.pipeline import ChatPipeline
 from hypo_agent.models import Message, SkillOutput
 
@@ -48,6 +49,24 @@ class StubSkillManager:
     ) -> SkillOutput:
         self.calls.append((tool_name, params, session_id))
         return self.output
+
+
+class RecordingLogger:
+    def __init__(self) -> None:
+        self.debug_calls: list[tuple[str, dict]] = []
+        self.info_calls: list[tuple[str, dict]] = []
+
+    def debug(self, event: str, **kwargs) -> None:
+        self.debug_calls.append((event, kwargs))
+
+    def info(self, event: str, **kwargs) -> None:
+        self.info_calls.append((event, kwargs))
+
+    def warning(self, event: str, **kwargs) -> None:
+        self.info_calls.append((event, kwargs))
+
+    def exception(self, event: str, **kwargs) -> None:  # pragma: no cover - defensive
+        self.info_calls.append((event, kwargs))
 
 
 def test_pipeline_stream_reply_with_tools_single_round() -> None:
@@ -173,6 +192,168 @@ def test_pipeline_stream_reply_runs_tool_and_emits_tool_events() -> None:
     assert events[-1]["type"] == "assistant_done"
     assert skills.calls[0][0] == "run_command"
     assert skills.calls[0][1]["command"] == "echo hi"
+
+
+def test_pipeline_stream_reply_logs_tool_names_before_react_rounds(monkeypatch) -> None:
+    memory = StubSessionMemory()
+
+    class BuiltinAwareSkillManager(StubSkillManager):
+        def get_tools_schema(self) -> list[dict]:
+            return [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "update_persona_memory",
+                        "parameters": {"type": "object"},
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "save_sop",
+                        "parameters": {"type": "object"},
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "search_sop",
+                        "parameters": {"type": "object"},
+                    },
+                },
+            ]
+
+    skills = BuiltinAwareSkillManager()
+    logger = RecordingLogger()
+    monkeypatch.setattr(pipeline_module, "logger", logger)
+
+    class StubRouter:
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, session_id
+            assert tools is not None
+            return {"text": "好的，我会记住。", "tool_calls": []}
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            raise AssertionError("stream() should not be called when decision text exists")
+            yield ""  # pragma: no cover
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skills,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="记住我喜欢简洁回复", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+
+    assert events[-1]["type"] == "assistant_done"
+    debug_event = next(kwargs for event, kwargs in logger.debug_calls if event == "react.tools")
+    assert debug_event["tool_names"] == [
+        "update_persona_memory",
+        "save_sop",
+        "search_sop",
+    ]
+    assert debug_event["tool_count"] == 3
+
+
+def test_pipeline_marks_sop_usage_after_search_sop_tool_result() -> None:
+    memory = StubSessionMemory()
+
+    class SearchSopSkillManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict, str | None]] = []
+
+        def get_tools_schema(self) -> list[dict]:
+            return [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "search_sop",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ]
+
+        async def invoke(
+            self,
+            tool_name: str,
+            params: dict,
+            *,
+            session_id: str | None = None,
+        ) -> SkillOutput:
+            self.calls.append((tool_name, params, session_id))
+            return SkillOutput(
+                status="success",
+                result={
+                    "items": [
+                        {
+                            "title": "重启 Hypo-Agent 服务流程",
+                            "file_path": "/tmp/memory/knowledge/sop/重启 Hypo-Agent 服务流程.md",
+                        }
+                    ]
+                },
+            )
+
+    class StubSopManager:
+        def __init__(self) -> None:
+            self.touched: list[list[str]] = []
+
+        async def touch_files(self, file_paths: list[str]) -> None:
+            self.touched.append(list(file_paths))
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "search_sop",
+                                "arguments": "{\"query\": \"怎么重启 Hypo-Agent\", \"top_k\": 3}",
+                            },
+                        }
+                    ],
+                }
+            return {"text": "按 SOP 执行完成", "tool_calls": []}
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            del model_name, messages, session_id, tools
+            raise AssertionError("stream should not be called when final text exists")
+            yield ""  # pragma: no cover
+
+    skills = SearchSopSkillManager()
+    sop_manager = StubSopManager()
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skills,
+        sop_manager=sop_manager,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="怎么重启 Hypo-Agent", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+
+    assert events[-1]["type"] == "assistant_done"
+    assert skills.calls == [("search_sop", {"query": "怎么重启 Hypo-Agent", "top_k": 3}, "s1")]
+    assert sop_manager.touched == [[
+        "/tmp/memory/knowledge/sop/重启 Hypo-Agent 服务流程.md"
+    ]]
 
 
 def test_pipeline_stream_reply_sends_humanized_tool_status_messages() -> None:

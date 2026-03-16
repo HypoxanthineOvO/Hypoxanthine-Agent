@@ -14,7 +14,11 @@ def runtime_config() -> RuntimeModelConfig:
     return RuntimeModelConfig.model_validate(
         {
             "default_model": "Gemini3Pro",
-            "task_routing": {"chat": "Gemini3Pro", "lightweight": "DeepseekV3_2"},
+            "task_routing": {
+                "chat": "Gemini3Pro",
+                "lightweight": "DeepseekV3_2",
+                "embedding": "VolcanoEmbedding",
+            },
             "models": {
                 "Gemini3Pro": {
                     "provider": "Hiapi",
@@ -36,6 +40,14 @@ def runtime_config() -> RuntimeModelConfig:
                     "fallback": None,
                     "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
                     "api_key": "sk-dashscope",
+                },
+                "VolcanoEmbedding": {
+                    "provider": "volcano",
+                    "litellm_model": "openai/doubao-embedding-text-240715",
+                    "fallback": None,
+                    "api_base": "https://ark.cn-beijing.volces.com/api/v3",
+                    "api_key": "volcano-key",
+                    "type": "embedding",
                 },
             },
         }
@@ -497,6 +509,46 @@ def test_model_router_call_with_tools_extracts_gemini_content_tool_part(
     assert payload["tool_calls"][0]["function"]["name"] == "run_command"
 
 
+def test_model_router_call_with_tools_extracts_text_embedded_json_tool_call(
+    runtime_config: RuntimeModelConfig,
+) -> None:
+    async def fake_acompletion(**kwargs):
+        del kwargs
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"name": "update_persona_memory", '
+                            '"arguments": {"key": "回复风格", "value": "简洁"}}'
+                        )
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    router = ModelRouter(runtime_config, acompletion_fn=fake_acompletion)
+    payload = asyncio.run(
+        router.call_with_tools(
+            "Gemini3Pro",
+            [{"role": "user", "content": "hi"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "update_persona_memory",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+        )
+    )
+
+    assert payload["tool_calls"][0]["function"]["name"] == "update_persona_memory"
+    assert '"key": "回复风格"' in payload["tool_calls"][0]["function"]["arguments"]
+
+
 def test_model_router_does_not_pass_api_base_when_missing() -> None:
     runtime = RuntimeModelConfig.model_validate(
         {
@@ -632,3 +684,59 @@ def test_model_router_stream_emits_latency_ms(runtime_config: RuntimeModelConfig
     assert emitted[0]["session_id"] == "s-stream-latency"
     assert isinstance(emitted[0]["latency_ms"], float)
     assert emitted[0]["latency_ms"] >= 0
+
+
+def test_model_router_embed_uses_embedding_task_model_and_batch_input(
+    runtime_config: RuntimeModelConfig,
+) -> None:
+    captured: list[dict] = []
+
+    async def fake_aembedding(**kwargs):
+        captured.append(kwargs)
+        return SimpleNamespace(
+            data=[
+                SimpleNamespace(embedding=[0.1, 0.2, 0.3]),
+                {"embedding": [0.4, 0.5, 0.6]},
+            ]
+        )
+
+    router = ModelRouter(
+        runtime_config,
+        acompletion_fn=lambda **_: None,
+        aembedding_fn=fake_aembedding,
+    )
+    result = asyncio.run(router.embed(["hello", "world"]))
+
+    assert result == [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+    assert captured[0]["model"] == "openai/doubao-embedding-text-240715"
+    assert captured[0]["input"] == ["hello", "world"]
+    assert captured[0]["api_base"] == "https://ark.cn-beijing.volces.com/api/v3"
+    assert captured[0]["api_key"] == "volcano-key"
+
+
+def test_model_router_embed_retries_before_success(
+    runtime_config: RuntimeModelConfig,
+) -> None:
+    attempts: list[str] = []
+
+    async def fake_aembedding(**kwargs):
+        attempts.append(kwargs["model"])
+        if len(attempts) < 3:
+            raise RuntimeError("temporary embed failure")
+        return SimpleNamespace(data=[{"embedding": [1.0, 0.0]}])
+
+    router = ModelRouter(
+        runtime_config,
+        acompletion_fn=lambda **_: None,
+        aembedding_fn=fake_aembedding,
+        embed_retry_attempts=3,
+        embed_retry_backoff_seconds=0.0,
+    )
+    result = asyncio.run(router.embed(["retry me"]))
+
+    assert result == [[1.0, 0.0]]
+    assert attempts == [
+        "openai/doubao-embedding-text-240715",
+        "openai/doubao-embedding-text-240715",
+        "openai/doubao-embedding-text-240715",
+    ]

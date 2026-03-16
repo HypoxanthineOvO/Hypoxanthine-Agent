@@ -1,7 +1,7 @@
 import { onMounted, onUnmounted } from "vue";
 
 export type HotkeyCombo =
-  | "ctrlOrMeta+enter"
+  | "enter"
   | "ctrlOrMeta+l"
   | "ctrlOrMeta+n"
   | "ctrlOrMeta+d"
@@ -17,8 +17,8 @@ export interface HotkeyBinding {
 function matchesCombo(event: KeyboardEvent, combo: HotkeyCombo): boolean {
   const key = event.key.toLowerCase();
   switch (combo) {
-    case "ctrlOrMeta+enter":
-      return (event.ctrlKey || event.metaKey) && key === "enter";
+    case "enter":
+      return !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && key === "enter";
     case "ctrlOrMeta+l":
       return (event.ctrlKey || event.metaKey) && key === "l";
     case "ctrlOrMeta+n":

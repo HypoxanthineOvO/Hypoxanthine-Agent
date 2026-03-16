@@ -70,3 +70,24 @@ def test_port_from_env(
 
     args, kwargs = mock_uvicorn_run.call_args
     assert kwargs["port"] == 9999
+
+
+@patch("hypo_agent.gateway.main.uvicorn.run")
+@patch("hypo_agent.gateway.main.create_app")
+@patch("hypo_agent.gateway.main.load_gateway_settings")
+def test_port_defaults_to_test_mode_port(
+    mock_load_gateway_settings, mock_create_app, mock_uvicorn_run, monkeypatch
+) -> None:
+    monkeypatch.delenv("HYPO_PORT", raising=False)
+    monkeypatch.setenv("HYPO_TEST_MODE", "1")
+    mock_load_gateway_settings.return_value = SimpleNamespace(
+        auth_token="test-token",
+        security=SimpleNamespace(),
+    )
+    mock_app = object()
+    mock_create_app.return_value = mock_app
+
+    run(host="127.0.0.1")
+
+    args, kwargs = mock_uvicorn_run.call_args
+    assert kwargs["port"] == 8766

@@ -1,18 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
+from typing import Any
 
 from hypo_agent.core.event_queue import EventQueue
-from hypo_agent.core.heartbeat import HeartbeatService
-
-
-class StubStore:
-    def __init__(self, overdue_rows: list[dict] | None = None) -> None:
-        self.overdue_rows = overdue_rows or []
-
-    async def list_overdue_pending_reminders(self, *, limit: int = 20) -> list[dict]:
-        del limit
-        return list(self.overdue_rows)
+from hypo_agent.core.heartbeat import HeartbeatService, SILENT_SENTINEL
+from hypo_agent.core.pipeline import ChatPipeline
+from hypo_agent.models import Message, SkillOutput
 
 
 class StubScheduler:
@@ -28,132 +24,292 @@ class StubScheduler:
         return self._active_jobs
 
 
-class StubRouter:
-    def __init__(self, payload: dict) -> None:
-        self.payload = payload
-        self.prompts: list[str] = []
+class AutoRespondingQueue:
+    def __init__(self, response_payloads: list[dict[str, Any]]) -> None:
+        self.response_payloads = list(response_payloads)
+        self.events: list[dict[str, Any]] = []
 
-    async def call_lightweight_json(self, prompt: str, *, session_id: str | None = None) -> dict:
-        del session_id
-        self.prompts.append(prompt)
-        return dict(self.payload)
+    async def put(self, event: dict[str, Any]) -> None:
+        self.events.append(event)
+        if str(event.get("event_type") or "").strip().lower() != "user_message":
+            return
+        emit = event.get("emit")
+        assert callable(emit)
+        for payload in self.response_payloads:
+            result = emit(payload)
+            if asyncio.iscoroutine(result):
+                await result
 
 
-def test_heartbeat_silent_when_no_events() -> None:
+class StubSessionMemory:
+    def __init__(self) -> None:
+        self.appended: list[Message] = []
+        self.history: list[Message] = []
+
+    def append(self, message: Message) -> None:
+        self.appended.append(message)
+
+    def get_recent_messages(self, session_id: str, limit: int | None = None) -> list[Message]:
+        del session_id, limit
+        return list(self.history)
+
+
+class HeartbeatRouter:
+    def __init__(self, final_text: str) -> None:
+        self.final_text = final_text
+        self.call_count = 0
+
+    async def call(self, model_name, messages, *, session_id=None, tools=None):
+        del model_name, messages, session_id, tools
+        return self.final_text
+
+    async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+        del model_name, tools, session_id
+        self.call_count += 1
+        if self.call_count == 1:
+            return {
+                "text": "",
+                "tool_calls": [
+                    {
+                        "id": "call-run-command",
+                        "type": "function",
+                        "function": {
+                            "name": "run_command",
+                            "arguments": json.dumps({"command": "uptime"}, ensure_ascii=False),
+                        },
+                    },
+                    {
+                        "id": "call-scan-emails",
+                        "type": "function",
+                        "function": {
+                            "name": "scan_emails",
+                            "arguments": json.dumps({"unread_only": True}, ensure_ascii=False),
+                        },
+                    },
+                    {
+                        "id": "call-list-reminders",
+                        "type": "function",
+                        "function": {
+                            "name": "list_reminders",
+                            "arguments": json.dumps({"status": "active"}, ensure_ascii=False),
+                        },
+                    },
+                ],
+            }
+        assert any(item.get("role") == "tool" for item in messages)
+        return {"text": self.final_text, "tool_calls": []}
+
+    async def stream(self, model_name, messages, *, session_id=None, tools=None):
+        del model_name, messages, session_id, tools
+        if False:  # pragma: no cover
+            yield ""
+
+
+class RecordingSkillManager:
+    def __init__(self) -> None:
+        self.invocations: list[tuple[str, dict[str, Any], str | None]] = []
+
+    def get_tools_schema(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "run_command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "scan_emails",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"unread_only": {"type": "boolean"}},
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_reminders",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"status": {"type": "string"}},
+                    },
+                },
+            },
+        ]
+
+    async def invoke(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        *,
+        session_id: str | None = None,
+    ) -> SkillOutput:
+        self.invocations.append((tool_name, dict(params), session_id))
+        return SkillOutput(
+            status="success",
+            result={"tool": tool_name, "ok": True},
+            metadata={},
+        )
+
+
+def test_heartbeat_reads_prompt_and_enqueues_non_silent_push(tmp_path: Path) -> None:
     async def _run() -> None:
-        queue = EventQueue()
-        store = StubStore(overdue_rows=[])
-        router = StubRouter({"should_push": False, "summary": "一切正常"})
-        scheduler = StubScheduler(running=True)
+        prompt_path = tmp_path / "heartbeat_prompt.md"
+        prompt_path.write_text("# prompt\ncheck it", encoding="utf-8")
+        queue = AutoRespondingQueue(
+            [
+                {"type": "assistant_chunk", "text": "发现 1 条异常"},
+                {"type": "assistant_done"},
+            ]
+        )
         service = HeartbeatService(
-            structured_store=store,
-            model_router=router,
             message_queue=queue,
-            scheduler=scheduler,
+            scheduler=StubScheduler(running=True),
             default_session_id="main",
+            prompt_path=prompt_path,
         )
 
         result = await service.run()
-        assert result["should_push"] is False
-        assert queue.empty() is True
-
-    asyncio.run(_run())
-
-
-def test_heartbeat_pushes_when_should_push_true() -> None:
-    async def _run() -> None:
-        queue = EventQueue()
-        store = StubStore(overdue_rows=[{"id": 1, "title": "过期提醒"}])
-        router = StubRouter({"should_push": True, "summary": "检测到 1 条漏触发提醒"})
-        scheduler = StubScheduler(running=True)
-        service = HeartbeatService(
-            structured_store=store,
-            model_router=router,
-            message_queue=queue,
-            scheduler=scheduler,
-            default_session_id="main",
-        )
-
-        result = await service.run()
-        event = await queue.get()
-        queue.task_done()
 
         assert result["should_push"] is True
-        assert event["event_type"] == "heartbeat_trigger"
-        assert event["message_tag"] == "heartbeat"
-        assert event["summary"] == "检测到 1 条漏触发提醒"
+        assert len(queue.events) == 2
+        user_event = queue.events[0]
+        assert user_event["event_type"] == "user_message"
+        inbound = user_event["message"]
+        assert isinstance(inbound, Message)
+        assert inbound.metadata["source"] == "heartbeat"
+        assert inbound.text == "# prompt\ncheck it"
+
+        proactive_event = queue.events[1]
+        assert proactive_event["event_type"] == "heartbeat_trigger"
+        assert proactive_event["summary"] == "发现 1 条异常"
 
     asyncio.run(_run())
 
 
-def test_heartbeat_register_event_source_invokes_callbacks() -> None:
+def test_heartbeat_silent_sentinel_does_not_enqueue_proactive_push(tmp_path: Path) -> None:
     async def _run() -> None:
-        queue = EventQueue()
-        store = StubStore(overdue_rows=[])
-        router = StubRouter({"should_push": False, "summary": "quiet"})
-        scheduler = StubScheduler(running=True)
-        service = HeartbeatService(
-            structured_store=store,
-            model_router=router,
-            message_queue=queue,
-            scheduler=scheduler,
-            default_session_id="main",
+        prompt_path = tmp_path / "heartbeat_prompt.md"
+        prompt_path.write_text("silent test", encoding="utf-8")
+        queue = AutoRespondingQueue(
+            [
+                {"type": "assistant_chunk", "text": SILENT_SENTINEL},
+                {"type": "assistant_done"},
+            ]
         )
-        called: list[str] = []
+        service = HeartbeatService(
+            message_queue=queue,
+            scheduler=StubScheduler(running=True),
+            default_session_id="main",
+            prompt_path=prompt_path,
+        )
 
-        async def async_source() -> dict:
-            called.append("async_source")
-            return {"name": "async_source", "new_items": 0}
+        result = await service.run()
 
-        def sync_source() -> dict:
-            called.append("sync_source")
-            return {"name": "sync_source", "new_items": 0}
-
-        service.register_event_source("async_source", async_source)
-        service.register_event_source("sync_source", sync_source)
-
-        await service.run()
-        assert set(called) == {"async_source", "sync_source"}
+        assert result["should_push"] is False
+        assert result["summary"] == SILENT_SENTINEL
+        assert len(queue.events) == 1
+        assert queue.events[0]["event_type"] == "user_message"
 
     asyncio.run(_run())
 
 
-def test_heartbeat_uses_custom_prompt_template_with_runtime_values() -> None:
+def test_heartbeat_pipeline_invokes_tools_and_stays_silent_when_agent_returns_sentinel(
+    tmp_path: Path,
+) -> None:
     async def _run() -> None:
+        prompt_path = tmp_path / "heartbeat_prompt.md"
+        prompt_path.write_text("run heartbeat", encoding="utf-8")
         queue = EventQueue()
-        store = StubStore(overdue_rows=[{"id": 1, "title": "过期提醒"}])
-        router = StubRouter({"should_push": False, "summary": "一切正常"})
-        scheduler = StubScheduler(running=True)
+        memory = StubSessionMemory()
+        pushed: list[Message] = []
+        skill_manager = RecordingSkillManager()
+        pipeline = ChatPipeline(
+            router=HeartbeatRouter(SILENT_SENTINEL),
+            chat_model="Gemini3Pro",
+            session_memory=memory,
+            skill_manager=skill_manager,
+            event_queue=queue,
+            on_proactive_message=pushed.append,
+        )
         service = HeartbeatService(
-            structured_store=store,
-            model_router=router,
             message_queue=queue,
-            scheduler=scheduler,
+            scheduler=StubScheduler(running=True),
             default_session_id="main",
-            decision_prompt_template=(
-                "你是自定义心跳判定器。\n"
-                "checks=${checks}\n"
-                "overdue=${overdue}\n"
-                "sources=${sources}"
-            ),
+            prompt_path=prompt_path,
         )
 
-        await service.run()
+        await pipeline.start_event_consumer()
+        result = await service.run()
+        await asyncio.sleep(0.05)
+        await pipeline.stop_event_consumer()
 
-        assert len(router.prompts) == 1
-        assert "你是自定义心跳判定器。" in router.prompts[0]
-        assert "${checks}" not in router.prompts[0]
-        assert '"db_ok": true' in router.prompts[0]
-        assert '"title": "过期提醒"' in router.prompts[0]
+        assert result["should_push"] is False
+        assert [name for name, _, _ in skill_manager.invocations] == [
+            "run_command",
+            "scan_emails",
+            "list_reminders",
+        ]
+        assert memory.appended == []
+        assert pushed == []
+
+    asyncio.run(_run())
+
+
+def test_heartbeat_pipeline_invokes_tools_and_emits_single_final_push(tmp_path: Path) -> None:
+    async def _run() -> None:
+        prompt_path = tmp_path / "heartbeat_prompt.md"
+        prompt_path.write_text("run heartbeat", encoding="utf-8")
+        queue = EventQueue()
+        memory = StubSessionMemory()
+        pushed: list[Message] = []
+        skill_manager = RecordingSkillManager()
+        pipeline = ChatPipeline(
+            router=HeartbeatRouter("⚠️ 检查到 1 封重要邮件"),
+            chat_model="Gemini3Pro",
+            session_memory=memory,
+            skill_manager=skill_manager,
+            event_queue=queue,
+            on_proactive_message=pushed.append,
+        )
+        service = HeartbeatService(
+            message_queue=queue,
+            scheduler=StubScheduler(running=True),
+            default_session_id="main",
+            prompt_path=prompt_path,
+        )
+
+        await pipeline.start_event_consumer()
+        result = await service.run()
+        await asyncio.sleep(0.05)
+        await pipeline.stop_event_consumer()
+
+        assert result["should_push"] is True
+        assert [name for name, _, _ in skill_manager.invocations] == [
+            "run_command",
+            "scan_emails",
+            "list_reminders",
+        ]
+        assert len(memory.appended) == 1
+        assert memory.appended[0].message_tag == "heartbeat"
+        assert "重要邮件" in str(memory.appended[0].text)
+        assert len(pushed) == 1
+        assert pushed[0].message_tag == "heartbeat"
+        assert "重要邮件" in str(pushed[0].text)
 
     asyncio.run(_run())
 
 
 def test_heartbeat_status_reports_running_when_scheduler_has_active_jobs() -> None:
     service = HeartbeatService(
-        structured_store=StubStore(overdue_rows=[]),
-        model_router=None,
-        message_queue=EventQueue(),
+        message_queue=AutoRespondingQueue([]),
         scheduler=StubScheduler(running=True),
         default_session_id="main",
     )
@@ -173,3 +329,4 @@ def test_heartbeat_status_reports_running_when_scheduler_has_active_jobs() -> No
 
     assert status["status"] == "running"
     assert status["active_tasks"] == 2
+

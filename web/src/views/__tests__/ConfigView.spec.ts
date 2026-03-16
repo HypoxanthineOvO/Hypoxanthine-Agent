@@ -26,7 +26,7 @@ const configFiles = [
     filename: "tasks.yaml",
     label: "定时任务",
     icon: "⏰",
-    description: "Heartbeat、邮件扫描等定时任务配置",
+    description: "Heartbeat 与邮件缓存等定时任务配置",
   },
   {
     filename: "narration.yaml",
@@ -95,16 +95,11 @@ describe("ConfigView", () => {
           json: async () => ({
             filename: "tasks.yaml",
             content:
-              "heartbeat:\n  enabled: true\n  interval_minutes: 30\n  prompt_template: hello\nemail_scan:\n  enabled: true\n  interval_minutes: 60\nemail_store:\n  enabled: true\n  max_entries: 5000\n  retention_days: 90\n  warmup_hours: 168\n",
+              "heartbeat:\n  enabled: true\n  interval_minutes: 30\nemail_store:\n  enabled: true\n  max_entries: 5000\n  retention_days: 90\n  warmup_hours: 168\n",
             data: {
               heartbeat: {
                 enabled: true,
                 interval_minutes: 30,
-                prompt_template: "hello",
-              },
-              email_scan: {
-                enabled: true,
-                interval_minutes: 60,
               },
               email_store: {
                 enabled: true,
@@ -127,11 +122,6 @@ describe("ConfigView", () => {
               heartbeat: {
                 enabled: true,
                 interval_minutes: 30,
-                prompt_template: "hello",
-              },
-              email_scan: {
-                enabled: true,
-                interval_minutes: 60,
               },
               email_store: {
                 enabled: true,
@@ -179,7 +169,6 @@ describe("ConfigView", () => {
     await flushUi();
 
     expect(wrapper.get('[data-testid="task-card-heartbeat"]').text()).toContain("Heartbeat");
-    expect(wrapper.get('[data-testid="task-card-email_scan"]').text()).toContain("邮件扫描");
     expect(wrapper.get('[data-testid="task-card-email_store"]').text()).toContain("邮件缓存");
 
     await wrapper.get('[data-testid="config-save"]').trigger("click");
@@ -293,5 +282,113 @@ describe("ConfigView", () => {
     await flushUi();
 
     expect(wrapper.find('[data-testid="raw-yaml-editor"]').exists()).toBe(true);
+  });
+
+  it("renders persona form fields and saves structured persona data", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/config?token=test-token")) {
+        return {
+          ok: true,
+          json: async () => configFiles,
+        };
+      }
+      if (url.endsWith("/config/persona.yaml?token=test-token") && init?.method !== "PUT") {
+        return {
+          ok: true,
+          json: async () => ({
+            filename: "persona.yaml",
+            content: [
+              "name: Hypo",
+              "aliases:",
+              "  - assistant",
+              "personality:",
+              "  - pragmatic",
+              "  - concise",
+              "speaking_style:",
+              "  tone: direct",
+              "  habits:",
+              "    - 简洁回复",
+            ].join("\n"),
+            data: {
+              name: "Hypo",
+              aliases: ["assistant"],
+              personality: ["pragmatic", "concise"],
+              speaking_style: {
+                tone: "direct",
+                habits: ["简洁回复"],
+              },
+            },
+            masked_fields: [],
+          }),
+        };
+      }
+      if (url.endsWith("/config/persona.yaml?token=test-token") && init?.method === "PUT") {
+        return {
+          ok: true,
+          json: async () => ({
+            filename: "persona.yaml",
+            content: "",
+            data: {
+              name: "Hypo",
+              aliases: ["assistant"],
+              personality: ["pragmatic", "concise"],
+              speaking_style: {
+                tone: "direct",
+                habits: ["简洁回复"],
+              },
+            },
+            masked_fields: [],
+            reloaded: true,
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({}),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(ConfigView, {
+      props: {
+        token: "test-token",
+        apiBase: "http://localhost:8000/api",
+      },
+      global: {
+        stubs: {
+          MonacoEditor: {
+            props: ["modelValue"],
+            template: "<textarea data-testid='raw-yaml-editor' :value='modelValue'></textarea>",
+          },
+        },
+      },
+    });
+
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    expect(wrapper.find('[data-testid="persona-name-input"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="persona-aliases-input"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="persona-personality-input"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="persona-tone-input"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="persona-habits-input"]').exists()).toBe(true);
+
+    await wrapper.get('[data-testid="config-save"]').trigger("click");
+    await flushUi();
+
+    const putCall = fetchMock.mock.calls.find(
+      ([url, requestInit]) =>
+        String(url) === "http://localhost:8000/api/config/persona.yaml?token=test-token" &&
+        (requestInit as RequestInit | undefined)?.method === "PUT",
+    );
+    expect(putCall).toBeTruthy();
+    const body = JSON.parse(String((putCall?.[1] as RequestInit).body));
+    expect(body.data.name).toBe("Hypo");
+    expect(body.data.aliases).toEqual(["assistant"]);
+    expect(body.data.personality).toEqual(["pragmatic", "concise"]);
+    expect(body.data.speaking_style.tone).toBe("direct");
+    expect(body.data.speaking_style.habits).toEqual(["简洁回复"]);
   });
 });

@@ -57,12 +57,14 @@ class SlashCommandHandler:
         structured_store: SlashStructuredStore,
         circuit_breaker: Any | None = None,
         skill_manager: Any | None = None,
+        memory_gc: Any | None = None,
     ) -> None:
         self.router = router
         self.session_memory = session_memory
         self.structured_store = structured_store
         self.circuit_breaker = circuit_breaker
         self.skill_manager = skill_manager
+        self.memory_gc = memory_gc
         self._registry: list[SlashCommandEntry] = [
             SlashCommandEntry(
                 command="/help",
@@ -115,6 +117,11 @@ class SlashCommandHandler:
                 command="/reminders",
                 description="列出提醒（可选状态：active/paused/completed/missed）",
                 handler=self._handle_reminders,
+            ),
+            SlashCommandEntry(
+                command="/gc",
+                description="手动触发 Memory GC",
+                handler=self._handle_gc,
             ),
         ]
 
@@ -356,6 +363,20 @@ class SlashCommandHandler:
                 f"({row.get('schedule_type', '')}: {row.get('schedule_value', '')})"
             )
         return "\n".join(lines)
+
+    async def _handle_gc(self, _: Message) -> str:
+        if self.memory_gc is None or not callable(getattr(self.memory_gc, "run", None)):
+            return "Memory GC 不可用。"
+
+        result = self.memory_gc.run()
+        if inspect.isawaitable(result):
+            result = await result
+        if not isinstance(result, dict):
+            return "Memory GC 已触发。"
+        processed = int(result.get("processed_count") or 0)
+        skipped = int(result.get("skipped_count") or 0)
+        errors = int(result.get("error_count") or 0)
+        return f"Memory GC 完成：processed={processed} skipped={skipped} errors={errors}"
 
     def _reminder_status_badge(self, status: str) -> str:
         mapping = {

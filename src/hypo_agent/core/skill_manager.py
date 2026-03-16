@@ -4,7 +4,7 @@ import inspect
 import json
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Literal
 
 import structlog
 import yaml
@@ -14,6 +14,8 @@ from hypo_agent.security.permission_manager import PermissionManager
 from hypo_agent.skills.base import BaseSkill
 
 logger = structlog.get_logger()
+
+BuiltinToolHandler = Callable[..., Awaitable[SkillOutput] | SkillOutput]
 
 
 class SkillManager:
@@ -36,6 +38,7 @@ class SkillManager:
     ) -> None:
         self._skills: dict[str, BaseSkill] = {}
         self._tool_to_skill: dict[str, BaseSkill] = {}
+        self._builtin_tools: dict[str, tuple[dict[str, Any], BuiltinToolHandler, str]] = {}
         self._circuit_breaker = circuit_breaker
         self._permission_manager = permission_manager
         self._structured_store = structured_store
@@ -61,9 +64,25 @@ class SkillManager:
 
     def get_tools_schema(self) -> list[dict[str, Any]]:
         all_tools: list[dict[str, Any]] = []
+        for schema, _, _ in self._builtin_tools.values():
+            all_tools.append(schema)
         for skill in self._skills.values():
             all_tools.extend(skill.tools)
         return all_tools
+
+    def register_builtin_tool(
+        self,
+        schema: dict[str, Any],
+        handler: BuiltinToolHandler,
+        *,
+        source: str = "builtin",
+    ) -> None:
+        tool_name = self._read_tool_name(schema)
+        if not tool_name:
+            raise ValueError("Builtin tool schema must declare function.name")
+        if tool_name in self._tool_to_skill or tool_name in self._builtin_tools:
+            raise ValueError(f"Tool '{tool_name}' already registered")
+        self._builtin_tools[tool_name] = (schema, handler, source)
 
     def list_skills(self) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
@@ -164,7 +183,8 @@ class SkillManager:
                 return blocked
 
         skill = self._tool_to_skill.get(tool_name)
-        if skill is None:
+        builtin = self._builtin_tools.get(tool_name)
+        if skill is None and builtin is None:
             result = SkillOutput(
                 status="error",
                 error_info=f"Unknown tool '{tool_name}'",
@@ -190,6 +210,7 @@ class SkillManager:
 
         if (
             self._permission_manager is not None
+            and skill is not None
             and skill.required_permissions
             and isinstance(params.get("path"), str)
         ):
@@ -222,7 +243,14 @@ class SkillManager:
                 return blocked
 
         try:
-            result = await skill.execute(tool_name, params)
+            if builtin is not None:
+                _, handler, _ = builtin
+                result = handler(params, session_id=session_id)
+                if inspect.isawaitable(result):
+                    result = await result
+            else:
+                assert skill is not None
+                result = await skill.execute(tool_name, params)
         except Exception as exc:
             logger.error(
                 "skill.invoke.exception",
@@ -257,7 +285,11 @@ class SkillManager:
                 self._circuit_breaker.record_failure(tool_name, session_id)
             normalized = SkillOutput(
                 status="error",
-                error_info=f"Skill '{skill.name}' returned invalid output",
+                error_info=(
+                    f"Skill '{skill.name}' returned invalid output"
+                    if skill is not None
+                    else f"Builtin tool '{tool_name}' returned invalid output"
+                ),
             )
             logger.warning(
                 "skill.invoke.fail",
@@ -345,6 +377,8 @@ class SkillManager:
         normalized_status = self._normalize_invocation_status(status)
         skill = self._tool_to_skill.get(tool_name)
         skill_name = skill.name if skill is not None else None
+        if skill_name is None and tool_name in self._builtin_tools:
+            skill_name = self._builtin_tools[tool_name][2]
         try:
             return await self._structured_store.record_tool_invocation(
                 session_id=session_id,

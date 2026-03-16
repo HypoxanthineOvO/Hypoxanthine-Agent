@@ -33,10 +33,6 @@ def _run_start_script(args: list[str], env: dict[str, str]) -> subprocess.Comple
 def _make_stub_environment(tmp_path: Path) -> dict[str, str]:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-
-    fake_conda_base = tmp_path / "fake-conda"
-    conda_profile = fake_conda_base / "etc" / "profile.d"
-    conda_profile.mkdir(parents=True)
     fake_server = tmp_path / "fake_server.py"
 
     fake_server.write_text(
@@ -82,52 +78,15 @@ print(f"{service} stopped", flush=True)
         encoding="utf-8",
     )
 
-    conda_profile.joinpath("conda.sh").write_text(
-        f"""
-conda() {{
-  if [[ "${{1:-}}" == "activate" ]]; then
-    if [[ "${{2:-}}" == "HypoAgent" ]]; then
-      export CONDA_DEFAULT_ENV="HypoAgent"
-      return 0
-    fi
-    echo "Environment not found: ${{2:-}}" >&2
-    return 1
-  fi
-  command conda "$@"
-}}
-""".strip()
-        + "\n",
-        encoding="utf-8",
-    )
-
-    fake_bin.joinpath("conda").write_text(
+    fake_bin.joinpath("uv").write_text(
         f"""#!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${{1:-}}" == "info" && "${{2:-}}" == "--base" ]]; then
-  printf '%s\\n' "{fake_conda_base}"
-  exit 0
+if [[ "${{1:-}}" != "run" ]]; then
+  echo "unsupported uv invocation: $*" >&2
+  exit 1
 fi
-
-if [[ "${{1:-}}" == "env" && "${{2:-}}" == "list" ]]; then
-  cat <<'EOF'
-# conda environments:
-#
-base                  *  {fake_conda_base}
-HypoAgent                {fake_conda_base}/envs/HypoAgent
-EOF
-  exit 0
-fi
-
-echo "unsupported conda invocation: $*" >&2
-exit 1
-""",
-        encoding="utf-8",
-    )
-
-    fake_bin.joinpath("python").write_text(
-        f"""#!/usr/bin/env bash
-set -euo pipefail
+shift
 
 port=""
 prev=""
@@ -189,7 +148,6 @@ exec python3 "{fake_server}" "$port" frontend
             "HYPO_RUN_DIR": str(run_dir),
             "HYPO_LOG_DIR": str(log_dir),
             "HYPO_MEMORY_DIR": str(memory_dir),
-            "HYPO_CONDA_BASE": str(fake_conda_base),
             "HYPO_STARTUP_TIMEOUT": "5",
         }
     )

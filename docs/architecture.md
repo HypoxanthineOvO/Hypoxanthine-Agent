@@ -192,7 +192,7 @@ graph TD
   - 新增 `HeartbeatService`，独立于 reminder heartbeat precheck，支持事件源聚合（`register_event_source`）与漏网提醒兜底（`list_overdue_pending_reminders`）；
   - `tasks.yaml` 新增 `heartbeat` 与 `email_scan` 的 interval 配置，应用启动时统一注册 interval jobs；
   - 新增 `email_scan_trigger` 事件类型，沿用中心 `EventQueue -> ChatPipeline._event_to_message -> WebSocket` 主动推送通路；
-  - `agent_cli.py smoke` 纳入 heartbeat/email_scan 真机门禁，用于验收主动消息 `message_tag` 链路完整性。
+  - 默认门禁为测试模式 smoke：`bash test_run.sh` + `HYPO_TEST_MODE=1 uv run python scripts/agent_cli.py --port 8766 smoke`，用于验收主动消息 `message_tag` 链路完整性，且避免污染生产数据或触发 QQ 通道。
 
 **相对 OpenClaw 的简化**：OpenClaw 支持 Webhook、邮件触发、语音唤醒等多种激活方式，Hypo-Agent V1 仅保留 Cron 触发，保持简单。
 

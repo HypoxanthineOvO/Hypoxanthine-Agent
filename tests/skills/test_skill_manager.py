@@ -78,6 +78,35 @@ def test_skill_manager_registers_tools_schema() -> None:
     assert tools[0]["function"]["name"] == "echo"
 
 
+def test_skill_manager_get_tools_schema_prepends_builtin_tools() -> None:
+    manager = SkillManager()
+
+    async def handler(params: dict, *, session_id: str | None = None) -> SkillOutput:
+        del params, session_id
+        return SkillOutput(status="success", result={})
+
+    manager.register_builtin_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "update_persona_memory",
+                "description": "Persist persona memory.",
+                "parameters": {"type": "object"},
+            },
+        },
+        handler,
+        source="builtin",
+    )
+    manager.register(EchoSkill())
+
+    tools = manager.get_tools_schema()
+
+    assert [tool["function"]["name"] for tool in tools] == [
+        "update_persona_memory",
+        "echo",
+    ]
+
+
 def test_skill_manager_invokes_registered_tool() -> None:
     manager = SkillManager()
     manager.register(EchoSkill())
@@ -346,3 +375,42 @@ def test_skill_manager_records_blocked_tool_invocations() -> None:
     assert record["error_info"] == "blocked for test"
     assert record["skill_name"] == "echo"
     assert output.metadata["invocation_id"] == 99
+
+
+def test_skill_manager_invokes_registered_builtin_tool() -> None:
+    manager = SkillManager()
+
+    async def handler(params: dict, *, session_id: str | None = None) -> SkillOutput:
+        return SkillOutput(status="success", result={"params": params, "session_id": session_id})
+
+    manager.register_builtin_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "update_persona_memory",
+                "description": "Persist persona memory.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string"},
+                        "value": {"type": "string"},
+                    },
+                    "required": ["key", "value"],
+                },
+            },
+        },
+        handler,
+        source="builtin",
+    )
+
+    output = asyncio.run(
+        manager.invoke(
+            "update_persona_memory",
+            {"key": "response_style", "value": "简洁"},
+            session_id="s1",
+        )
+    )
+
+    assert output.status == "success"
+    assert output.result["session_id"] == "s1"
+    assert output.result["params"]["key"] == "response_style"

@@ -45,6 +45,7 @@ class SkillOutput(BaseModel):
 class SingleModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    type: Literal["chat", "embedding", "vision", "audio", "rerank"] = "chat"
     provider: str | None = None
     litellm_model: str | None = None
     fallback: str | None = None
@@ -118,12 +119,6 @@ class TaskScheduleConfig(BaseModel):
     interval_minutes: int = Field(default=15, ge=1)
 
 
-class HeartbeatTaskConfig(TaskScheduleConfig):
-    model_config = ConfigDict(extra="forbid")
-
-    prompt_template: str = ""
-
-
 class EmailStoreTaskConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -136,8 +131,7 @@ class EmailStoreTaskConfig(BaseModel):
 class TasksConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    heartbeat: HeartbeatTaskConfig = Field(default_factory=HeartbeatTaskConfig)
-    email_scan: TaskScheduleConfig = Field(default_factory=TaskScheduleConfig)
+    heartbeat: TaskScheduleConfig = Field(default_factory=TaskScheduleConfig)
     email_store: EmailStoreTaskConfig = Field(default_factory=EmailStoreTaskConfig)
 
 

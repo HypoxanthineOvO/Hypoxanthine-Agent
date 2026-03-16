@@ -70,11 +70,6 @@ system_prompt_template: |
 heartbeat:
   enabled: true
   interval_minutes: 30
-  prompt_template: |
-    hello
-email_scan:
-  enabled: true
-  interval_minutes: 60
 email_store:
   enabled: true
   max_entries: 5000
@@ -268,11 +263,6 @@ def test_config_put_validates_new_tasks_fields(tmp_path: Path) -> None:
                     "heartbeat": {
                         "enabled": True,
                         "interval_minutes": 0,
-                        "prompt_template": "bad",
-                    },
-                    "email_scan": {
-                        "enabled": True,
-                        "interval_minutes": 5,
                     },
                     "email_store": {
                         "enabled": True,
@@ -291,11 +281,6 @@ def test_config_put_validates_new_tasks_fields(tmp_path: Path) -> None:
                     "heartbeat": {
                         "enabled": True,
                         "interval_minutes": 1,
-                        "prompt_template": "good",
-                    },
-                    "email_scan": {
-                        "enabled": True,
-                        "interval_minutes": 5,
                     },
                     "email_store": {
                         "enabled": True,

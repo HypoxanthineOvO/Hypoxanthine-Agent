@@ -4,11 +4,14 @@ import logging
 
 import structlog
 
+from hypo_agent.core.config_loader import is_test_mode
+
 
 def configure_logging(level: str = "INFO", json_logs: bool = True) -> None:
     """Configure structlog for application-wide structured logging."""
     timestamper = structlog.processors.TimeStamper(fmt="iso", utc=True)
     shared_processors = [
+        structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         timestamper,
@@ -37,3 +40,7 @@ def configure_logging(level: str = "INFO", json_logs: bool = True) -> None:
         logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
+
+    structlog.contextvars.clear_contextvars()
+    if is_test_mode():
+        structlog.contextvars.bind_contextvars(mode="test")

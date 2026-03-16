@@ -77,7 +77,6 @@ M7a 交付以下能力：
 ## Verification Commands
 
 ```bash
-pytest -q
+uv run pytest -q
 cd web && npm run test && npm run build
 ```
-

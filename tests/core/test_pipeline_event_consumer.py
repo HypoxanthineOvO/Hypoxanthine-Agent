@@ -259,3 +259,45 @@ def test_pipeline_event_consumer_processes_user_message_tasks() -> None:
         assert any(str(item.get("type")) == "assistant_done" for item in streamed)
 
     asyncio.run(_run())
+
+
+def test_pipeline_event_consumer_suppresses_internal_heartbeat_side_effects() -> None:
+    async def _run() -> None:
+        queue = EventQueue()
+        memory = StubSessionMemory()
+        pushed: list[Message] = []
+        streamed: list[dict[str, object]] = []
+
+        async def emit(event: dict[str, object]) -> None:
+            streamed.append(event)
+
+        async def on_proactive_message(message: Message) -> None:
+            pushed.append(message)
+
+        pipeline = ChatPipeline(
+            router=StubRouter(),
+            chat_model="Gemini3Pro",
+            session_memory=memory,
+            event_queue=queue,
+            on_proactive_message=on_proactive_message,
+        )
+
+        await pipeline.start_event_consumer()
+        await pipeline.enqueue_user_message(
+            Message(
+                text="internal heartbeat",
+                sender="user",
+                session_id="main",
+                metadata={"source": "heartbeat"},
+            ),
+            emit=emit,
+        )
+        await asyncio.sleep(0.05)
+        await pipeline.stop_event_consumer()
+
+        assert any(str(item.get("type")) == "assistant_chunk" for item in streamed)
+        assert any(str(item.get("type")) == "assistant_done" for item in streamed)
+        assert memory.appended == []
+        assert pushed == []
+
+    asyncio.run(_run())

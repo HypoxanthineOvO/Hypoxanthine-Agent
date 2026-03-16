@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 from pathlib import Path
 import sys
@@ -27,3 +28,46 @@ def test_agent_cli_mock_case_calls_send_private_msg_api() -> None:
     result = module._case_qq_send_private_api_mock()
 
     assert result.status.value == "PASS"
+
+
+def test_agent_cli_email_scan_case_skips_when_interval_not_smoke_sized() -> None:
+    module = _load_agent_cli_module()
+
+    class DummySmoke:
+        async def wait_for_tag(self, tag: str, timeout: int):
+            raise AssertionError(f"wait_for_tag should not be called for {tag} / {timeout}")
+
+    result = asyncio.run(
+        module._case_email_scan_trigger(
+            DummySmoke(),
+            {"email_scan": {"enabled": True, "interval_minutes": 60}},
+        )
+    )
+
+    assert result.status.value == "SKIP"
+    assert "interval_minutes=60" in result.detail
+
+
+def test_agent_cli_smoke_refuses_production_port_in_test_mode(monkeypatch, capsys) -> None:
+    module = _load_agent_cli_module()
+    monkeypatch.setenv("HYPO_TEST_MODE", "1")
+    monkeypatch.setattr(module, "_load_token", lambda: "test-token")
+
+    result = asyncio.run(module.cmd_smoke(port=8765, session_id="main"))
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "请先停止生产进程或确认隔离" in captured.out
+
+
+def test_agent_cli_smoke_refuses_when_8765_is_listening(monkeypatch, capsys) -> None:
+    module = _load_agent_cli_module()
+    monkeypatch.setenv("HYPO_TEST_MODE", "1")
+    monkeypatch.setattr(module, "_load_token", lambda: "test-token")
+    monkeypatch.setattr(module, "_port_is_listening", lambda host, port, timeout=1.0: port == 8765)
+
+    result = asyncio.run(module.cmd_smoke(port=8766, session_id="main"))
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "请先停止生产进程或确认隔离" in captured.out

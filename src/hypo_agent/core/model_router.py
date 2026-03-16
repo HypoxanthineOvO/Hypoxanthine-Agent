@@ -4,6 +4,7 @@ import json
 import inspect
 from collections.abc import AsyncIterator
 from collections.abc import Awaitable, Callable
+import asyncio
 import re
 from time import perf_counter
 from typing import Any
@@ -11,8 +12,10 @@ from typing import Any
 import structlog
 try:
     from litellm import acompletion as litellm_acompletion
+    from litellm import aembedding as litellm_aembedding
 except ImportError:  # pragma: no cover - depends on runtime environment
     litellm_acompletion = None
+    litellm_aembedding = None
 
 from hypo_agent.core.config_loader import RuntimeModelConfig
 
@@ -22,8 +25,11 @@ class ModelRouter:
         self,
         config: RuntimeModelConfig,
         acompletion_fn=None,
+        aembedding_fn=None,
         on_stream_success: Callable[[dict[str, Any]], Awaitable[None] | None]
         | None = None,
+        embed_retry_attempts: int = 3,
+        embed_retry_backoff_seconds: float = 0.5,
     ) -> None:
         self.config = config
         self._acompletion = acompletion_fn or litellm_acompletion
@@ -31,7 +37,10 @@ class ModelRouter:
             raise RuntimeError(
                 "litellm is not installed and no acompletion_fn was provided"
             )
+        self._aembedding = aembedding_fn or litellm_aembedding
         self._on_stream_success = on_stream_success
+        self._embed_retry_attempts = max(1, int(embed_retry_attempts))
+        self._embed_retry_backoff_seconds = max(0.0, float(embed_retry_backoff_seconds))
         self.logger = structlog.get_logger("hypo_agent.model_router")
 
     async def call(
@@ -235,6 +244,65 @@ class ModelRouter:
     def get_model_for_task(self, task_type: str) -> str:
         return self.config.task_routing.get(task_type, self.config.default_model)
 
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        if self._aembedding is None:
+            raise RuntimeError("litellm embedding is not installed and no aembedding_fn was provided")
+
+        model_name = self.get_model_for_task("embedding")
+        attempted: list[str] = []
+        last_error: Exception | None = None
+
+        for candidate in self._candidate_chain(model_name):
+            cfg = self.config.models[candidate]
+            if cfg.provider is None or cfg.litellm_model is None:
+                attempted.append(f"{candidate}(skipped)")
+                self.logger.info(
+                    "embedding_model_skipped",
+                    requested_model=model_name,
+                    resolved_model=candidate,
+                    reason="provider_or_litellm_model_missing",
+                )
+                continue
+
+            kwargs: dict[str, Any] = {
+                "model": cfg.litellm_model,
+                "input": texts,
+            }
+            if isinstance(cfg.api_base, str) and cfg.api_base.strip():
+                kwargs["api_base"] = cfg.api_base
+            if isinstance(cfg.api_key, str) and cfg.api_key.strip():
+                kwargs["api_key"] = cfg.api_key
+
+            for attempt in range(1, self._embed_retry_attempts + 1):
+                try:
+                    response = await self._aembedding(**kwargs)
+                    embeddings = self._extract_embeddings(response)
+                    if len(embeddings) != len(texts):
+                        raise RuntimeError(
+                            "Embedding response length mismatch: "
+                            f"expected {len(texts)}, got {len(embeddings)}"
+                        )
+                    return embeddings
+                except Exception as exc:  # pragma: no cover - exercised in tests
+                    last_error = exc
+                    attempted.append(f"{candidate}#{attempt}")
+                    self.logger.warning(
+                        "embedding_call_failed",
+                        requested_model=model_name,
+                        resolved_model=candidate,
+                        attempt=attempt,
+                        error=str(exc),
+                    )
+                    if attempt >= self._embed_retry_attempts:
+                        break
+                    await asyncio.sleep(self._embed_retry_backoff_seconds * attempt)
+
+        raise RuntimeError(
+            f"All embedding models failed for '{model_name}'. Attempted chain: {attempted}"
+        ) from last_error
+
     async def call_lightweight_json(
         self,
         prompt: str,
@@ -336,7 +404,25 @@ class ModelRouter:
                 )
                 if normalized_part is not None:
                     normalized.append(normalized_part)
+            if normalized:
+                return normalized
+
+        if isinstance(content, str):
+            return self._extract_text_embedded_tool_calls(content)
         return normalized
+
+    def _extract_embeddings(self, payload: Any) -> list[list[float]]:
+        data = self._read_field(payload, "data") or []
+        if not isinstance(data, list):
+            return []
+
+        embeddings: list[list[float]] = []
+        for item in data:
+            raw_embedding = self._read_field(item, "embedding")
+            if not isinstance(raw_embedding, list):
+                continue
+            embeddings.append([float(value) for value in raw_embedding])
+        return embeddings
 
     def _has_tool_call_payload(self, payload: Any) -> bool:
         return bool(self._extract_tool_calls(payload))
@@ -446,37 +532,105 @@ class ModelRouter:
         return json.dumps(payload, ensure_ascii=False)
 
     def _parse_json_object_from_text(self, text: str) -> dict[str, Any] | None:
+        parsed = self._parse_json_value_from_text(text)
+        return parsed if isinstance(parsed, dict) else None
+
+    def _parse_json_value_from_text(self, text: str) -> Any | None:
         raw = (text or "").strip()
         if not raw:
             return None
 
-        parsed_direct = self._try_parse_json_dict(raw)
+        parsed_direct = self._try_parse_json_value(raw)
         if parsed_direct is not None:
             return parsed_direct
 
-        fenced_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, flags=re.DOTALL)
+        fenced_match = re.search(r"```(?:json)?\s*(.+?)\s*```", raw, flags=re.DOTALL)
         if fenced_match:
-            parsed_fenced = self._try_parse_json_dict(fenced_match.group(1).strip())
+            parsed_fenced = self._try_parse_json_value(fenced_match.group(1).strip())
             if parsed_fenced is not None:
                 return parsed_fenced
 
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start >= 0 and end > start:
-            parsed_slice = self._try_parse_json_dict(raw[start : end + 1])
-            if parsed_slice is not None:
-                return parsed_slice
+        for start_char, end_char in (("{", "}"), ("[", "]")):
+            start = raw.find(start_char)
+            end = raw.rfind(end_char)
+            if start >= 0 and end > start:
+                parsed_slice = self._try_parse_json_value(raw[start : end + 1])
+                if parsed_slice is not None:
+                    return parsed_slice
 
         return None
 
     def _try_parse_json_dict(self, payload: str) -> dict[str, Any] | None:
+        parsed = self._try_parse_json_value(payload)
+        return parsed if isinstance(parsed, dict) else None
+
+    def _try_parse_json_value(self, payload: str) -> Any | None:
         try:
-            parsed = json.loads(payload)
+            return json.loads(payload)
         except json.JSONDecodeError:
             return None
-        if isinstance(parsed, dict):
-            return parsed
-        return None
+
+    def _extract_text_embedded_tool_calls(self, text: str) -> list[dict[str, Any]]:
+        parsed = self._parse_json_value_from_text(text)
+        if parsed is None:
+            return []
+
+        raw_items: list[Any]
+        if isinstance(parsed, dict) and isinstance(parsed.get("tool_calls"), list):
+            raw_items = list(parsed["tool_calls"])
+        elif isinstance(parsed, list):
+            raw_items = list(parsed)
+        else:
+            raw_items = [parsed]
+
+        normalized: list[dict[str, Any]] = []
+        for idx, item in enumerate(raw_items):
+            normalized_item = self._normalize_text_tool_call_candidate(
+                item,
+                default_id=f"call_{idx + 1}",
+            )
+            if normalized_item is not None:
+                normalized.append(normalized_item)
+        return normalized
+
+    def _normalize_text_tool_call_candidate(
+        self,
+        item: Any,
+        *,
+        default_id: str,
+    ) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+
+        normalized_item = self._normalize_tool_call_item(item, default_id=default_id)
+        if normalized_item is not None:
+            return normalized_item
+
+        function_call = self._normalize_function_call(item, default_id=default_id)
+        if function_call is not None:
+            return function_call
+
+        name = item.get("tool_name") or item.get("name")
+        if not isinstance(name, str) or not name:
+            return None
+
+        arguments = item.get("arguments", item.get("input", item.get("params")))
+        if isinstance(arguments, dict):
+            arguments = self._json_dump(arguments)
+        elif arguments is None:
+            arguments = "{}"
+        elif not isinstance(arguments, str):
+            arguments = str(arguments)
+
+        call_id = item.get("id")
+        if not isinstance(call_id, str) or not call_id:
+            call_id = default_id
+
+        return {
+            "id": call_id,
+            "type": "function",
+            "function": {"name": name, "arguments": arguments},
+        }
 
     def _extract_delta_text(self, chunk: Any) -> str:
         choices = self._read_field(chunk, "choices") or []

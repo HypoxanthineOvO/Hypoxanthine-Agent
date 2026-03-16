@@ -5,6 +5,13 @@
 - Architecture reference: `docs/architecture.md`（进行 M1 及后续开发前先阅读，包含目录结构、模块职责与数据模型契约）
 - 文档提交约定：每次里程碑（Mx）完成后，新增或更新文档需单独提交，提交信息格式必须为 `Mx[doc]: <说明>`（例如：`M3[doc]: add session memory implementation plan`）。
 
+## Testing Default
+
+- 默认验收链路使用测试模式，不要默认连到部署中的生产实例。
+- 默认启动命令：`bash test_run.sh`（内部会设置 `HYPO_TEST_MODE=1`，使用 `test/sandbox/`，端口 `8766`）。
+- 默认 smoke 命令：`HYPO_TEST_MODE=1 uv run python scripts/agent_cli.py --port 8766 smoke`
+- 测试模式下 QQ adapter 不注册，不应给真实 QQ 发消息；如需验证部署实例，必须显式说明这是“生产/部署验收”，不要与默认 smoke 混用。
+
 <skills_system priority="1">
 
 ## Available Skills

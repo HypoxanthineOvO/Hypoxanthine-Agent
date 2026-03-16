@@ -107,6 +107,20 @@ async def _build_handler(tmp_path: Path) -> tuple[
     return handler, session_memory, store, breaker
 
 
+async def _build_handler_with_gc(
+    tmp_path: Path,
+    memory_gc,
+) -> tuple[
+    SlashCommandHandler,
+    SessionMemory,
+    StructuredStore,
+    CircuitBreaker,
+]:
+    handler, session_memory, store, breaker = await _build_handler(tmp_path)
+    handler.memory_gc = memory_gc
+    return handler, session_memory, store, breaker
+
+
 def test_slash_commands_returns_none_for_non_slash_message(tmp_path: Path) -> None:
     async def _run() -> None:
         handler, _, _, _ = await _build_handler(tmp_path)
@@ -333,6 +347,29 @@ def test_slash_commands_token_and_token_total_use_store_stats(tmp_path: Path) ->
         assert "KimiK25" in total_text
         assert "DeepseekV3_2" in total_text
         assert "2007" in total_text
+
+    asyncio.run(_run())
+
+
+def test_slash_commands_gc_runs_memory_gc(tmp_path: Path) -> None:
+    async def _run() -> None:
+        class StubMemoryGC:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def run(self) -> dict[str, int]:
+                self.calls += 1
+                return {"processed_count": 2, "skipped_count": 3}
+
+        memory_gc = StubMemoryGC()
+        handler, _, _, _ = await _build_handler_with_gc(tmp_path, memory_gc)
+
+        result = await handler.try_handle(Message(text="/gc", sender="user", session_id="s1"))
+
+        assert result is not None
+        assert "Memory GC" in result
+        assert "processed=2" in result
+        assert memory_gc.calls == 1
 
     asyncio.run(_run())
 

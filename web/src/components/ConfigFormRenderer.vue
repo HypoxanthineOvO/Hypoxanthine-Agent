@@ -46,12 +46,7 @@ const TASK_SECTIONS: Record<
   heartbeat: {
     title: "Heartbeat",
     icon: "💓",
-    description: "定期巡检系统状态，并决定是否值得主动打扰用户。",
-  },
-  email_scan: {
-    title: "邮件扫描",
-    icon: "📧",
-    description: "按固定频率扫描邮箱，把新邮件交给分类和推送链路。",
+    description: "按固定频率唤醒 Agent，由它自主巡检、查邮件、查提醒并决定是否静默。",
   },
   email_store: {
     title: "邮件缓存",
@@ -100,7 +95,6 @@ const testIdFor = (path: string): string =>
 const isMaskedField = (path: string): boolean => props.maskedFields.includes(path);
 
 const shouldUseTextarea = (key: string, value: string): boolean =>
-  key === "prompt_template" ||
   key === "system_prompt_template" ||
   key === "user_preferences" ||
   value.includes("\n") ||
@@ -110,6 +104,7 @@ const rootObject = computed<Record<string, unknown>>(() =>
   isRecord(props.modelValue) ? props.modelValue : {},
 );
 
+const isPersonaRoot = computed(() => props.fileName === "persona.yaml" && props.path === "");
 const visibleEntries = computed(() => Object.entries(rootObject.value));
 
 const scalarArrayPaths = computed(() =>
@@ -184,6 +179,104 @@ const taskEntries = computed(() =>
 const remainingTaskEntries = computed(() =>
   Object.entries(rootObject.value).filter(([key]) => !(key in TASK_SECTIONS)),
 );
+
+const normalizeStringArray = (value: unknown): string[] =>
+  Array.isArray(value)
+    ? value
+        .map((item) => String(item ?? "").trim())
+        .filter((item) => item.length > 0)
+    : [];
+
+const personaSpeakingStyle = computed<Record<string, unknown>>(() => {
+  const raw = rootObject.value.speaking_style;
+  return isRecord(raw) ? raw : {};
+});
+
+const personaAliases = computed(() => normalizeStringArray(rootObject.value.aliases));
+const personaHabits = computed(() => normalizeStringArray(personaSpeakingStyle.value.habits));
+const personaPersonalityText = computed(() =>
+  normalizeStringArray(rootObject.value.personality).join("\n"),
+);
+
+const personaExtraRootEntries = computed(() =>
+  Object.entries(rootObject.value).filter(
+    ([key]) => !["name", "aliases", "personality", "speaking_style"].includes(key),
+  ),
+);
+
+const personaExtraSpeakingEntries = computed(() =>
+  Object.entries(personaSpeakingStyle.value).filter(([key]) => !["tone", "habits"].includes(key)),
+);
+
+const updatePersonaRoot = (patch: Record<string, unknown>): void => {
+  emit("update:modelValue", {
+    ...rootObject.value,
+    ...patch,
+  });
+};
+
+const updatePersonaSpeakingStyle = (patch: Record<string, unknown>): void => {
+  updatePersonaRoot({
+    speaking_style: {
+      ...personaSpeakingStyle.value,
+      ...patch,
+    },
+  });
+};
+
+const updatePersonaListFromText = (field: "personality", nextValue: string): void => {
+  updatePersonaRoot({
+    [field]: nextValue
+      .split(/\n|,/)
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0),
+  });
+};
+
+const addPersonaTag = (field: "aliases" | "habits"): void => {
+  const draftKey = `persona.${field}`;
+  const draft = (arrayDrafts[draftKey] ?? "").trim();
+  if (!draft) {
+    return;
+  }
+
+  if (field === "aliases") {
+    updatePersonaRoot({
+      aliases: [...personaAliases.value, draft],
+    });
+  } else {
+    updatePersonaSpeakingStyle({
+      habits: [...personaHabits.value, draft],
+    });
+  }
+  arrayDrafts[draftKey] = "";
+};
+
+const removePersonaTag = (field: "aliases" | "habits", index: number): void => {
+  if (field === "aliases") {
+    updatePersonaRoot({
+      aliases: personaAliases.value.filter((_, itemIndex) => itemIndex !== index),
+    });
+    return;
+  }
+  updatePersonaSpeakingStyle({
+    habits: personaHabits.value.filter((_, itemIndex) => itemIndex !== index),
+  });
+};
+
+const updatePersonaExtraRoot = (next: unknown): void => {
+  if (!isRecord(next)) {
+    return;
+  }
+  updatePersonaRoot(next);
+};
+
+const updatePersonaExtraSpeaking = (next: unknown): void => {
+  if (!isRecord(next)) {
+    return;
+  }
+  updatePersonaSpeakingStyle(next);
+};
 </script>
 
 <template>
@@ -223,6 +316,126 @@ const remainingTaskEntries = computed(() =>
           :path="pathFor(key)"
           :file-name="fileName"
           @update:model-value="(next) => updateObjectField(key, next)"
+        />
+      </n-collapse-item>
+    </n-collapse>
+  </div>
+
+  <div v-else-if="isPersonaRoot" class="persona-layout">
+    <n-card :bordered="false" class="persona-card">
+      <div class="persona-grid">
+        <div class="field-row">
+          <label class="field-label">名字</label>
+          <n-input
+            :value="String(rootObject.name ?? '')"
+            data-testid="persona-name-input"
+            @update:value="(next) => updatePersonaRoot({ name: next })"
+          />
+        </div>
+
+        <div class="field-stack">
+          <label class="field-label">别名</label>
+          <div class="tag-list">
+            <n-tag
+              v-for="(item, index) in personaAliases"
+              :key="`persona-alias-${index}`"
+              closable
+              @close="removePersonaTag('aliases', index)"
+            >
+              {{ item }}
+            </n-tag>
+          </div>
+          <div class="array-input-row">
+            <n-input
+              :value="arrayDrafts['persona.aliases'] ?? ''"
+              placeholder="新增别名"
+              data-testid="persona-aliases-input"
+              @update:value="(next) => (arrayDrafts['persona.aliases'] = next)"
+            />
+            <n-button tertiary type="primary" @click="addPersonaTag('aliases')">
+              添加
+            </n-button>
+          </div>
+        </div>
+
+        <div class="field-stack">
+          <label class="field-label">性格特征</label>
+          <n-input
+            :value="personaPersonalityText"
+            type="textarea"
+            :autosize="{ minRows: 4, maxRows: 10 }"
+            placeholder="每行一个特征"
+            data-testid="persona-personality-input"
+            @update:value="(next) => updatePersonaListFromText('personality', next)"
+          />
+        </div>
+
+        <div class="field-row">
+          <label class="field-label">语气</label>
+          <n-input
+            :value="String(personaSpeakingStyle.tone ?? '')"
+            data-testid="persona-tone-input"
+            @update:value="(next) => updatePersonaSpeakingStyle({ tone: next })"
+          />
+        </div>
+
+        <div class="field-stack">
+          <label class="field-label">表达习惯</label>
+          <div class="tag-list">
+            <n-tag
+              v-for="(item, index) in personaHabits"
+              :key="`persona-habit-${index}`"
+              closable
+              @close="removePersonaTag('habits', index)"
+            >
+              {{ item }}
+            </n-tag>
+          </div>
+          <div class="array-input-row">
+            <n-input
+              :value="arrayDrafts['persona.habits'] ?? ''"
+              placeholder="新增习惯"
+              data-testid="persona-habits-input"
+              @update:value="(next) => (arrayDrafts['persona.habits'] = next)"
+            />
+            <n-button tertiary type="primary" @click="addPersonaTag('habits')">
+              添加
+            </n-button>
+          </div>
+        </div>
+      </div>
+    </n-card>
+
+    <n-collapse
+      v-if="personaExtraRootEntries.length > 0 || personaExtraSpeakingEntries.length > 0"
+      class="config-collapse"
+      :expanded-names="['persona-extra', 'persona-speaking-extra']"
+    >
+      <n-collapse-item
+        v-if="personaExtraRootEntries.length > 0"
+        name="persona-extra"
+        title="其他字段"
+      >
+        <ConfigFormRenderer
+          :model-value="Object.fromEntries(personaExtraRootEntries)"
+          :masked-fields="maskedFields"
+          path="_persona_extra"
+          :file-name="fileName"
+          @update:model-value="updatePersonaExtraRoot"
+        />
+      </n-collapse-item>
+
+      <n-collapse-item
+        v-if="personaExtraSpeakingEntries.length > 0"
+        name="persona-speaking-extra"
+        title="说话风格扩展字段"
+      >
+        <ConfigFormRenderer
+          :model-value="Object.fromEntries(personaExtraSpeakingEntries)"
+          :masked-fields="maskedFields"
+          path="speaking_style"
+          :file-name="fileName"
+          @update:model-value="updatePersonaExtraSpeaking"
         />
       </n-collapse-item>
     </n-collapse>
@@ -387,6 +600,24 @@ const remainingTaskEntries = computed(() =>
 
 <style scoped>
 .tasks-layout {
+  display: grid;
+  gap: 1rem;
+}
+
+.persona-layout {
+  display: grid;
+  gap: 1rem;
+}
+
+.persona-card {
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--brand) 9%, transparent), transparent 72%),
+    color-mix(in srgb, var(--surface) 95%, transparent);
+  border: 1px solid color-mix(in srgb, var(--panel-edge) 92%, transparent);
+  border-radius: 1rem;
+}
+
+.persona-grid {
   display: grid;
   gap: 1rem;
 }

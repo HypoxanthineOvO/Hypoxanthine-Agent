@@ -2,15 +2,30 @@
 
 ## Prerequisites
 
-- Conda env: `HypoAgent`
+- Python 3.12 + `uv`
 - Node.js 20+ with npm
+
+## Default Smoke Gate
+
+默认本地验收走测试模式，而不是部署实例：
+
+```bash
+bash test_run.sh
+HYPO_TEST_MODE=1 uv run python scripts/agent_cli.py --port 8766 smoke
+```
+
+说明：
+
+- 测试数据写入 `test/sandbox/`
+- 默认端口为 `8766`
+- QQ adapter 在测试模式下不注册，不会给真实 QQ 发消息
 
 ## 1) Backend
 
 From repo root:
 
 ```bash
-python -m hypo_agent.gateway.main
+uv run python -m hypo_agent --port 8000
 ```
 
 Expected:

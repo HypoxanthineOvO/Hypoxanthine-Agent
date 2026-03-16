@@ -5,8 +5,9 @@ Production deployment uses `systemd` for the FastAPI backend and Nginx for the b
 ## Quick Start
 
 1. Run `bash deploy/install.sh`
-2. Start or verify the backend service with `sudo systemctl start hypo-agent`
-3. Open `http://127.0.0.1:8080/` in a browser
+2. Sync Python dependencies with `uv sync`
+3. Start or verify the backend service with `sudo systemctl start hypo-agent`
+4. Open `http://127.0.0.1:8080/` in a browser
 
 ## Common Commands
 
@@ -39,10 +40,10 @@ Production deployment uses `systemd` for the FastAPI backend and Nginx for the b
 - If `/etc/nginx/sites-enabled` does not exist, the installer falls back to `/etc/nginx/conf.d`
 - If Nginx is not installed, install it first and rerun `bash deploy/install.sh`
 
-### Conda / Python Environment
+### Python Environment
 
-- The systemd unit uses `/home/heyx/miniconda3/envs/HypoAgent/bin/python`
-- If the conda env moves, update `deploy/hypo-agent.service` and run `sudo systemctl daemon-reload`
+- The systemd unit launches `uv run python -m hypo_agent` from the project root
+- Run `uv sync` after pulling new dependencies or updating `uv.lock`
 - `PYTHONPATH` is set to `/home/heyx/Hypo-Agent/src` inside the unit so local source is used
 
 ### Backend Health Checks

@@ -13,9 +13,7 @@ def test_systemd_service_has_required_runtime_settings() -> None:
     assert "WorkingDirectory=/home/heyx/Hypo-Agent" in content
     assert "Environment=PYTHONPATH=/home/heyx/Hypo-Agent/src" in content
     assert "Environment=HYPO_PORT=8765" in content
-    assert "ExecStart=/home/heyx/miniconda3/envs/HypoAgent/bin/python -m uvicorn" in content
-    assert "hypo_agent.gateway.main:build_app" in content
-    assert "--factory" in content
+    assert "ExecStart=/usr/bin/env bash -lc 'uv run python -m hypo_agent" in content
     assert "--host 127.0.0.1" in content
     assert "--port 8765" in content
     assert "Restart=on-failure" in content
@@ -49,4 +47,4 @@ def test_deploy_readme_covers_core_ops_commands() -> None:
     assert "systemctl status hypo-agent" in content
     assert "journalctl -u hypo-agent -f" in content
     assert "Nginx" in content
-    assert "conda" in content
+    assert "uv sync" in content

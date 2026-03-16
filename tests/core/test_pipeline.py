@@ -6,6 +6,7 @@ import asyncio
 import pytest
 
 from hypo_agent.core.pipeline import ChatPipeline
+from hypo_agent.memory.semantic_memory import ChunkResult
 from hypo_agent.memory.structured_store import StructuredStore
 from hypo_agent.models import Message
 
@@ -258,7 +259,9 @@ def test_system_prompt_contains_time(monkeypatch: pytest.MonkeyPatch) -> None:
         history_window=20,
     )
 
-    messages = pipeline._build_llm_messages(Message(text="hi", sender="user", session_id="s1"))
+    messages = asyncio.run(
+        pipeline._build_llm_messages(Message(text="hi", sender="user", session_id="s1"))
+    )
     system_messages = [item for item in messages if item["role"] == "system"]
     assert len(system_messages) == 1
     content = system_messages[0]["content"]
@@ -390,9 +393,11 @@ def test_preference_injection(tmp_path: Path) -> None:
         structured_store=store,
     )
 
-    messages = pipeline._build_llm_messages(
-        Message(text="hi", sender="user", session_id="main"),
-        use_tools=True,
+    messages = asyncio.run(
+        pipeline._build_llm_messages(
+            Message(text="hi", sender="user", session_id="main"),
+            use_tools=True,
+        )
     )
     system_messages = [item for item in messages if item["role"] == "system"]
     assert any("User Preferences" in item.get("content", "") for item in system_messages)
@@ -414,9 +419,135 @@ def test_pipeline_includes_persona_system_prompt_when_provided() -> None:
         persona_system_prompt="[Persona]\n## 环境信息\n代码仓库：/home/heyx/Hypo-Agent",
     )
 
-    messages = pipeline._build_llm_messages(Message(text="hi", sender="user", session_id="s1"))
+    messages = asyncio.run(
+        pipeline._build_llm_messages(Message(text="hi", sender="user", session_id="s1"))
+    )
     system_messages = [item for item in messages if item["role"] == "system"]
 
     assert system_messages[0]["content"].startswith("[Persona]")
     assert "## 环境信息" in system_messages[0]["content"]
     assert "/home/heyx/Hypo-Agent" in system_messages[0]["content"]
+
+
+def test_pipeline_injects_semantic_memory_before_history() -> None:
+    memory = StubSessionMemory(
+        history=[
+            Message(text="旧问题", sender="user", session_id="s1"),
+            Message(text="旧回答", sender="assistant", session_id="s1"),
+        ]
+    )
+
+    class StubSemanticMemory:
+        async def search(self, query: str, top_k: int = 5) -> list[ChunkResult]:
+            assert query == "新问题"
+            assert top_k == 5
+            return [
+                ChunkResult(
+                    file_path="memory/knowledge/persona/user_preferences.md",
+                    chunk_text="用户喜欢简洁回复。",
+                    score=0.9,
+                    chunk_index=0,
+                )
+            ]
+
+    class StubRouter:
+        async def call(self, model_name, messages):
+            assert model_name == "Gemini3Pro"
+            system_messages = [item for item in messages if item["role"] == "system"]
+            assert any("[相关记忆]" in item["content"] for item in system_messages)
+            assert messages[-3:] == [
+                {"role": "user", "content": "旧问题"},
+                {"role": "assistant", "content": "旧回答"},
+                {"role": "user", "content": "新问题"},
+            ]
+            return "新回答"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        semantic_memory=StubSemanticMemory(),
+    )
+
+    reply = asyncio.run(pipeline.run_once(Message(text="新问题", sender="user", session_id="s1")))
+
+    assert reply.text == "新回答"
+
+
+def test_pipeline_marks_sop_usage_after_semantic_hit() -> None:
+    memory = StubSessionMemory()
+
+    class StubSemanticMemory:
+        async def search(self, query: str, top_k: int = 5) -> list[ChunkResult]:
+            assert query == "执行部署"
+            assert top_k == 5
+            return [
+                ChunkResult(
+                    file_path="/tmp/memory/knowledge/sop/部署流程.md",
+                    chunk_text="标题上下文：SOP: 部署流程 > 步骤\n\n1. 拉代码\n2. 重启服务",
+                    score=0.9,
+                    chunk_index=0,
+                )
+            ]
+
+    class StubSopManager:
+        def __init__(self) -> None:
+            self.touched: list[list[str]] = []
+
+        def is_sop_path(self, file_path: str) -> bool:
+            return file_path.endswith("/sop/部署流程.md")
+
+        async def touch_files(self, file_paths: list[str]) -> None:
+            self.touched.append(list(file_paths))
+
+    class StubRouter:
+        async def call(self, model_name, messages):
+            del model_name, messages
+            return "按 SOP 执行完成"
+
+    sop_manager = StubSopManager()
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        semantic_memory=StubSemanticMemory(),
+        sop_manager=sop_manager,
+    )
+
+    reply = asyncio.run(pipeline.run_once(Message(text="执行部署", sender="user", session_id="s1")))
+
+    assert reply.text == "按 SOP 执行完成"
+    assert sop_manager.touched == [["/tmp/memory/knowledge/sop/部署流程.md"]]
+
+
+def test_pipeline_uses_persona_manager_before_semantic_memory() -> None:
+    memory = StubSessionMemory()
+
+    class StubSemanticMemory:
+        async def search(self, query: str, top_k: int = 5) -> list[ChunkResult]:
+            del query, top_k
+            return []
+
+    class StubPersonaManager:
+        async def get_system_prompt_section(self, query: str | None = None) -> str:
+            assert query == "hi"
+            return "[Persona]\n你是 Hypo。"
+
+    class StubRouter:
+        async def call(self, model_name, messages):
+            del model_name
+            assert messages[0] == {"role": "system", "content": "[Persona]\n你是 Hypo。"}
+            return "unused"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        persona_manager=StubPersonaManager(),
+        semantic_memory=StubSemanticMemory(),
+    )
+
+    asyncio.run(pipeline.run_once(Message(text="hi", sender="user", session_id="s1")))

@@ -9,11 +9,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 import json
+import os
+import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any
+import urllib.request
 
 import yaml
 
@@ -22,11 +25,25 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from hypo_agent.core.config_loader import get_database_path
+
 try:
     import websockets
 except ImportError:  # pragma: no cover - runtime dependency hint
     print("Missing dependency: websockets. Install with: pip install websockets", file=sys.stderr)
     raise
+
+
+def _is_test_mode() -> bool:
+    return os.getenv("HYPO_TEST_MODE", "").strip() == "1"
+
+
+def _http_get_json(url: str, *, timeout: int = 5) -> dict[str, Any] | None:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
 
 
 def _load_token(config_path: Path = Path("config/security.yaml")) -> str:
@@ -51,6 +68,18 @@ def _load_token(config_path: Path = Path("config/security.yaml")) -> str:
 
 def _ws_url(port: int, token: str) -> str:
     return f"ws://localhost:{port}/ws?token={token}"
+
+
+def _default_db_path() -> Path:
+    return get_database_path()
+
+
+def _port_is_listening(host: str, port: int, *, timeout: float = 1.0) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def _format_message(prefix: str, payload: dict[str, Any]) -> str:
@@ -129,7 +158,8 @@ async def cmd_listen(duration: int, *, port: int, session_id: str) -> int:
     return 0
 
 
-def cmd_check_db(query: str, db_path: Path = Path("memory/hypo.db")) -> int:
+def cmd_check_db(query: str, db_path: Path | None = None) -> int:
+    db_path = db_path or _default_db_path()
     if not db_path.exists():
         print(f"[ERROR] DB not found: {db_path}", file=sys.stderr)
         return 1
@@ -147,9 +177,10 @@ def cmd_check_db(query: str, db_path: Path = Path("memory/hypo.db")) -> int:
     return result.returncode
 
 
-def _query_db_value(query: str, db_path: Path = Path("memory/hypo.db")) -> str:
+def _query_db_value(query: str, db_path: Path | None = None) -> str:
+    resolved_db_path = db_path or _default_db_path()
     result = subprocess.run(
-        ["sqlite3", str(db_path), query],
+        ["sqlite3", str(resolved_db_path), query],
         capture_output=True,
         text=True,
         check=False,
@@ -157,9 +188,10 @@ def _query_db_value(query: str, db_path: Path = Path("memory/hypo.db")) -> str:
     return result.stdout.strip()
 
 
-def _query_db_rows(query: str, db_path: Path = Path("memory/hypo.db")) -> list[list[str]]:
+def _query_db_rows(query: str, db_path: Path | None = None) -> list[list[str]]:
+    resolved_db_path = db_path or _default_db_path()
     result = subprocess.run(
-        ["sqlite3", str(db_path), query],
+        ["sqlite3", str(resolved_db_path), query],
         capture_output=True,
         text=True,
         check=False,
@@ -304,19 +336,26 @@ async def _case_send_regression(smoke: SmokeSession, text: str, timeout: int = 3
 async def _case_reminder_push_regression(smoke: SmokeSession) -> SmokeCaseResult:
     unique_title = f"m8_smoke_{int(time.time())}"
     trigger_at = (datetime.now() + timedelta(minutes=1)).replace(microsecond=0).isoformat()
+    db_path = _default_db_path()
     subprocess.run(
         [
             "sqlite3",
-            "memory/hypo.db",
+            str(db_path),
             "DELETE FROM reminders WHERE title LIKE 'm8_smoke_%' OR title LIKE '%m8_smoke%';",
         ],
         check=False,
     )
     baseline_id_raw = _query_db_value("SELECT COALESCE(MAX(id), 0) FROM reminders;")
     baseline_id = int(baseline_id_raw) if baseline_id_raw.isdigit() else 0
+    create_payload = {
+        "title": unique_title,
+        "schedule_type": "once",
+        "schedule_value": trigger_at,
+        "channel": "all",
+    }
     create_prompt = (
-        "请务必调用 create_reminder 工具创建提醒，不要只给文字答复。"
-        f"参数：title={unique_title}，schedule_type=once，schedule_value={trigger_at}，channel=all。"
+        "请直接调用 create_reminder 工具创建提醒，不要只给文字答复。"
+        f"参数如下（JSON）：{json.dumps(create_payload, ensure_ascii=False)}"
     )
     await smoke.send(create_prompt)
     done, _ = await smoke.wait_for_assistant_done(timeout=90)
@@ -334,8 +373,8 @@ async def _case_reminder_push_regression(smoke: SmokeSession) -> SmokeCaseResult
     created_titles = [row[1] for row in created_rows if len(row) >= 2 and row[1]]
     if not created_ids:
         retry_prompt = (
-            "上一步未创建成功。请直接调用 create_reminder 工具，"
-            f"title={unique_title}，schedule_type=once，schedule_value={trigger_at}。"
+            "上一步未创建成功。请直接调用 create_reminder 工具，参数如下（JSON）："
+            f"{json.dumps(create_payload, ensure_ascii=False)}"
         )
         await smoke.send(retry_prompt)
         done, _ = await smoke.wait_for_assistant_done(timeout=90)
@@ -393,10 +432,11 @@ async def _case_heartbeat_push(smoke: SmokeSession, tasks_payload: dict[str, Any
 
     # Force one deterministic abnormal signal for smoke: overdue active reminder.
     overdue_title = f"m9_smoke_overdue_{int(time.time())}"
+    db_path = _default_db_path()
     subprocess.run(
         [
             "sqlite3",
-            "memory/hypo.db",
+            str(db_path),
             (
                 "INSERT INTO reminders("
                 "title,description,schedule_type,schedule_value,channel,status,created_at,updated_at,next_run_at,heartbeat_config"
@@ -444,6 +484,12 @@ async def _case_email_scan_trigger(smoke: SmokeSession, tasks_payload: dict[str,
         return SmokeCaseResult("email_scan scheduled trigger", SmokeStatus.SKIP, "tasks.email_scan.enabled != true")
     if interval is None:
         return SmokeCaseResult("email_scan scheduled trigger", SmokeStatus.SKIP, "tasks.email_scan.interval_minutes missing")
+    if interval != 1:
+        return SmokeCaseResult(
+            "email_scan scheduled trigger",
+            SmokeStatus.SKIP,
+            f"tasks.email_scan.interval_minutes={interval}, expected 1 for smoke",
+        )
 
     trigger_cmd = str(
         (
@@ -545,6 +591,33 @@ async def cmd_smoke(*, port: int, session_id: str) -> int:
     token = _load_token()
     uri = _ws_url(port, token)
     tasks_payload = _load_tasks_config()
+
+    if _is_test_mode():
+        if port == 8765:
+            print(
+                "[ERROR] Refusing to run smoke against production port 8765 in HYPO_TEST_MODE=1. "
+                "请先停止生产进程或确认隔离。"
+            )
+            return 2
+        if port != 8765 and _port_is_listening("127.0.0.1", 8765):
+            print(
+                "[ERROR] Detected a listener on port 8765 while running HYPO_TEST_MODE=1 smoke. "
+                "请先停止生产进程或确认隔离。"
+            )
+            return 2
+        status = _http_get_json(
+            f"http://localhost:{port}/api/channels/status?token={token}",
+            timeout=5,
+        )
+        qq_status = (
+            (status or {}).get("channels", {}).get("qq", {}) if isinstance(status, dict) else {}
+        )
+        if str(qq_status.get("status") or "").strip().lower() == "connected":
+            print(
+                "[ERROR] Refusing to run smoke in HYPO_TEST_MODE=1 while QQ channel is connected "
+                f"on port {port}. This may send real QQ messages."
+            )
+            return 2
 
     print("=" * 60)
     print("SMOKE TEST: Hypo-Agent m9 smoke gates")

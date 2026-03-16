@@ -40,7 +40,7 @@ CONFIG_LIST: list[dict[str, str]] = [
         "filename": "tasks.yaml",
         "label": "定时任务",
         "icon": "⏰",
-        "description": "Heartbeat、邮件扫描等定时任务配置",
+        "description": "Heartbeat 与邮件缓存等定时任务配置",
     },
     {
         "filename": "narration.yaml",

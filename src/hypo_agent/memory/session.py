@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from collections import deque
+from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 from urllib.parse import quote
 
 from hypo_agent.core.config_loader import get_memory_dir
-from hypo_agent.core.time_utils import utc_isoformat, utc_now
+from hypo_agent.core.time_utils import normalize_utc_datetime, utc_isoformat, utc_now
 from hypo_agent.models import Message
 
 DEFAULT_SESSION_ID = "main"
@@ -18,6 +19,8 @@ class SessionMemory:
         self,
         sessions_dir: Path | str | None = None,
         buffer_limit: int = 20,
+        active_window_days: int | None = None,
+        now_fn=None,
     ) -> None:
         if buffer_limit <= 0:
             raise ValueError("buffer_limit must be greater than 0")
@@ -29,6 +32,12 @@ class SessionMemory:
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self._migrate_legacy_main_session()
         self.buffer_limit = buffer_limit
+        self.active_window_days = (
+            None
+            if active_window_days is None
+            else max(0, int(active_window_days))
+        )
+        self._now_fn = now_fn or utc_now
         self._buffers: dict[str, deque[Message]] = {}
         self._loaded: set[str] = set()
 
@@ -52,6 +61,12 @@ class SessionMemory:
         if limit is not None and limit <= 0:
             return []
 
+        if not self._session_within_active_window(
+            session_id,
+            messages=list(self._buffers.get(session_id, [])),
+        ):
+            return []
+
         messages = list(self._buffers.get(session_id, []))
         if limit is None:
             return messages
@@ -59,7 +74,10 @@ class SessionMemory:
 
     def get_messages(self, session_id: str) -> list[Message]:
         # TODO(M9+): add pagination/streaming for very large session histories.
-        return self._read_all_messages(session_id)
+        messages = self._read_all_messages(session_id)
+        if not self._session_within_active_window(session_id, messages=messages):
+            return []
+        return messages
 
     def clear_session(self, session_id: str) -> None:
         self._buffers.pop(session_id, None)
@@ -171,3 +189,46 @@ class SessionMemory:
         if "timestamp" not in payload:
             payload["timestamp"] = None
         return Message.model_validate(payload)
+
+    def _session_within_active_window(
+        self,
+        session_id: str,
+        *,
+        messages: list[Message],
+    ) -> bool:
+        if self.active_window_days is None:
+            return True
+        if self.active_window_days <= 0:
+            return False
+
+        last_activity = self._resolve_last_activity(session_id, messages=messages)
+        if last_activity is None:
+            return True
+        cutoff = normalize_utc_datetime(self._now_fn())
+        if cutoff is None:
+            return True
+        cutoff = cutoff - timedelta(days=self.active_window_days)
+        return last_activity >= cutoff
+
+    def _resolve_last_activity(
+        self,
+        session_id: str,
+        *,
+        messages: list[Message],
+    ):
+        latest = None
+        for message in messages:
+            normalized = normalize_utc_datetime(message.timestamp)
+            if normalized is None:
+                continue
+            if latest is None or normalized > latest:
+                latest = normalized
+        if latest is not None:
+            return latest
+
+        session_file = self._session_file(session_id)
+        if not session_file.exists():
+            return None
+        return normalize_utc_datetime(
+            datetime.fromtimestamp(session_file.stat().st_mtime, tz=UTC)
+        )

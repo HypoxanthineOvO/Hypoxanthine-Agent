@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import structlog
 import yaml
 
-from hypo_agent.core.config_loader import get_memory_dir
+from hypo_agent.core.config_loader import get_database_path, get_memory_dir, get_test_sandbox_dir, is_test_mode
 from hypo_agent.channels.qq_channel import QQChannelService
 from hypo_agent.core.config_loader import (
     load_persona_config,
@@ -31,8 +31,10 @@ from hypo_agent.core.model_router import ModelRouter
 from hypo_agent.core.narration_observer import NarrationObserver
 from hypo_agent.core.output_compressor import OutputCompressor
 from hypo_agent.core.pipeline import ChatPipeline
+from hypo_agent.core.persona import PersonaManager
 from hypo_agent.core.scheduler import SchedulerService
 from hypo_agent.core.slash_commands import SlashCommandHandler
+from hypo_agent.core.sop_manager import SopManager
 from hypo_agent.core.skill_manager import SkillManager
 from hypo_agent.core.time_utils import utc_isoformat, utc_now
 from hypo_agent.gateway.config_api import router as config_api_router
@@ -47,8 +49,8 @@ from hypo_agent.gateway.qq_ws import router as qq_ws_router
 from hypo_agent.gateway.qq_ws_client import NapCatWebSocketClient
 from hypo_agent.gateway.settings import load_gateway_settings
 from hypo_agent.gateway.ws import broadcast_message, connection_manager, router as ws_router
-from hypo_agent.memory import SessionMemory, StructuredStore
-from hypo_agent.models import Message, QQServiceConfig, SecurityConfig
+from hypo_agent.memory import MemoryGC, SemanticMemory, SessionMemory, StructuredStore
+from hypo_agent.models import Message, QQServiceConfig, SecurityConfig, SkillOutput
 from hypo_agent.security import CircuitBreaker, PermissionManager
 from hypo_agent.skills import (
     CodeRunSkill,
@@ -60,12 +62,16 @@ from hypo_agent.skills import (
 )
 
 logger = structlog.get_logger("hypo_agent.gateway.app")
+TEST_MODE_BANNER = "⚠️  HYPO_TEST_MODE enabled — data isolated to test/sandbox/"
 
 
 @dataclass(slots=True)
 class AppDeps:
     session_memory: SessionMemory
     structured_store: StructuredStore
+    semantic_memory: SemanticMemory | None = None
+    persona_manager: PersonaManager | None = None
+    sop_manager: SopManager | None = None
     event_queue: EventQueue | None = None
     scheduler: SchedulerService | None = None
     output_compressor: OutputCompressor | None = None
@@ -73,6 +79,7 @@ class AppDeps:
     circuit_breaker: CircuitBreaker | None = None
     permission_manager: PermissionManager | None = None
     heartbeat_service: HeartbeatService | Any | None = None
+    memory_gc: MemoryGC | Any | None = None
     reload_config: Any | None = None
 
 
@@ -82,7 +89,6 @@ def _register_enabled_skills(
     permission_manager: PermissionManager,
     structured_store: StructuredStore | None = None,
     scheduler: SchedulerService | None = None,
-    heartbeat_service: HeartbeatService | Any | None = None,
     message_queue: EventQueue | Any | None = None,
     model_router: ModelRouter | None = None,
     skills_config_path: Path = Path("config/skills.yaml"),
@@ -106,8 +112,6 @@ def _register_enabled_skills(
     tmux_timeout = int(tmux_cfg.get("timeout_seconds", default_timeout))
     code_run_timeout = int(code_run_cfg.get("timeout_seconds", default_timeout))
     auto_confirm = bool(reminder_cfg.get("auto_confirm", True))
-    if scheduler is not None and hasattr(scheduler, "set_email_scan_executor"):
-        scheduler.set_email_scan_executor(None)
 
     if "tmux" in enabled_skills:
         skill_manager.register(
@@ -142,14 +146,6 @@ def _register_enabled_skills(
             message_queue=message_queue,
         )
         skill_manager.register(email_skill)
-        if scheduler is not None and hasattr(scheduler, "set_email_scan_executor"):
-            scheduler.set_email_scan_executor(email_skill.scan_emails)
-        if (
-            heartbeat_service is not None
-            and hasattr(heartbeat_service, "register_event_source")
-            and hasattr(email_skill, "_check_new_emails")
-        ):
-            heartbeat_service.register_event_source("email", email_skill._check_new_emails)
 
     # Memory tools are safe and expected to be available for preference persistence.
     if structured_store is not None:
@@ -174,8 +170,6 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
         event_queue=event_queue,
     )
     heartbeat_service = HeartbeatService(
-        structured_store=structured_store,
-        model_router=None,
         message_queue=event_queue,
         scheduler=scheduler,
     )
@@ -191,12 +185,11 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
         permission_manager=permission_manager,
         structured_store=structured_store,
         scheduler=scheduler,
-        heartbeat_service=heartbeat_service,
         message_queue=event_queue,
     )
 
     return AppDeps(
-        session_memory=SessionMemory(buffer_limit=20),
+        session_memory=SessionMemory(buffer_limit=20, active_window_days=7),
         structured_store=structured_store,
         event_queue=event_queue,
         scheduler=scheduler,
@@ -227,9 +220,44 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
 
     runtime_config = load_runtime_model_config()
     router = ModelRouter(runtime_config, on_stream_success=on_stream_success)
-    persona_system_prompt = ""
     persona_path = Path("config/persona.yaml")
-    if persona_path.exists():
+    knowledge_dir = get_memory_dir() / "knowledge"
+    if deps.semantic_memory is None:
+        deps.semantic_memory = SemanticMemory(
+            structured_store=deps.structured_store,
+            model_router=router,
+        )
+    else:
+        deps.semantic_memory.model_router = router
+    if deps.persona_manager is None:
+        deps.persona_manager = PersonaManager(
+            persona_path=persona_path,
+            semantic_memory=deps.semantic_memory,
+            knowledge_dir=knowledge_dir,
+        )
+    else:
+        deps.persona_manager.semantic_memory = deps.semantic_memory
+    if deps.sop_manager is None:
+        deps.sop_manager = SopManager(
+            knowledge_dir=knowledge_dir,
+            semantic_memory=deps.semantic_memory,
+        )
+    else:
+        deps.sop_manager.semantic_memory = deps.semantic_memory
+    if deps.memory_gc is None:
+        deps.memory_gc = MemoryGC(
+            session_memory=deps.session_memory,
+            structured_store=deps.structured_store,
+            semantic_memory=deps.semantic_memory,
+            model_router=router,
+            knowledge_dir=knowledge_dir,
+        )
+    else:
+        deps.memory_gc.model_router = router
+        deps.memory_gc.semantic_memory = deps.semantic_memory
+        deps.memory_gc.knowledge_dir = knowledge_dir
+    persona_system_prompt = ""
+    if persona_path.exists() and deps.persona_manager is None:
         try:
             persona_system_prompt = render_persona_system_prompt(load_persona_config(persona_path))
         except Exception:
@@ -261,7 +289,129 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
         structured_store=deps.structured_store,
         circuit_breaker=deps.circuit_breaker,
         skill_manager=deps.skill_manager,
+        memory_gc=deps.memory_gc,
     )
+    async def _update_persona_memory_tool(
+        params: dict[str, Any],
+        *,
+        session_id: str | None = None,
+    ):
+        del session_id
+        payload = await deps.persona_manager.update_persona_memory(
+            str(params.get("key") or ""),
+            str(params.get("value") or ""),
+        )
+        return SkillOutput(status="success", result=payload)
+
+    async def _save_sop_tool(
+        params: dict[str, Any],
+        *,
+        session_id: str | None = None,
+    ):
+        assert deps.sop_manager is not None
+        return await deps.sop_manager.save_sop(
+            title=str(params.get("title") or ""),
+            content=str(params.get("content") or ""),
+            confirm=bool(params.get("confirm", False)),
+            session_id=session_id,
+        )
+
+    async def _search_sop_tool(
+        params: dict[str, Any],
+        *,
+        session_id: str | None = None,
+    ):
+        assert deps.sop_manager is not None
+        return await deps.sop_manager.search_sop(
+            query=str(params.get("query") or ""),
+            top_k=int(params.get("top_k") or 3),
+            session_id=session_id,
+        )
+    if deps.skill_manager is not None and deps.persona_manager is not None:
+        try:
+            deps.skill_manager.register_builtin_tool(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "update_persona_memory",
+                        "description": (
+                            "Persist a stable user preference, habit, profile detail, or reply "
+                            "style into L3 semantic memory so it can be retrieved in future "
+                            "conversations. Important: if the user explicitly asks you to "
+                            "remember a stable preference or personal detail, you must call "
+                            "this tool instead of only acknowledging it in text."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "key": {"type": "string"},
+                                "value": {"type": "string"},
+                            },
+                            "required": ["key", "value"],
+                        },
+                    },
+                },
+                _update_persona_memory_tool,
+                source="builtin_persona",
+            )
+        except ValueError:
+            pass
+    if deps.skill_manager is not None and deps.sop_manager is not None:
+        try:
+            deps.skill_manager.register_builtin_tool(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "save_sop",
+                        "description": (
+                            "Save a reusable SOP into long-term memory. Important: before calling "
+                            "this tool, you must first ask the user for confirmation and wait for "
+                            "explicit approval. Do not call this tool in the same turn as the "
+                            "confirmation question. Only call it after the user has already agreed, "
+                            "and then pass confirm=true."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "content": {"type": "string"},
+                                "confirm": {"type": "boolean"},
+                            },
+                            "required": ["title", "content"],
+                        },
+                    },
+                },
+                _save_sop_tool,
+                source="builtin_sop",
+            )
+        except ValueError:
+            pass
+        try:
+            deps.skill_manager.register_builtin_tool(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "search_sop",
+                        "description": (
+                            "Search saved SOPs for reusable execution procedures, troubleshooting "
+                            "steps, or operational playbooks before answering repetitive how-to "
+                            "questions."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                                "top_k": {"type": "integer"},
+                            },
+                            "required": ["query"],
+                        },
+                    },
+                },
+                _search_sop_tool,
+                source="builtin_sop",
+            )
+        except ValueError:
+            pass
     return ChatPipeline(
         router=router,
         chat_model=chat_model,
@@ -275,6 +425,9 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
         channel_adapter=WebUIAdapter(),
         event_queue=deps.event_queue,
         persona_system_prompt=persona_system_prompt,
+        persona_manager=deps.persona_manager,
+        semantic_memory=deps.semantic_memory,
+        sop_manager=deps.sop_manager,
     )
 
 
@@ -332,13 +485,42 @@ def _build_qq_channel_service(qq_cfg: QQServiceConfig) -> QQChannelService:
     )
 
 
+def _validate_test_mode_storage_isolation(*, deps: AppDeps) -> None:
+    sandbox_root = get_test_sandbox_dir()
+    expected_sessions_dir = (sandbox_root / "memory" / "sessions").resolve(strict=False)
+    expected_db_path = (sandbox_root / "hypo.db").resolve(strict=False)
+
+    actual_sessions_dir = Path(getattr(deps.session_memory, "sessions_dir", "")).resolve(strict=False)
+    actual_db_path = Path(getattr(deps.structured_store, "db_path", "")).resolve(strict=False)
+
+    violations: list[str] = []
+    if actual_sessions_dir != expected_sessions_dir:
+        violations.append(
+            f"sessions_dir={actual_sessions_dir} (expected {expected_sessions_dir})"
+        )
+    if actual_db_path != expected_db_path:
+        violations.append(
+            f"db_path={actual_db_path} (expected {expected_db_path})"
+        )
+
+    if violations:
+        details = "; ".join(violations)
+        raise RuntimeError(
+            "HYPO_TEST_MODE requires sandbox-isolated storage. "
+            f"Refusing to start with non-sandbox paths: {details}"
+        )
+
+
 def create_app(
     auth_token: str,
     pipeline: ChatPipeline | None = None,
     deps: AppDeps | None = None,
     security: SecurityConfig | None = None,
 ) -> FastAPI:
+    test_mode_enabled = is_test_mode()
     resolved_deps = deps or _build_default_deps(security)
+    if test_mode_enabled:
+        _validate_test_mode_storage_isolation(deps=resolved_deps)
     if resolved_deps.event_queue is None:
         resolved_deps.event_queue = EventQueue()
     if resolved_deps.scheduler is None:
@@ -348,8 +530,6 @@ def create_app(
         )
     if resolved_deps.heartbeat_service is None:
         resolved_deps.heartbeat_service = HeartbeatService(
-            structured_store=resolved_deps.structured_store,
-            model_router=None,
             message_queue=resolved_deps.event_queue,
             scheduler=resolved_deps.scheduler,
         )
@@ -374,6 +554,13 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await resolved_deps.structured_store.init()
+        semantic_memory = getattr(app.state, "semantic_memory", None)
+        knowledge_dir = Path(getattr(app.state, "knowledge_dir", get_memory_dir() / "knowledge"))
+        if semantic_memory is not None and callable(getattr(semantic_memory, "build_index", None)):
+            try:
+                await semantic_memory.build_index(knowledge_dir)
+            except Exception:
+                logger.exception("semantic_memory.build_index.failed", knowledge_dir=str(knowledge_dir))
         current_config_snapshot = str(
             Path(getattr(app.state, "config_dir", Path("config"))).resolve(strict=False)
         )
@@ -390,6 +577,10 @@ def create_app(
                     tasks_cfg = None
                 app.state.tasks_config = tasks_cfg
                 if tasks_cfg is not None:
+                    heartbeat_prompt_path = (
+                        Path(getattr(app.state, "config_dir", Path("config")))
+                        / "heartbeat_prompt.md"
+                    )
                     if (
                         resolved_deps.skill_manager is not None
                         and hasattr(resolved_deps.skill_manager, "_skills")
@@ -401,37 +592,28 @@ def create_app(
                                 retention_days=tasks_cfg.email_store.retention_days,
                             )
                     if (
-                        resolved_deps.heartbeat_service is not None
-                        and hasattr(resolved_deps.heartbeat_service, "decision_prompt_template")
-                    ):
-                        resolved_deps.heartbeat_service.decision_prompt_template = (
-                            tasks_cfg.heartbeat.prompt_template
-                        )
-                    if (
                         tasks_cfg.heartbeat.enabled
                         and resolved_deps.heartbeat_service is not None
                         and hasattr(resolved_deps.scheduler, "register_interval_job")
                     ):
+                        if hasattr(resolved_deps.heartbeat_service, "prompt_path"):
+                            resolved_deps.heartbeat_service.prompt_path = heartbeat_prompt_path
                         resolved_deps.scheduler.register_interval_job(
                             "heartbeat",
                             tasks_cfg.heartbeat.interval_minutes,
                             resolved_deps.heartbeat_service.run,
                         )
-                    if (
-                        tasks_cfg.email_scan.enabled
-                        and resolved_deps.skill_manager is not None
-                        and hasattr(resolved_deps.skill_manager, "_skills")
-                        and hasattr(resolved_deps.scheduler, "register_interval_job")
-                    ):
-                        email_skill = resolved_deps.skill_manager._skills.get("email_scanner")
-                        if email_skill is not None and hasattr(email_skill, "scheduled_scan"):
-                            resolved_deps.scheduler.register_interval_job(
-                                "email_scan",
-                                tasks_cfg.email_scan.interval_minutes,
-                                email_skill.scheduled_scan,
-                            )
             else:
                 app.state.tasks_config = None
+            if (
+                resolved_deps.memory_gc is not None
+                and hasattr(resolved_deps.scheduler, "register_cron_job")
+            ):
+                resolved_deps.scheduler.register_cron_job(
+                    "memory_gc",
+                    "0 4 * * *",
+                    resolved_deps.memory_gc.run,
+                )
         await app.state.pipeline.start_event_consumer()
         await restart_qq_ws_client()
         app.state.directory_index_task = asyncio.create_task(run_directory_index_refresh())
@@ -467,13 +649,28 @@ def create_app(
     )
     app.add_middleware(WsTokenAuthMiddleware, auth_token=auth_token)
 
+    memory_dir = get_memory_dir()
+    knowledge_dir = memory_dir / "knowledge"
+    sessions_dir = memory_dir / "sessions"
+    db_path = Path(getattr(resolved_deps.structured_store, "db_path", get_database_path()))
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    knowledge_dir.mkdir(parents=True, exist_ok=True)
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
     app.state.auth_token = auth_token
     app.state.started_at = datetime.now(UTC)
     app.state.config_dir = Path("config")
-    app.state.knowledge_dir = get_memory_dir() / "knowledge"
+    app.state.knowledge_dir = knowledge_dir
+    app.state.runtime_mode = "test" if test_mode_enabled else "prod"
+    app.state.test_mode = test_mode_enabled
+    app.state.db_path = db_path
     app.state.deps = resolved_deps
     app.state.session_memory = resolved_deps.session_memory
     app.state.structured_store = resolved_deps.structured_store
+    app.state.semantic_memory = resolved_deps.semantic_memory
+    app.state.persona_manager = resolved_deps.persona_manager
+    app.state.sop_manager = resolved_deps.sop_manager
     app.state.skill_manager = resolved_deps.skill_manager
     app.state.circuit_breaker = resolved_deps.circuit_breaker
     app.state.permission_manager = resolved_deps.permission_manager
@@ -481,6 +678,7 @@ def create_app(
     app.state.event_queue = resolved_deps.event_queue
     app.state.scheduler = resolved_deps.scheduler
     app.state.heartbeat_service = resolved_deps.heartbeat_service
+    app.state.memory_gc = resolved_deps.memory_gc
     app.state.pipeline = pipeline_instance
     connection_manager.reset()
     app.state.ws_connection_manager = connection_manager
@@ -495,15 +693,13 @@ def create_app(
     app.state.narration_observer = None
     app.state.tasks_config = None
 
-    if (
-        app.state.scheduler is not None
-        and hasattr(app.state.scheduler, "set_email_scan_executor")
-    ):
-        email_skill = None
-        if app.state.skill_manager is not None and hasattr(app.state.skill_manager, "_skills"):
-            email_skill = app.state.skill_manager._skills.get("email_scanner")
-        executor = getattr(email_skill, "scan_emails", None) if email_skill is not None else None
-        app.state.scheduler.set_email_scan_executor(executor if callable(executor) else None)
+    if test_mode_enabled:
+        logger.warning(
+            "test_mode.enabled",
+            banner=TEST_MODE_BANNER,
+            sandbox_root=str(get_test_sandbox_dir()),
+            mode="test",
+        )
 
     async def push_ws_message(
         payload: dict[str, object],
@@ -627,6 +823,12 @@ def create_app(
         app.state.channel_dispatcher.unregister("qq")
         config_dir = Path(getattr(app.state, "config_dir", Path("config")))
         app.state.qq_config_dir_snapshot = str(config_dir.resolve(strict=False))
+        if test_mode_enabled:
+            app.state.qq_channel_service = None
+            app.state.qq_ws_url = None
+            app.state.qq_ws_token = ""
+            logger.info("qq_adapter.skip", reason="test_mode", mode="test")
+            return
         qq_cfg = _load_enabled_qq_service_config(config_dir)
         app.state.qq_ws_url = None
         app.state.qq_ws_token = ""
@@ -762,7 +964,6 @@ def create_app(
             permission_manager=deps.permission_manager,
             structured_store=deps.structured_store,
             scheduler=deps.scheduler,
-            heartbeat_service=deps.heartbeat_service,
             message_queue=deps.event_queue,
         )
 
@@ -773,6 +974,8 @@ def create_app(
         app.state.circuit_breaker = deps.circuit_breaker
         app.state.skill_manager = deps.skill_manager
         app.state.pipeline = _build_default_pipeline(deps)
+        app.state.semantic_memory = deps.semantic_memory
+        app.state.persona_manager = deps.persona_manager
         _ensure_pipeline_lifecycle_hooks(app.state.pipeline)
         setattr(app.state.pipeline, "on_proactive_message", on_proactive_message)
         app.state.output_compressor = deps.output_compressor

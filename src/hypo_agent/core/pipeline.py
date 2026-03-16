@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from contextvars import ContextVar
 from datetime import datetime
 import inspect
 import json
@@ -13,10 +14,32 @@ import structlog
 from hypo_agent.core.channel_adapter import ChannelAdapter, WebUIAdapter
 from hypo_agent.core.rich_response import RichResponse
 from hypo_agent.core.time_utils import utc_isoformat, utc_now
+from hypo_agent.memory.semantic_memory import ChunkResult, estimate_token_count
 from hypo_agent.memory.session import SessionMemory
 from hypo_agent.models import Message, SkillOutput
 
 logger = structlog.get_logger()
+
+_PIPELINE_INTERNAL_SOURCE: ContextVar[str] = ContextVar(
+    "pipeline_internal_source",
+    default="",
+)
+_PIPELINE_SUPPRESS_PERSISTENCE: ContextVar[bool] = ContextVar(
+    "pipeline_suppress_persistence",
+    default=False,
+)
+_PIPELINE_SUPPRESS_BROADCAST: ContextVar[bool] = ContextVar(
+    "pipeline_suppress_broadcast",
+    default=False,
+)
+_PIPELINE_SUPPRESS_TOOL_STATUS: ContextVar[bool] = ContextVar(
+    "pipeline_suppress_tool_status",
+    default=False,
+)
+_PIPELINE_SUPPRESS_HISTORY: ContextVar[bool] = ContextVar(
+    "pipeline_suppress_history",
+    default=False,
+)
 
 TOOL_USE_SYSTEM_PROMPT = (
     "You are an assistant with access to tools. "
@@ -24,8 +47,15 @@ TOOL_USE_SYSTEM_PROMPT = (
     "the provided tools instead of describing the action in text. "
     "Always prefer using tools over explaining what you would do. "
     "When the user expresses stable preferences/habits/personal details, "
-    "you MUST call save_preference(key, value) to persist them. "
-    "Use get_preference(key) to read them back when needed."
+    "you MUST call update_persona_memory(key, value) to persist them in long-term memory. "
+    "If the user explicitly asks you to remember a preference, profile detail, or reply style, "
+    "do not only answer with text like '好的，我记住了'; call update_persona_memory first. "
+    "Use save_preference(key, value) and get_preference(key) for structured key-value memory when needed. "
+    "When you derive a reusable workflow or troubleshooting playbook, use save_sop(title, content) "
+    "only after the user has explicitly approved saving it in a prior turn. "
+    "You must first ask for confirmation, wait for the user's explicit approval, "
+    "and never call save_sop in the same turn as the confirmation question. "
+    "When a task looks repetitive or operational, use search_sop(query, top_k) to retrieve saved SOPs."
 )
 
 KILL_SWITCH_MESSAGE = "⚠️ Kill Switch 已激活。所有执行已停止。发送 /resume 恢复。"
@@ -145,6 +175,9 @@ class ChatPipeline:
         event_queue: Any | None = None,
         on_proactive_message: Any | None = None,
         persona_system_prompt: str = "",
+        persona_manager: Any | None = None,
+        semantic_memory: Any | None = None,
+        sop_manager: Any | None = None,
         narration_observer: Any | None = None,
         on_narration: Any | None = None,
     ) -> None:
@@ -162,9 +195,13 @@ class ChatPipeline:
         self.event_queue = event_queue
         self.on_proactive_message = on_proactive_message
         self.persona_system_prompt = persona_system_prompt.strip()
+        self.persona_manager = persona_manager
+        self.semantic_memory = semantic_memory
+        self.sop_manager = sop_manager
         self.narration_observer = narration_observer
         self.on_narration = on_narration
         self._event_consumer_task: asyncio.Task[None] | None = None
+        self._pending_sop_usage: set[str] = set()
 
     async def start_event_consumer(self) -> None:
         if self.event_queue is None:
@@ -200,6 +237,27 @@ class ChatPipeline:
             }
         )
 
+    def _is_internal_heartbeat_message(self, inbound: Message) -> bool:
+        source = str(inbound.metadata.get("source") or "").strip().lower()
+        return source == "heartbeat"
+
+    def _session_persistence_suppressed(self) -> bool:
+        return bool(_PIPELINE_SUPPRESS_PERSISTENCE.get())
+
+    def _broadcast_suppressed(self) -> bool:
+        return bool(_PIPELINE_SUPPRESS_BROADCAST.get())
+
+    def _tool_status_context_suppressed(self) -> bool:
+        return bool(_PIPELINE_SUPPRESS_TOOL_STATUS.get())
+
+    def _history_suppressed(self) -> bool:
+        return bool(_PIPELINE_SUPPRESS_HISTORY.get())
+
+    def _append_session_message(self, message: Message) -> None:
+        if self._session_persistence_suppressed():
+            return
+        self.session_memory.append(message)
+
     async def run_once(self, inbound: Message) -> Message:
         slash_result = await self._try_handle_slash(inbound)
         if slash_result is not None:
@@ -218,7 +276,7 @@ class ChatPipeline:
             return outbound
 
         if self._kill_switch_active():
-            self.session_memory.append(inbound)
+            self._append_session_message(inbound)
             outbound = Message(
                 text=KILL_SWITCH_MESSAGE,
                 sender="assistant",
@@ -226,7 +284,7 @@ class ChatPipeline:
                 channel=inbound.channel,
                 sender_id=inbound.sender_id,
             )
-            self.session_memory.append(outbound)
+            self._append_session_message(outbound)
             await self._broadcast_message(
                 outbound,
                 origin_channel=inbound.channel,
@@ -234,8 +292,8 @@ class ChatPipeline:
             )
             return outbound
 
-        llm_messages = self._build_llm_messages(inbound)
-        self.session_memory.append(inbound)
+        llm_messages = await self._build_llm_messages(inbound)
+        self._append_session_message(inbound)
         text = await self.router.call(self.chat_model, llm_messages)
         outbound = Message(
             text=text,
@@ -244,7 +302,8 @@ class ChatPipeline:
             channel=inbound.channel,
             sender_id=inbound.sender_id,
         )
-        self.session_memory.append(outbound)
+        self._append_session_message(outbound)
+        await self._mark_retrieved_sops_used()
         await self._broadcast_message(
             outbound,
             origin_channel=inbound.channel,
@@ -282,7 +341,7 @@ class ChatPipeline:
                 return
 
             if self._kill_switch_active():
-                self.session_memory.append(inbound)
+                self._append_session_message(inbound)
                 kill_text = KILL_SWITCH_MESSAGE
                 yield self._format_event(
                     event_type="assistant_chunk",
@@ -296,7 +355,7 @@ class ChatPipeline:
                     channel=inbound.channel,
                     sender_id=inbound.sender_id,
                 )
-                self.session_memory.append(outbound)
+                self._append_session_message(outbound)
                 await self._broadcast_message(
                     outbound,
                     origin_channel=inbound.channel,
@@ -313,8 +372,8 @@ class ChatPipeline:
                 self.skill_manager is not None
                 and self.max_react_rounds > 0
             )
-            llm_messages = self._build_llm_messages(inbound, use_tools=use_tools)
-            self.session_memory.append(inbound)
+            llm_messages = await self._build_llm_messages(inbound, use_tools=use_tools)
+            self._append_session_message(inbound)
 
             full_text = ""
             killed = False
@@ -324,12 +383,23 @@ class ChatPipeline:
             if use_tools:
                 assert self.skill_manager is not None
                 tools = self.skill_manager.get_tools_schema()
+                tool_names = [
+                    str(tool.get("function", {}).get("name") or "")
+                    for tool in tools
+                    if str(tool.get("function", {}).get("name") or "").strip()
+                ]
                 react_messages: list[dict[str, Any]] = list(llm_messages)
                 reached_round_limit = True
                 logger.info(
                     "react.start",
                     session_id=inbound.session_id,
                     max_rounds=self.max_react_rounds,
+                )
+                logger.debug(
+                    "react.tools",
+                    session_id=inbound.session_id,
+                    tool_names=tool_names,
+                    tool_count=len(tool_names),
                 )
 
                 for round_num in range(1, self.max_react_rounds + 1):
@@ -453,6 +523,7 @@ class ChatPipeline:
                             )
 
                         if output.status == "success":
+                            self._track_sop_usage_from_tool_output(tool_name, output)
                             await self._send_tool_status(
                                 tool_name=tool_name,
                                 status="ok",
@@ -576,7 +647,7 @@ class ChatPipeline:
                     channel=inbound.channel,
                     sender_id=inbound.sender_id,
                 )
-                self.session_memory.append(outbound)
+                self._append_session_message(outbound)
                 await self._broadcast_message(
                     outbound,
                     origin_channel=inbound.channel,
@@ -597,7 +668,7 @@ class ChatPipeline:
                     channel=inbound.channel,
                     sender_id=inbound.sender_id,
                 )
-                self.session_memory.append(outbound)
+                self._append_session_message(outbound)
                 await self._broadcast_message(outbound, origin_channel=inbound.channel)
                 yield self._format_event(
                     event_type="assistant_done",
@@ -625,7 +696,8 @@ class ChatPipeline:
                 channel=inbound.channel,
                 sender_id=inbound.sender_id,
             )
-            self.session_memory.append(outbound)
+            self._append_session_message(outbound)
+            await self._mark_retrieved_sops_used()
             await self._broadcast_message(
                 outbound,
                 origin_channel=inbound.channel,
@@ -658,7 +730,7 @@ class ChatPipeline:
                 return parsed
         return {}
 
-    def _build_llm_messages(
+    async def _build_llm_messages(
         self,
         inbound: Message,
         *,
@@ -669,26 +741,139 @@ class ChatPipeline:
             raise ValueError("text is required for M2 chat pipeline")
 
         llm_messages: list[dict[str, str]] = []
-        if self.persona_system_prompt:
-            llm_messages.append({"role": "system", "content": self.persona_system_prompt})
+        persona_prompt = await self._resolve_persona_prompt(text)
+        if persona_prompt:
+            llm_messages.append({"role": "system", "content": persona_prompt})
         if use_tools:
             llm_messages.append({"role": "system", "content": TOOL_USE_SYSTEM_PROMPT})
         llm_messages.append({"role": "system", "content": self._system_time_context()})
         prefs_context = self._preferences_context()
         if prefs_context:
             llm_messages.append({"role": "system", "content": prefs_context})
+        semantic_context = await self._semantic_memory_context(text)
+        if semantic_context:
+            llm_messages.append({"role": "system", "content": semantic_context})
 
-        history = self.session_memory.get_recent_messages(
-            inbound.session_id,
-            limit=self.history_window,
-        )
-        for item in history:
-            llm_item = self._to_llm_message(item)
-            if llm_item is not None:
-                llm_messages.append(llm_item)
+        if not self._history_suppressed():
+            history = self.session_memory.get_recent_messages(
+                inbound.session_id,
+                limit=self.history_window,
+            )
+            for item in history:
+                llm_item = self._to_llm_message(item)
+                if llm_item is not None:
+                    llm_messages.append(llm_item)
 
         llm_messages.append({"role": "user", "content": text})
         return llm_messages
+
+    async def _resolve_persona_prompt(self, query: str) -> str:
+        if self.persona_manager is not None:
+            getter = getattr(self.persona_manager, "get_system_prompt_section", None)
+            if callable(getter):
+                result = getter(query=query)
+                if inspect.isawaitable(result):
+                    result = await result
+                prompt = str(result or "").strip()
+                if prompt:
+                    return prompt
+        return self.persona_system_prompt
+
+    async def _semantic_memory_context(self, query: str) -> str:
+        if self.semantic_memory is None:
+            self._pending_sop_usage = set()
+            return ""
+
+        search = getattr(self.semantic_memory, "search", None)
+        if not callable(search):
+            self._pending_sop_usage = set()
+            return ""
+
+        try:
+            results = search(query, top_k=5)
+            if inspect.isawaitable(results):
+                results = await results
+        except Exception:
+            logger.exception("pipeline.semantic_memory.search_failed")
+            self._pending_sop_usage = set()
+            return ""
+
+        if not results:
+            self._pending_sop_usage = set()
+            return ""
+
+        budget = 2000
+        used_tokens = estimate_token_count("[相关记忆]\n")
+        chunks: list[str] = []
+        sop_paths: set[str] = set()
+        for item in results:
+            chunk_text = str(getattr(item, "chunk_text", "") or "").strip()
+            if not chunk_text:
+                continue
+            chunk_tokens = estimate_token_count(chunk_text) + estimate_token_count("\n---\n")
+            if chunks and used_tokens + chunk_tokens > budget:
+                break
+            chunks.append(chunk_text)
+            used_tokens += chunk_tokens
+            file_path = str(getattr(item, "file_path", "") or "").strip()
+            if file_path and self._is_sop_result(file_path):
+                sop_paths.add(file_path)
+
+        if not chunks:
+            self._pending_sop_usage = set()
+            return ""
+        self._pending_sop_usage = sop_paths
+        return "[相关记忆]\n" + "\n---\n".join(chunks)
+
+    def _is_sop_result(self, file_path: str) -> bool:
+        manager = self.sop_manager
+        if manager is not None and hasattr(manager, "is_sop_path"):
+            try:
+                return bool(manager.is_sop_path(file_path))
+            except Exception:
+                return False
+        return "/knowledge/sop/" in file_path.replace("\\", "/")
+
+    async def _mark_retrieved_sops_used(self) -> None:
+        pending = set(self._pending_sop_usage)
+        self._pending_sop_usage = set()
+        if not pending:
+            return
+        manager = self.sop_manager
+        if manager is None:
+            return
+        toucher = getattr(manager, "touch_files", None)
+        if not callable(toucher):
+            return
+        try:
+            result = toucher(sorted(pending))
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception("pipeline.sop_metadata_update_failed")
+
+    def _track_sop_usage_from_tool_output(
+        self,
+        tool_name: str,
+        output: SkillOutput,
+    ) -> None:
+        if tool_name != "search_sop" or output.status != "success":
+            return
+        payload = output.result
+        if not isinstance(payload, dict):
+            return
+        items = payload.get("items")
+        if not isinstance(items, list):
+            return
+
+        tracked = set(self._pending_sop_usage)
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            file_path = str(item.get("file_path") or "").strip()
+            if file_path and self._is_sop_result(file_path):
+                tracked.add(file_path)
+        self._pending_sop_usage = tracked
 
     def _preferences_context(self) -> str:
         store = self.structured_store
@@ -734,6 +919,8 @@ class ChatPipeline:
         origin_channel: str | None,
         origin_client_id: str | None = None,
     ) -> None:
+        if self._broadcast_suppressed():
+            return
         callback = self.on_proactive_message
         if callback is None:
             return
@@ -887,6 +1074,8 @@ class ChatPipeline:
             await callback_result
 
     def _tool_status_suppressed(self) -> bool:
+        if self._tool_status_context_suppressed():
+            return True
         observer = self.narration_observer
         if observer is None:
             return False
@@ -899,6 +1088,8 @@ class ChatPipeline:
         tool_name: str,
         arguments: dict[str, Any],
     ) -> asyncio.Task[None] | None:
+        if self._broadcast_suppressed():
+            return None
         observer = self.narration_observer
         callback = self.on_narration
         if observer is None or callback is None:
@@ -1014,7 +1205,7 @@ class ChatPipeline:
                 message = self._event_to_message(event)
                 if message is None:
                     continue
-                self.session_memory.append(message)
+                self._append_session_message(message)
                 if self.on_proactive_message is not None:
                     callback_result = self.on_proactive_message(message)
                     if inspect.isawaitable(callback_result):
@@ -1038,6 +1229,16 @@ class ChatPipeline:
         emitter = event.get("emit")
         if not callable(emitter):
             raise ValueError("user_message event missing callable 'emit'")
+
+        tokens: list[tuple[ContextVar[Any], object]] = []
+        if self._is_internal_heartbeat_message(inbound):
+            tokens = [
+                (_PIPELINE_INTERNAL_SOURCE, _PIPELINE_INTERNAL_SOURCE.set("heartbeat")),
+                (_PIPELINE_SUPPRESS_PERSISTENCE, _PIPELINE_SUPPRESS_PERSISTENCE.set(True)),
+                (_PIPELINE_SUPPRESS_BROADCAST, _PIPELINE_SUPPRESS_BROADCAST.set(True)),
+                (_PIPELINE_SUPPRESS_TOOL_STATUS, _PIPELINE_SUPPRESS_TOOL_STATUS.set(True)),
+                (_PIPELINE_SUPPRESS_HISTORY, _PIPELINE_SUPPRESS_HISTORY.set(True)),
+            ]
 
         try:
             async for payload in self.stream_reply(inbound):
@@ -1066,6 +1267,9 @@ class ChatPipeline:
             emit_result = emitter(error_payload)
             if inspect.isawaitable(emit_result):
                 await emit_result
+        finally:
+            for context_var, token in reversed(tokens):
+                context_var.reset(token)
 
     def _event_to_message(self, event: dict[str, Any]) -> Message | None:
         event_type = str(event.get("event_type") or "").strip().lower()

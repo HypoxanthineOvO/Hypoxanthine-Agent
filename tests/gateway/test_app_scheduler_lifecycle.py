@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 import threading
 
 from fastapi.testclient import TestClient
@@ -17,6 +18,7 @@ class RecordingScheduler:
         self.started = 0
         self.stopped = 0
         self.interval_jobs: list[tuple[str, int]] = []
+        self.cron_jobs: list[tuple[str, str]] = []
         self.is_running = False
 
     async def start(self) -> None:
@@ -30,6 +32,10 @@ class RecordingScheduler:
     def register_interval_job(self, job_id: str, minutes: int, coro, *, replace_existing: bool = True):
         del coro, replace_existing
         self.interval_jobs.append((job_id, minutes))
+
+    def register_cron_job(self, job_id: str, cron: str, coro, *, replace_existing: bool = True):
+        del coro, replace_existing
+        self.cron_jobs.append((job_id, cron))
 
 
 class RecordingPipeline:
@@ -181,9 +187,6 @@ def test_app_registers_heartbeat_job_from_tasks_config(tmp_path) -> None:
 heartbeat:
   enabled: true
   interval_minutes: 1
-email_scan:
-  enabled: false
-  interval_minutes: 5
 """.strip(),
         encoding="utf-8",
     )
@@ -209,7 +212,7 @@ email_scan:
         assert scheduler.interval_jobs == [("heartbeat", 1)]
 
 
-def test_app_applies_heartbeat_prompt_template_from_tasks_config(tmp_path) -> None:
+def test_app_points_heartbeat_service_to_config_prompt_file(tmp_path) -> None:
     scheduler = RecordingScheduler()
     pipeline = RecordingPipeline()
 
@@ -220,19 +223,14 @@ def test_app_applies_heartbeat_prompt_template_from_tasks_config(tmp_path) -> No
 heartbeat:
   enabled: true
   interval_minutes: 1
-  prompt_template: |
-    你是自定义 heartbeat 判定器。
-    checks=${checks}
-email_scan:
-  enabled: false
-  interval_minutes: 5
 """.strip(),
         encoding="utf-8",
     )
+    (config_dir / "heartbeat_prompt.md").write_text("# prompt", encoding="utf-8")
 
     class DummyHeartbeatService:
         def __init__(self) -> None:
-            self.decision_prompt_template = ""
+            self.prompt_path = Path("config/heartbeat_prompt.md")
 
         async def run(self) -> None:
             return None
@@ -249,10 +247,10 @@ email_scan:
     app.state.config_dir = config_dir
 
     with TestClient(app):
-        assert "你是自定义 heartbeat 判定器。" in heartbeat_service.decision_prompt_template
+        assert heartbeat_service.prompt_path == config_dir / "heartbeat_prompt.md"
 
 
-def test_app_registers_email_scan_interval_job(tmp_path) -> None:
+def test_app_ignores_legacy_email_scan_interval_config(tmp_path) -> None:
     scheduler = RecordingScheduler()
     pipeline = RecordingPipeline()
 
@@ -289,7 +287,28 @@ email_scan:
     app.state.config_dir = config_dir
 
     with TestClient(app):
-        assert ("email_scan", 1) in scheduler.interval_jobs
+        assert scheduler.interval_jobs == []
+
+
+def test_app_registers_memory_gc_cron_job(tmp_path) -> None:
+    scheduler = RecordingScheduler()
+    pipeline = RecordingPipeline()
+
+    class DummyMemoryGC:
+        async def run(self) -> dict:
+            return {"processed_count": 0, "skipped_count": 0}
+
+    deps = AppDeps(
+        session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+        structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        scheduler=scheduler,
+        event_queue=DummyEventQueue(),
+    )
+    deps.memory_gc = DummyMemoryGC()
+    app = create_app(auth_token="test-token", pipeline=pipeline, deps=deps)
+
+    with TestClient(app):
+        assert ("memory_gc", "0 4 * * *") in scheduler.cron_jobs
 
 
 def test_app_lifespan_starts_and_stops_napcat_websocket_client(
@@ -413,9 +432,6 @@ def test_app_lifespan_warms_email_cache_in_background_when_store_is_stale(
 heartbeat:
   enabled: false
   interval_minutes: 1
-email_scan:
-  enabled: false
-  interval_minutes: 5
 email_store:
   enabled: true
   max_entries: 5000

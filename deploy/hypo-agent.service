@@ -10,7 +10,7 @@ WorkingDirectory=/home/heyx/Hypo-Agent
 Environment=PYTHONPATH=/home/heyx/Hypo-Agent/src
 Environment=HYPO_PORT=8765
 Environment=HYPO_MEMORY_DIR=/home/heyx/Hypo-Agent/memory
-ExecStart=/home/heyx/miniconda3/envs/HypoAgent/bin/python -m uvicorn hypo_agent.gateway.main:build_app --factory --host 127.0.0.1 --port 8765 --log-level info
+ExecStart=/usr/bin/env bash -lc 'uv run python -m hypo_agent --host 127.0.0.1 --port 8765'
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

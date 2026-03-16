@@ -49,10 +49,16 @@ services:
 
 ## 3. Verification Steps
 
-1. 后端测试：`pytest -q`
+1. 后端测试：`uv run pytest -q`
 2. 前端测试：`cd web && npm run test`
-3. 重启 Agent：`python -m hypo_agent.gateway.main`
-4. 运行 smoke：`python scripts/agent_cli.py smoke`
+3. 默认启动测试模式 Agent：`bash test_run.sh`
+4. 默认运行测试模式 smoke：`HYPO_TEST_MODE=1 uv run python scripts/agent_cli.py --port 8766 smoke`
+
+默认原则：
+
+- 不要默认对部署中的 `8765` 实例直接跑 smoke
+- 测试模式使用 `test/sandbox/`，避免污染生产记忆与数据库
+- 测试模式下 QQ adapter 不注册，不会发送 QQ 消息
 
 期望 smoke case：
 

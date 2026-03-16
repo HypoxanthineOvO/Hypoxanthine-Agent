@@ -42,16 +42,20 @@ resolve_nginx_target_dir() {
 }
 
 require_commands() {
+  command -v uv >/dev/null 2>&1 || die "uv is required."
   command -v npm >/dev/null 2>&1 || die "npm is required."
   command -v systemctl >/dev/null 2>&1 || die "systemctl is required."
   command -v nginx >/dev/null 2>&1 || die "nginx is required but not installed."
 }
 
 main() {
+  require_commands
+
+  info "Syncing Python environment..."
+  uv sync
+
   info "Building frontend..."
   npm run build --prefix "$WEB_DIR"
-
-  require_commands
 
   local nginx_target_dir
   nginx_target_dir="$(resolve_nginx_target_dir)"

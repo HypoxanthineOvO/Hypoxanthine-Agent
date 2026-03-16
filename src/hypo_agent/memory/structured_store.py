@@ -1,31 +1,140 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 import json
 from pathlib import Path
+import re
 import sqlite3
 from typing import Any
 
 import aiosqlite
+try:
+    import sqlite_vec
+except ImportError:  # pragma: no cover - depends on runtime environment
+    sqlite_vec = None
+import structlog
 
-from hypo_agent.core.config_loader import get_memory_dir
+from hypo_agent.core.config_loader import get_database_path
+
+logger = structlog.get_logger("hypo_agent.memory.structured_store")
+_FTS5_SPECIAL_CHARS_RE = re.compile(r'["*():^]')
+_FTS5_TERM_RE = re.compile(r"[a-z0-9_]+|[\u3400-\u9fff]+")
+_CJK_TERM_RE = re.compile(r"^[\u3400-\u9fff]+$")
 
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _normalize_search_text(value: str) -> str:
+    normalized: list[str] = []
+    for char in value:
+        if char.isascii():
+            normalized.append(char.lower())
+        elif char.strip():
+            normalized.append(char)
+        else:
+            normalized.append(" ")
+    return " ".join(token for token in "".join(normalized).split() if token)
+
+
+def _quote_fts5_term(term: str) -> str:
+    return f'"{term.replace("\"", "\"\"")}"'
+
+
+def _expand_cjk_search_terms(term: str) -> list[str]:
+    if not _CJK_TERM_RE.fullmatch(term):
+        return [term]
+    if len(term) <= 4:
+        return [term]
+
+    expanded = [term]
+    expanded.extend(term[idx : idx + 2] for idx in range(len(term) - 1))
+    return expanded
+
+
+def _build_fts5_match_query(query: str) -> str:
+    normalized_query = _normalize_search_text(query)
+    if not normalized_query:
+        return ""
+
+    sanitized = _FTS5_SPECIAL_CHARS_RE.sub(" ", normalized_query)
+    raw_terms = _FTS5_TERM_RE.findall(sanitized)
+    expanded_terms: list[str] = []
+    for idx, term in enumerate(raw_terms):
+        stripped = term.strip()
+        if not stripped:
+            continue
+        expanded_terms.extend(_expand_cjk_search_terms(stripped))
+        if idx + 1 < len(raw_terms):
+            next_term = raw_terms[idx + 1].strip()
+            if (
+                next_term
+                and _CJK_TERM_RE.fullmatch(stripped)
+                and _CJK_TERM_RE.fullmatch(next_term)
+            ):
+                expanded_terms.append(stripped + next_term)
+
+    unique_terms = [term for term in dict.fromkeys(expanded_terms) if term]
+    if not unique_terms:
+        return ""
+    return " OR ".join(_quote_fts5_term(term) for term in unique_terms[:24])
+
+
+def _deserialize_embedding_blob(blob: bytes | bytearray | memoryview | str | None) -> list[float]:
+    if blob is None:
+        return []
+    if isinstance(blob, memoryview):
+        blob = blob.tobytes()
+    if isinstance(blob, (bytes, bytearray)):
+        try:
+            payload = json.loads(bytes(blob).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return []
+    elif isinstance(blob, str):
+        try:
+            payload = json.loads(blob)
+        except json.JSONDecodeError:
+            return []
+    else:
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [float(item) for item in payload]
+
+
+def _squared_l2_distance(left: list[float], right: list[float]) -> float:
+    if len(left) != len(right):
+        return float("inf")
+    return sum((float(a) - float(b)) ** 2 for a, b in zip(left, right, strict=True))
+
+
 class StructuredStore:
     def __init__(self, db_path: Path | str | None = None) -> None:
         if db_path is None:
-            db_path = get_memory_dir() / "hypo.db"
+            db_path = get_database_path()
 
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         # TODO(M9+): consider connection reuse/pooling to reduce per-call connects.
         self._init_lock = asyncio.Lock()
         self._initialized = False
+
+    async def _load_sqlite_vec(self, db: aiosqlite.Connection) -> None:
+        if sqlite_vec is None:
+            return
+        await db.enable_load_extension(True)
+        await db.load_extension(sqlite_vec.loadable_path())
+        await db.enable_load_extension(False)
+
+    def _load_sqlite_vec_sync(self, db: sqlite3.Connection) -> None:
+        if sqlite_vec is None:
+            return
+        db.enable_load_extension(True)
+        db.load_extension(sqlite_vec.loadable_path())
+        db.enable_load_extension(False)
 
     async def init(self) -> None:
         if self._initialized:
@@ -36,12 +145,14 @@ class StructuredStore:
                 return
 
             async with aiosqlite.connect(self.db_path) as db:
+                await self._load_sqlite_vec(db)
                 await db.execute(
                     """
                     CREATE TABLE IF NOT EXISTS sessions (
                         session_id TEXT PRIMARY KEY,
                         created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
+                        updated_at TEXT NOT NULL,
+                        gc_processed INTEGER NOT NULL DEFAULT 0
                     )
                     """
                 )
@@ -156,6 +267,56 @@ class StructuredStore:
                     ON processed_emails(account_name, message_id)
                     """
                 )
+                await db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS semantic_chunks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        file_path TEXT NOT NULL,
+                        chunk_index INTEGER NOT NULL,
+                        chunk_text TEXT NOT NULL,
+                        embedding BLOB NOT NULL,
+                        file_hash TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_semantic_chunks_file
+                    ON semantic_chunks(file_path)
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS semantic_index_meta (
+                        meta_key TEXT PRIMARY KEY,
+                        meta_value TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                if sqlite_vec is not None:
+                    await db.execute(
+                        """
+                        CREATE VIRTUAL TABLE IF NOT EXISTS semantic_chunks_vec
+                        USING vec0(id INTEGER PRIMARY KEY, embedding float[1])
+                        """
+                    )
+                else:
+                    await db.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS semantic_chunks_vec (
+                            id INTEGER PRIMARY KEY,
+                            embedding BLOB NOT NULL
+                        )
+                        """
+                    )
+                await db.execute(
+                    """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS semantic_chunks_fts
+                    USING fts5(id UNINDEXED, file_path, chunk_text)
+                    """
+                )
                 async with db.execute("PRAGMA table_info(token_usage)") as cursor:
                     columns = await cursor.fetchall()
                 column_names = {str(column[1]) for column in columns}
@@ -165,6 +326,13 @@ class StructuredStore:
                 async with db.execute("PRAGMA table_info(tool_invocations)") as cursor:
                     tool_columns = await cursor.fetchall()
                 tool_column_names = {str(column[1]) for column in tool_columns}
+                async with db.execute("PRAGMA table_info(sessions)") as cursor:
+                    session_columns = await cursor.fetchall()
+                session_column_names = {str(column[1]) for column in session_columns}
+                if "gc_processed" not in session_column_names:
+                    await db.execute(
+                        "ALTER TABLE sessions ADD COLUMN gc_processed INTEGER NOT NULL DEFAULT 0"
+                    )
                 if "skill_name" not in tool_column_names:
                     await db.execute("ALTER TABLE tool_invocations ADD COLUMN skill_name TEXT")
                 if "params_json" not in tool_column_names:
@@ -218,13 +386,43 @@ class StructuredStore:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """
-                SELECT session_id, created_at, updated_at
+                SELECT session_id, created_at, updated_at, gc_processed
                 FROM sessions
                 ORDER BY updated_at DESC, session_id DESC
                 """
             ) as cursor:
                 rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    async def is_session_gc_processed(self, session_id: str) -> bool:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT gc_processed FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        if row is None:
+            return False
+        return bool(int(row[0] or 0))
+
+    async def mark_session_gc_processed(
+        self,
+        session_id: str,
+        processed: bool = True,
+    ) -> None:
+        await self.init()
+        await self.upsert_session(session_id)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE sessions
+                SET gc_processed = ?, updated_at = ?
+                WHERE session_id = ?
+                """,
+                (1 if processed else 0, _now_iso(), session_id),
+            )
+            await db.commit()
 
     async def set_preference(self, key: str, value: str) -> None:
         await self.init()
@@ -287,6 +485,289 @@ class StructuredStore:
             value = str(row[1] or "")
             result.append((key, value))
         return result
+
+    async def ensure_semantic_vector_dimensions(self, dimensions: int) -> None:
+        await self.init()
+        if dimensions <= 0:
+            raise ValueError("dimensions must be positive")
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await self._load_sqlite_vec(db)
+            async with db.execute(
+                "SELECT meta_value FROM semantic_index_meta WHERE meta_key = 'embedding_dimensions'"
+            ) as cursor:
+                row = await cursor.fetchone()
+            current = str(row[0]) if row is not None else None
+            if current == str(dimensions):
+                return
+
+            if current is not None and current != str(dimensions):
+                await db.execute("DELETE FROM semantic_chunks")
+                await db.execute("DELETE FROM semantic_chunks_fts")
+
+            await db.execute("DROP TABLE IF EXISTS semantic_chunks_vec")
+            if sqlite_vec is not None:
+                await db.execute(
+                    f"""
+                    CREATE VIRTUAL TABLE semantic_chunks_vec
+                    USING vec0(id INTEGER PRIMARY KEY, embedding float[{int(dimensions)}])
+                    """
+                )
+            else:
+                await db.execute(
+                    """
+                    CREATE TABLE semantic_chunks_vec (
+                        id INTEGER PRIMARY KEY,
+                        embedding BLOB NOT NULL
+                    )
+                    """
+                )
+            await db.execute(
+                """
+                INSERT INTO semantic_index_meta(meta_key, meta_value, updated_at)
+                VALUES ('embedding_dimensions', ?, ?)
+                ON CONFLICT(meta_key) DO UPDATE SET
+                    meta_value=excluded.meta_value,
+                    updated_at=excluded.updated_at
+                """,
+                (str(dimensions), _now_iso()),
+            )
+            await db.commit()
+
+    async def get_semantic_dimensions(self) -> int | None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT meta_value FROM semantic_index_meta WHERE meta_key = 'embedding_dimensions'"
+            ) as cursor:
+                row = await cursor.fetchone()
+        if row is None:
+            return None
+        try:
+            return int(row[0])
+        except (TypeError, ValueError):
+            return None
+
+    async def list_semantic_files(self) -> list[str]:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT DISTINCT file_path FROM semantic_chunks ORDER BY file_path"
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [str(row[0]) for row in rows if row and row[0]]
+
+    async def get_semantic_file_hash(self, file_path: str) -> str | None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """
+                SELECT file_hash
+                FROM semantic_chunks
+                WHERE file_path = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (file_path,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        if row is None:
+            return None
+        return str(row[0] or "")
+
+    async def delete_semantic_chunks(self, file_path: str) -> None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            await self._load_sqlite_vec(db)
+            async with db.execute(
+                "SELECT id FROM semantic_chunks WHERE file_path = ? ORDER BY id",
+                (file_path,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+            ids = [int(row[0]) for row in rows if row and row[0] is not None]
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                await db.execute(
+                    f"DELETE FROM semantic_chunks_vec WHERE id IN ({placeholders})",
+                    tuple(ids),
+                )
+                await db.execute(
+                    f"DELETE FROM semantic_chunks_fts WHERE id IN ({placeholders})",
+                    tuple(ids),
+                )
+            await db.execute("DELETE FROM semantic_chunks WHERE file_path = ?", (file_path,))
+            await db.commit()
+
+    async def replace_semantic_chunks(
+        self,
+        *,
+        file_path: str,
+        file_hash: str,
+        chunks: list[dict[str, Any]],
+    ) -> None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            await self._load_sqlite_vec(db)
+            async with db.execute(
+                "SELECT id FROM semantic_chunks WHERE file_path = ? ORDER BY id",
+                (file_path,),
+            ) as cursor:
+                old_rows = await cursor.fetchall()
+            old_ids = [int(row[0]) for row in old_rows if row and row[0] is not None]
+            if old_ids:
+                placeholders = ",".join("?" for _ in old_ids)
+                await db.execute(
+                    f"DELETE FROM semantic_chunks_vec WHERE id IN ({placeholders})",
+                    tuple(old_ids),
+                )
+                await db.execute(
+                    f"DELETE FROM semantic_chunks_fts WHERE id IN ({placeholders})",
+                    tuple(old_ids),
+                )
+            await db.execute("DELETE FROM semantic_chunks WHERE file_path = ?", (file_path,))
+
+            created_at = _now_iso()
+            for chunk in chunks:
+                cursor = await db.execute(
+                    """
+                    INSERT INTO semantic_chunks(
+                        file_path,
+                        chunk_index,
+                        chunk_text,
+                        embedding,
+                        file_hash,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        file_path,
+                        int(chunk["chunk_index"]),
+                        str(chunk["chunk_text"]),
+                        chunk["embedding_blob"],
+                        file_hash,
+                        created_at,
+                    ),
+                )
+                chunk_id = int(cursor.lastrowid)
+                await db.execute(
+                    "INSERT INTO semantic_chunks_vec(id, embedding) VALUES (?, ?)",
+                    (chunk_id, chunk["embedding_blob"]),
+                )
+                await db.execute(
+                    """
+                    INSERT INTO semantic_chunks_fts(id, file_path, chunk_text)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        chunk_id,
+                        file_path,
+                        _normalize_search_text(str(chunk["chunk_text"])),
+                    ),
+                )
+            await db.commit()
+
+    async def semantic_vector_search(
+        self,
+        query_embedding: list[float],
+        *,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        await self.init()
+        if not query_embedding or limit <= 0:
+            return []
+
+        current_dimensions = await self.get_semantic_dimensions()
+        if current_dimensions is None or current_dimensions != len(query_embedding):
+            return []
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await self._load_sqlite_vec(db)
+            db.row_factory = aiosqlite.Row
+            if sqlite_vec is not None:
+                async with db.execute(
+                    """
+                    SELECT sc.id, sc.file_path, sc.chunk_index, sc.chunk_text, v.distance
+                    FROM (
+                        SELECT id, distance
+                        FROM semantic_chunks_vec
+                        WHERE embedding MATCH ? AND k = ?
+                        ORDER BY distance
+                    ) AS v
+                    JOIN semantic_chunks AS sc ON sc.id = v.id
+                    ORDER BY v.distance
+                    """,
+                    (json.dumps(query_embedding, ensure_ascii=False), int(limit)),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+
+            async with db.execute(
+                """
+                SELECT sc.id, sc.file_path, sc.chunk_index, sc.chunk_text, v.embedding
+                FROM semantic_chunks_vec AS v
+                JOIN semantic_chunks AS sc ON sc.id = v.id
+                """
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        scored: list[dict[str, Any]] = []
+        for row in rows:
+            embedding = _deserialize_embedding_blob(row[4])
+            if not embedding:
+                continue
+            scored.append(
+                {
+                    "id": int(row[0]),
+                    "file_path": str(row[1]),
+                    "chunk_index": int(row[2]),
+                    "chunk_text": str(row[3]),
+                    "distance": _squared_l2_distance(query_embedding, embedding),
+                }
+            )
+        scored.sort(key=lambda item: (float(item["distance"]), item["file_path"], item["chunk_index"]))
+        return scored[: int(limit)]
+
+    async def semantic_keyword_search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        await self.init()
+        if limit <= 0:
+            return []
+
+        match_query = _build_fts5_match_query(query)
+        logger.debug("fts5.match_query", query=query, sanitized=match_query)
+        if not match_query:
+            return []
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            try:
+                async with db.execute(
+                    """
+                    SELECT sc.id, sc.file_path, sc.chunk_index, sc.chunk_text,
+                           bm25(semantic_chunks_fts) AS bm25_score
+                    FROM semantic_chunks_fts
+                    JOIN semantic_chunks AS sc ON sc.id = semantic_chunks_fts.id
+                    WHERE semantic_chunks_fts MATCH ?
+                    ORDER BY bm25_score ASC
+                    LIMIT ?
+                    """,
+                    (match_query, int(limit)),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+            except sqlite3.OperationalError as exc:
+                logger.warning(
+                    "fts5.match_failed",
+                    query=query,
+                    sanitized=match_query,
+                    error=str(exc),
+                )
+                return []
+        return [dict(row) for row in rows]
 
     async def record_token_usage(
         self,

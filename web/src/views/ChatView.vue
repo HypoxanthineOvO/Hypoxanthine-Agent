@@ -483,7 +483,7 @@ watch(lastError, (error) => {
 
 useHotkey([
   {
-    combo: "ctrlOrMeta+enter",
+    combo: "enter",
     handler: () => {
       onSubmit();
     },
@@ -646,7 +646,7 @@ useHotkey([
           v-model="draft"
           name="message"
           autocomplete="off"
-          placeholder="输入消息（Ctrl/Cmd+Enter 发送，Enter 换行）"
+          placeholder="输入消息（Enter 发送）"
           class="composer-input"
         />
         <div class="composer-actions">

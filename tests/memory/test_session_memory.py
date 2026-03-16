@@ -167,3 +167,81 @@ def test_session_memory_keeps_legacy_messages_without_timestamp_empty(tmp_path: 
     assert len(messages) == 1
     assert messages[0].text == "legacy"
     assert messages[0].timestamp is None
+
+
+def test_session_memory_hides_inactive_session_history_outside_active_window(tmp_path: Path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    store = SessionMemory(
+        sessions_dir=sessions_dir,
+        buffer_limit=20,
+        active_window_days=7,
+        now_fn=lambda: datetime(2026, 3, 15, 12, 0, tzinfo=UTC),
+    )
+    store.append(
+        Message(
+            text="old-user",
+            sender="user",
+            session_id="archived",
+            timestamp=datetime(2026, 3, 1, 10, 0, tzinfo=UTC),
+        )
+    )
+    store.append(
+        Message(
+            text="old-assistant",
+            sender="assistant",
+            session_id="archived",
+            timestamp=datetime(2026, 3, 1, 10, 1, tzinfo=UTC),
+        )
+    )
+
+    restored = SessionMemory(
+        sessions_dir=sessions_dir,
+        buffer_limit=20,
+        active_window_days=7,
+        now_fn=lambda: datetime(2026, 3, 15, 12, 0, tzinfo=UTC),
+    )
+
+    assert restored.get_recent_messages("archived") == []
+    assert restored.get_messages("archived") == []
+
+
+def test_session_memory_keeps_recent_history_inside_active_window(tmp_path: Path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    store = SessionMemory(
+        sessions_dir=sessions_dir,
+        buffer_limit=20,
+        active_window_days=7,
+        now_fn=lambda: datetime(2026, 3, 15, 12, 0, tzinfo=UTC),
+    )
+    store.append(
+        Message(
+            text="recent-user",
+            sender="user",
+            session_id="active",
+            timestamp=datetime(2026, 3, 12, 10, 0, tzinfo=UTC),
+        )
+    )
+    store.append(
+        Message(
+            text="recent-assistant",
+            sender="assistant",
+            session_id="active",
+            timestamp=datetime(2026, 3, 12, 10, 1, tzinfo=UTC),
+        )
+    )
+
+    restored = SessionMemory(
+        sessions_dir=sessions_dir,
+        buffer_limit=20,
+        active_window_days=7,
+        now_fn=lambda: datetime(2026, 3, 15, 12, 0, tzinfo=UTC),
+    )
+
+    assert [item.text for item in restored.get_recent_messages("active")] == [
+        "recent-user",
+        "recent-assistant",
+    ]
+    assert [item.text for item in restored.get_messages("active")] == [
+        "recent-user",
+        "recent-assistant",
+    ]

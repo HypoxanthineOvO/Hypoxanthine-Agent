@@ -13,6 +13,7 @@ from hypo_agent.models import (
     ReminderCreate,
     SecretsConfig,
     SecurityConfig,
+    SingleModelConfig,
     SkillOutput,
 )
 
@@ -302,6 +303,17 @@ def test_persona_config_required_fields():
     assert persona.aliases == ["hypo", "assistant"]
     assert "pragmatic" in persona.personality
     assert persona.speaking_style["tone"] == "direct"
+
+
+def test_single_model_config_defaults_to_chat_type() -> None:
+    config = SingleModelConfig.model_validate(
+        {
+            "provider": "volcano",
+            "litellm_model": "openai/doubao-embedding-text-240715",
+        }
+    )
+
+    assert config.type == "chat"
 
 
 def test_configure_logging_idempotent_and_usable():
