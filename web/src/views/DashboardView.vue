@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { NButton, NCard, NDataTable, NGrid, NGridItem, NTag } from "naive-ui";
+import { NButton, NCard, NDataTable, NEmpty, NGrid, NGridItem, NTag } from "naive-ui";
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import VChart from "vue-echarts";
 import { use } from "echarts/core";
@@ -34,6 +34,10 @@ const props = withDefaults(
   },
 );
 
+const emit = defineEmits<{
+  'open-session': [sessionId: string]
+}>();
+
 interface DashboardStatus {
   uptime_seconds: number;
   uptime_human: string;
@@ -53,6 +57,12 @@ interface LatencyStatsRow {
   p50_ms: number;
   p95_ms: number;
   p99_ms: number;
+}
+
+interface RecentSessionRow {
+  session_id: string;
+  message_count: number;
+  updated_at: string;
 }
 
 interface RecentTaskRow {
@@ -137,6 +147,7 @@ const status = ref<DashboardStatus | null>(null);
 const tokenStats = ref<TokenStatsRow[]>([]);
 const latencyStats = ref<LatencyStatsRow[]>([]);
 const recentTasks = ref<RecentTaskRow[]>([]);
+const recentSessions = ref<RecentSessionRow[]>([]);
 const skills = ref<SkillRow[]>([]);
 const channels = ref<ChannelsStatusResponse["channels"] | null>(null);
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -320,11 +331,12 @@ const tokenChartOption = computed(() => {
     tooltip: { trigger: "axis" },
     legend: {
       data: models,
+      type: "scroll",
       top: "top",
       left: "center",
       textStyle: { color: chartTextColor.value },
     },
-    grid: { left: 16, right: 16, top: 32, bottom: 20, containLabel: true },
+    grid: { left: 16, right: 16, top: 48, bottom: 20, containLabel: true },
     xAxis: {
       type: "category",
       data: dates,
@@ -357,6 +369,12 @@ const latencyChartOption = computed(() => {
   return {
     backgroundColor: "transparent",
     textStyle: { color: chartTextColor.value },
+    title: {
+      text: "模型响应延迟",
+      left: "center",
+      top: 4,
+      textStyle: { color: chartTextColor.value, fontSize: 13 },
+    },
     tooltip: { trigger: "axis" },
     legend: {
       data: ["P50", "P95", "P99"],
@@ -364,7 +382,7 @@ const latencyChartOption = computed(() => {
       left: "center",
       textStyle: { color: chartTextColor.value },
     },
-    grid: { left: 16, right: 16, top: 32, bottom: 20, containLabel: true },
+    grid: { left: 16, right: 16, top: 52, bottom: 20, containLabel: true },
     xAxis: {
       type: "category",
       data: dates,
@@ -445,6 +463,17 @@ const loadChannels = async (): Promise<void> => {
   channels.value = response.channels;
 };
 
+const loadRecentSessions = async (): Promise<void> => {
+  try {
+    const data = await apiGetJson<RecentSessionRow[]>(withToken("sessions"));
+    recentSessions.value = [...data]
+      .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+      .slice(0, 8);
+  } catch {
+    recentSessions.value = [];
+  }
+};
+
 onMounted(() => {
   syncThemeMode();
   themeObserver = new MutationObserver(() => {
@@ -456,8 +485,10 @@ onMounted(() => {
   });
   void loadDashboard();
   void loadChannels();
+  void loadRecentSessions();
   refreshTimer = setInterval(() => {
     void loadDashboard();
+    void loadRecentSessions();
   }, 5000);
   channelRefreshTimer = setInterval(() => {
     void loadChannels();
@@ -562,19 +593,32 @@ onUnmounted(() => {
 
       <n-grid-item>
         <n-card title="Latency P50/P95/P99" :bordered="false">
-          <v-chart autoresize :option="latencyChartOption" :theme="chartTheme" class="chart" />
+          <div v-if="latencyStats.length === 0" style="height: 280px; display: flex; align-items: center; justify-content: center">
+            <n-empty description="暂无延迟数据" />
+          </div>
+          <v-chart v-else autoresize :option="latencyChartOption" :theme="chartTheme" class="chart" />
         </n-card>
       </n-grid-item>
 
       <n-grid-item span="2 m:2 l:2">
-        <n-card title="最近任务" :bordered="false">
-          <n-data-table
-            :columns="taskColumns"
-            :data="recentTasks"
-            :loading="loading"
-            :pagination="false"
-            size="small"
-          />
+        <n-card title="最近对话" :bordered="false">
+          <div v-if="recentSessions.length === 0" class="empty-sessions">
+            <n-empty description="暂无对话记录" />
+          </div>
+          <ul v-else class="session-list">
+            <li
+              v-for="session in recentSessions"
+              :key="session.session_id"
+              class="session-item"
+              @click="emit('open-session', session.session_id)"
+            >
+              <div class="session-info">
+                <span class="session-id">{{ session.session_id.slice(0, 50) }}</span>
+                <span class="session-time">{{ formatRelativeTime(session.updated_at) }}</span>
+              </div>
+              <span class="session-count">{{ session.message_count }} 条</span>
+            </li>
+          </ul>
         </n-card>
       </n-grid-item>
     </n-grid>
@@ -686,6 +730,66 @@ onUnmounted(() => {
 .chart {
   height: 280px;
   width: 100%;
+}
+
+.empty-sessions {
+  align-items: center;
+  display: flex;
+  height: 200px;
+  justify-content: center;
+}
+
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.session-item {
+  align-items: center;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  border: 1px solid var(--panel-edge);
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  padding: 12px 16px;
+  transition: all 0.2s ease;
+}
+
+.session-item:hover {
+  background: var(--surface-hover);
+  border-color: var(--primary-color);
+  transform: translateY(-1px);
+}
+
+.session-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.session-id {
+  color: var(--text-color);
+  font-family: monospace;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.session-time {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.session-count {
+  background: var(--surface-active);
+  border-radius: 12px;
+  color: var(--text-color);
+  font-size: 13px;
+  padding: 4px 12px;
 }
 
 @media (max-width: 767px) {
