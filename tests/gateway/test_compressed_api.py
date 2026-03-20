@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from fastapi.testclient import TestClient
 
@@ -27,6 +28,22 @@ class StubRouter:
         return "summary"
 
 
+def _tool_output(stdout: str) -> str:
+    return json.dumps(
+        {
+            "status": "success",
+            "result": {
+                "stdout": stdout,
+                "stderr": "",
+                "exit_code": 0,
+            },
+            "metadata": {},
+            "error_info": "",
+        },
+        ensure_ascii=False,
+    )
+
+
 def _build_client(tmp_path, *, with_compressor: bool = True) -> tuple[TestClient, OutputCompressor | None]:
     compressor = OutputCompressor(router=StubRouter()) if with_compressor else None
     deps = AppDeps(
@@ -43,7 +60,8 @@ def test_get_compressed_original_hit(tmp_path) -> None:
     assert compressor is not None
 
     metadata: dict[str, object] = {"session_id": "s1", "tool_name": "run_command"}
-    asyncio.run(compressor.compress_if_needed("x" * 3001, metadata=metadata))
+    original_output = _tool_output("x" * 110000)
+    asyncio.run(compressor.compress_if_needed(original_output, metadata=metadata))
     compressed_meta = metadata.get("compressed_meta")
     assert isinstance(compressed_meta, dict)
     cache_id = str(compressed_meta["cache_id"])
@@ -57,7 +75,7 @@ def test_get_compressed_original_hit(tmp_path) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["cache_id"] == cache_id
-    assert payload["original_output"] == "x" * 3001
+    assert payload["original_output"] == original_output
 
 
 def test_get_compressed_original_not_found(tmp_path) -> None:

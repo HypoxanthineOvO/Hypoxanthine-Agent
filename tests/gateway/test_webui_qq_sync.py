@@ -156,6 +156,4 @@ def test_webui_origin_conversation_is_mirrored_to_qq_notifications(tmp_path: Pat
             ws.receive_json()
 
     assert mirrored[0] == "[WebUI] User: mirror me"
-    assert mirrored[1].startswith("[WebUI] Assistant: ")
-    assert mirrored[1].endswith("... [完整内容请查看 WebUI]")
-    assert len(mirrored[1]) < len("[WebUI] Assistant: ") + len(long_reply)
+    assert mirrored[1] == f"[WebUI] Assistant: {long_reply}"

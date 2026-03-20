@@ -129,3 +129,23 @@ def test_build_default_pipeline_exposes_all_builtin_tools_in_schema(
         "save_sop",
         "search_sop",
     ]
+
+
+def test_build_default_pipeline_does_not_enable_output_compressor_by_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    deps = app_module.AppDeps(
+        session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+        structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        semantic_memory=StubSemanticMemory(),
+        skill_manager=SkillManager(),
+    )
+
+    monkeypatch.setattr(app_module, "get_memory_dir", lambda: tmp_path / "memory")
+    monkeypatch.setattr(app_module, "load_runtime_model_config", _runtime_config)
+
+    pipeline = app_module._build_default_pipeline(deps)
+
+    assert deps.output_compressor is None
+    assert pipeline.output_compressor is None

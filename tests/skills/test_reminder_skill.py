@@ -480,3 +480,27 @@ def test_create_reminder_tool_includes_confirm_when_auto_confirm_disabled() -> N
     create_tool = next(tool for tool in skill.tools if tool["function"]["name"] == "create_reminder")
     properties = create_tool["function"]["parameters"]["properties"]
     assert "confirm" in properties
+
+
+def test_reminder_tools_define_heartbeat_config_array_items() -> None:
+    skill = ReminderSkill(
+        structured_store=StubStore(),
+        scheduler=StubScheduler(),
+        model_router=StubRouter(),
+    )
+
+    create_tool = next(tool for tool in skill.tools if tool["function"]["name"] == "create_reminder")
+    create_heartbeat = create_tool["function"]["parameters"]["properties"]["heartbeat_config"]
+    assert create_heartbeat["type"] == "array"
+    assert create_heartbeat["items"]["type"] == "object"
+    assert create_heartbeat["items"]["properties"]["check_type"]["enum"] == [
+        "file_exists",
+        "process_running",
+        "http_status",
+        "custom_command",
+    ]
+
+    update_tool = next(tool for tool in skill.tools if tool["function"]["name"] == "update_reminder")
+    update_heartbeat = update_tool["function"]["parameters"]["properties"]["heartbeat_config"]
+    assert update_heartbeat["type"] == "array"
+    assert update_heartbeat["items"]["required"] == ["check_type", "target"]

@@ -128,6 +128,8 @@ services:
     bot_qq: "123456789"
     allowed_users:
       - "10001"
+  tavily:
+    api_key: tvly-live-123
 """.strip(),
         encoding="utf-8",
     )
@@ -181,10 +183,13 @@ def test_config_list_returns_metadata_and_secrets_get_is_masked(tmp_path: Path) 
     assert "providers.Hiapi.api_key" in body["masked_fields"]
     assert "services.email.accounts[0].password" in body["masked_fields"]
     assert "services.qq.napcat_ws_token" in body["masked_fields"]
+    assert "services.tavily.api_key" in body["masked_fields"]
     assert body["data"]["providers"]["Hiapi"]["api_key"] == "••••••••"
     assert body["data"]["services"]["qq"]["napcat_http_token"] == "••••••••"
+    assert body["data"]["services"]["tavily"]["api_key"] == "••••••••"
     assert "sk-live-123" not in body["content"]
     assert "http-secret" not in body["content"]
+    assert "tvly-live-123" not in body["content"]
 
 
 def test_config_put_preserves_masked_secret_values_and_updates_new_values(tmp_path: Path) -> None:
@@ -218,6 +223,9 @@ def test_config_put_preserves_masked_secret_values_and_updates_new_values(tmp_pa
                 "bot_qq": "123456789",
                 "allowed_users": ["10001"],
             },
+            "tavily": {
+                "api_key": "updated-tvly-key",
+            },
         },
     }
 
@@ -232,6 +240,7 @@ def test_config_put_preserves_masked_secret_values_and_updates_new_values(tmp_pa
     body = response.json()
     assert body["reloaded"] is True
     assert body["data"]["services"]["qq"]["napcat_ws_token"] == "••••••••"
+    assert body["data"]["services"]["tavily"]["api_key"] == "••••••••"
 
     stored = yaml.safe_load((tmp_path / "config" / "secrets.yaml").read_text(encoding="utf-8"))
     assert stored["providers"]["Hiapi"]["api_base"] == "https://hiapi.example/v2"
@@ -239,6 +248,7 @@ def test_config_put_preserves_masked_secret_values_and_updates_new_values(tmp_pa
     assert stored["services"]["email"]["accounts"][0]["password"] == "email-password"
     assert stored["services"]["qq"]["napcat_http_token"] == "http-secret"
     assert stored["services"]["qq"]["napcat_ws_token"] == "updated-ws-token"
+    assert stored["services"]["tavily"]["api_key"] == "updated-tvly-key"
 
 
 def test_config_put_validates_yaml_before_write(tmp_path: Path) -> None:

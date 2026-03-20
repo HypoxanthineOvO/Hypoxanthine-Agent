@@ -34,6 +34,7 @@ class EmailScannerSkill(BaseSkill):
     name = "email_scanner"
     description = "Scan emails from IMAP accounts and generate summaries."
     required_permissions: list[str] = []
+    HEARTBEAT_SCAN_STARTED_AT_PREF_KEY = "email_scanner.last_heartbeat_scan_started_at"
 
     def __init__(
         self,
@@ -47,6 +48,7 @@ class EmailScannerSkill(BaseSkill):
         imap_client_factory: Any | None = None,
         attachments_root: Path | str | None = None,
         email_store: EmailStore | None = None,
+        mark_as_read: bool = True,
     ) -> None:
         self.structured_store = structured_store
         self.model_router = model_router
@@ -60,12 +62,13 @@ class EmailScannerSkill(BaseSkill):
             attachments_root = get_memory_dir() / "email_attachments"
         self.attachments_root = Path(attachments_root)
         self.email_store = email_store or EmailStore(root=get_memory_dir() / "emails")
+        self.mark_as_read = bool(mark_as_read)
         self._rules, self._user_preferences = self._load_rule_config()
         self._bootstrap_drafts: dict[str, str] = {}
         self.last_scan_at: str | None = None
         self.emails_processed = 0
         self._scan_in_progress = False
-        self._last_heartbeat_push_at: datetime | None = None
+        self._last_heartbeat_scan_started_at: datetime | None = None
         self._recent_reported_message_ids: deque[str] = deque()
         self._recent_reported_message_id_set: set[str] = set()
 
@@ -406,10 +409,14 @@ class EmailScannerSkill(BaseSkill):
             unread_only = self._parse_bool(params.get("unread_only"))
             hours_back = self._parse_hours_back(params.get("hours_back"))
             scan_started_at = datetime.now(UTC)
+            heartbeat_since_dt = await self._load_last_heartbeat_scan_started_at(
+                triggered_by=triggered_by,
+            )
             cutoff_dt = self._resolve_scan_cutoff(
                 triggered_by=triggered_by,
                 hours_back=hours_back,
                 now=scan_started_at,
+                heartbeat_since_dt=heartbeat_since_dt,
             )
             dedupe_message_ids = (
                 self._recent_reported_message_id_set
@@ -461,12 +468,13 @@ class EmailScannerSkill(BaseSkill):
             )
             self.last_scan_at = datetime.now(UTC).isoformat()
             self.emails_processed += new_emails
-            if triggered_by == "heartbeat" and items:
-                self._remember_reported_message_ids(
-                    str(item.get("message_id") or "")
-                    for item in items
-                )
-                self._last_heartbeat_push_at = scan_started_at
+            if triggered_by == "heartbeat":
+                if items:
+                    self._remember_reported_message_ids(
+                        str(item.get("message_id") or "")
+                        for item in items
+                    )
+                await self._persist_last_heartbeat_scan_started_at(scan_started_at)
             return {
                 "accounts_scanned": accounts_scanned,
                 "accounts_failed": accounts_failed,
@@ -695,7 +703,7 @@ class EmailScannerSkill(BaseSkill):
         client.login(username, password)
         try:
             try:
-                client.select(folder, readonly=True)
+                client.select(folder, readonly=not self.mark_as_read)
             except TypeError:
                 client.select(folder)
 
@@ -766,6 +774,7 @@ class EmailScannerSkill(BaseSkill):
                         account_name=account_name,
                     )
                 )
+                self._mark_message_as_read(client, msg_num)
                 processed_items.append(item)
 
             return processed_items, duplicate_count
@@ -1095,10 +1104,63 @@ class EmailScannerSkill(BaseSkill):
         triggered_by: str,
         hours_back: int,
         now: datetime,
+        heartbeat_since_dt: datetime | None = None,
     ) -> datetime:
-        if triggered_by == "heartbeat" and self._last_heartbeat_push_at is not None:
-            return self._last_heartbeat_push_at
+        if triggered_by == "heartbeat" and heartbeat_since_dt is not None:
+            return heartbeat_since_dt
         return now - timedelta(hours=max(1, hours_back))
+
+    async def _load_last_heartbeat_scan_started_at(
+        self,
+        *,
+        triggered_by: str,
+    ) -> datetime | None:
+        if triggered_by != "heartbeat":
+            return None
+        if self._last_heartbeat_scan_started_at is not None:
+            return self._last_heartbeat_scan_started_at
+
+        getter = getattr(self.structured_store, "get_preference", None)
+        if not callable(getter):
+            return None
+
+        try:
+            raw_value = await getter(self.HEARTBEAT_SCAN_STARTED_AT_PREF_KEY)
+        except Exception:
+            return None
+
+        parsed = self._parse_iso_datetime(raw_value)
+        if parsed is not None:
+            self._last_heartbeat_scan_started_at = parsed
+        return parsed
+
+    async def _persist_last_heartbeat_scan_started_at(self, started_at: datetime) -> None:
+        normalized = started_at.astimezone(UTC)
+        self._last_heartbeat_scan_started_at = normalized
+
+        setter = getattr(self.structured_store, "set_preference", None)
+        if not callable(setter):
+            return
+
+        try:
+            await setter(
+                self.HEARTBEAT_SCAN_STARTED_AT_PREF_KEY,
+                normalized.isoformat(),
+            )
+        except Exception:
+            return
+
+    def _parse_iso_datetime(self, value: Any) -> datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
 
     def _remember_reported_message_ids(self, message_ids: Any) -> None:
         for raw_id in message_ids:
@@ -1125,6 +1187,17 @@ class EmailScannerSkill(BaseSkill):
         tmp = self.rules_path.with_suffix(".tmp")
         tmp.write_text(yaml_content, encoding="utf-8")
         tmp.replace(self.rules_path)
+
+    def _mark_message_as_read(self, client: Any, msg_num: bytes) -> None:
+        if not self.mark_as_read:
+            return
+        store = getattr(client, "store", None)
+        if not callable(store):
+            return
+        try:
+            store(msg_num, "+FLAGS", "(\\Seen)")
+        except Exception:
+            return
 
     def get_status(self, *, scheduler: Any | None = None) -> dict[str, Any]:
         accounts = self._load_accounts()

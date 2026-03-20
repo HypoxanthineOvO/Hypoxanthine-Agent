@@ -8,7 +8,7 @@ import structlog
 from hypo_agent.core.config_loader import expand_runtime_placeholders
 from hypo_agent.models import DirectoryWhitelist, WhitelistRule
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("hypo_agent.security.permission_manager")
 
 Operation = Literal["read", "write", "execute"]
 

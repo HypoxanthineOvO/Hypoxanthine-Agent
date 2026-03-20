@@ -22,6 +22,9 @@ Single-user personal AI assistant with layered memory, skills, and a WebUI gatew
 # Python 3.12 + backend deps
 uv sync
 
+# Optional: enable ImageRenderer (Playwright + Chromium)
+playwright install chromium
+
 # Web deps
 cd web && npm install && cd ..
 ```
@@ -74,6 +77,7 @@ HYPO_TEST_MODE=1 uv run python scripts/agent_cli.py --port 8766 smoke
 
 - 默认不要对部署中的 `8765` 实例直接跑 smoke。
 - `test_run.sh` 会启用 `HYPO_TEST_MODE=1`，数据写入 `test/sandbox/`，且不会注册 QQ adapter。
+- `ImageRenderer` 依赖 Playwright Chromium；未安装时应用仍可启动，但图片渲染功能会显示为 unavailable。
 
 ## Port Convention
 

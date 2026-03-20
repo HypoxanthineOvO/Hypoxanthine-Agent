@@ -12,6 +12,9 @@ __pycache__/
 .worktrees/
 .python-version
 
+# Local sqlite state (should never be committed)
+hypo.db
+
 web/node_modules/
 web/dist/
 web/.vite/
@@ -29,6 +32,7 @@ memory/knowledge/*
 !memory/sessions/
 memory/sessions/*
 !memory/sessions/.gitkeep
+memory_backup_*
 
 # Scripts
 .playwright-cli/

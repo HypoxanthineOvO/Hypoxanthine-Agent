@@ -48,6 +48,23 @@ def test_agent_cli_email_scan_case_skips_when_interval_not_smoke_sized() -> None
     assert "interval_minutes=60" in result.detail
 
 
+def test_agent_cli_agent_search_case_skips_when_tavily_not_configured(monkeypatch) -> None:
+    module = _load_agent_cli_module()
+    monkeypatch.setattr(module, "_has_tavily_api_key", lambda config_path=module.Path("config/secrets.yaml"): False)
+
+    class DummySmoke:
+        async def send(self, text: str) -> None:
+            raise AssertionError(f"send should not be called: {text}")
+
+        async def wait_for_assistant_done(self, timeout: int = 30):
+            raise AssertionError(f"wait_for_assistant_done should not be called: {timeout}")
+
+    result = asyncio.run(module._case_agent_search_tool(DummySmoke()))
+
+    assert result.status.value == "SKIP"
+    assert "tavily" in result.detail.lower()
+
+
 def test_agent_cli_smoke_refuses_production_port_in_test_mode(monkeypatch, capsys) -> None:
     module = _load_agent_cli_module()
     monkeypatch.setenv("HYPO_TEST_MODE", "1")

@@ -301,6 +301,26 @@ def _extract_interval_minutes(tasks_payload: dict[str, Any], key: str) -> tuple[
     return enabled, None
 
 
+def _has_tavily_api_key(config_path: Path = Path("config/secrets.yaml")) -> bool:
+    if not config_path.exists():
+        return False
+
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        return False
+
+    services = payload.get("services")
+    if not isinstance(services, dict):
+        return False
+
+    tavily = services.get("tavily")
+    if not isinstance(tavily, dict):
+        return False
+
+    api_key = tavily.get("api_key")
+    return isinstance(api_key, str) and bool(api_key.strip())
+
+
 def _print_case_result(result: SmokeCaseResult) -> None:
     icon = {
         SmokeStatus.PASS: "✅",
@@ -515,6 +535,46 @@ async def _case_email_scan_trigger(smoke: SmokeSession, tasks_payload: dict[str,
     return SmokeCaseResult("email_scan scheduled trigger", SmokeStatus.PASS, 'message_tag="email_scan" received')
 
 
+async def _case_agent_search_tool(smoke: SmokeSession) -> SmokeCaseResult:
+    if not _has_tavily_api_key():
+        return SmokeCaseResult("agent_search tool regression", SmokeStatus.SKIP, "services.tavily.api_key missing")
+
+    baseline_raw = _query_db_value(
+        "SELECT COALESCE(MAX(id), 0) FROM tool_invocations WHERE tool_name = 'web_search';"
+    )
+    baseline_id = int(baseline_raw) if baseline_raw.isdigit() else 0
+
+    prompt = (
+        "请直接调用 web_search 工具搜索 Tavily Python SDK 官方文档，不要只给纯文本答复。"
+        "搜索词：Tavily Python SDK official docs"
+    )
+    await smoke.send(prompt)
+    done, chunks = await smoke.wait_for_assistant_done(timeout=90)
+    if not done:
+        return SmokeCaseResult("agent_search tool regression", SmokeStatus.FAIL, "assistant_done timeout")
+    if not chunks:
+        return SmokeCaseResult("agent_search tool regression", SmokeStatus.FAIL, "no assistant chunks")
+
+    rows = _query_db_rows(
+        (
+            "SELECT id, status FROM tool_invocations "
+            f"WHERE tool_name = 'web_search' AND id > {baseline_id} "
+            "ORDER BY id DESC LIMIT 1;"
+        )
+    )
+    if not rows:
+        return SmokeCaseResult("agent_search tool regression", SmokeStatus.FAIL, "no new web_search invocation")
+
+    status = rows[0][1] if len(rows[0]) >= 2 else ""
+    if status not in {"success", "partial"}:
+        return SmokeCaseResult(
+            "agent_search tool regression",
+            SmokeStatus.FAIL,
+            f"unexpected invocation status={status or 'unknown'}",
+        )
+    return SmokeCaseResult("agent_search tool regression", SmokeStatus.PASS, f"tool_status={status}")
+
+
 async def _case_qq_non_whitelist_user_mock_async() -> SmokeCaseResult:
     class _DummyPipeline:
         def __init__(self) -> None:
@@ -637,6 +697,8 @@ async def cmd_smoke(*, port: int, session_id: str) -> int:
         results.append(_case_message_tag_integrity(smoke))
         print("[CASE 5] email_scan scheduled trigger")
         results.append(await _case_email_scan_trigger(smoke, tasks_payload))
+        print("[CASE 6] agent_search tool regression")
+        results.append(await _case_agent_search_tool(smoke))
 
     print("=" * 60)
     has_fail = False

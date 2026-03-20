@@ -6,7 +6,7 @@ import re
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from hypo_agent.models import SkillOutput
+from hypo_agent.models import HeartbeatCheck, SkillOutput
 from hypo_agent.skills.base import BaseSkill
 
 
@@ -30,6 +30,10 @@ class ReminderSkill(BaseSkill):
 
     @property
     def tools(self) -> list[dict[str, Any]]:
+        heartbeat_config_schema = {
+            "type": "array",
+            "items": HeartbeatCheck.model_json_schema(),
+        }
         create_params: dict[str, Any] = {
             "type": "object",
             "properties": {
@@ -52,7 +56,7 @@ class ReminderSkill(BaseSkill):
                     ),
                 },
                 "channel": {"type": "string", "default": "all"},
-                "heartbeat_config": {"type": "array"},
+                "heartbeat_config": heartbeat_config_schema,
             },
             "required": ["title", "schedule_type", "schedule_value"],
         }
@@ -129,7 +133,7 @@ class ReminderSkill(BaseSkill):
                                 "enum": ["active", "paused", "completed", "missed", "deleted"],
                             },
                             "next_run_at": {"type": "string"},
-                            "heartbeat_config": {"type": "array"},
+                            "heartbeat_config": heartbeat_config_schema,
                         },
                         "required": ["reminder_id"],
                     },

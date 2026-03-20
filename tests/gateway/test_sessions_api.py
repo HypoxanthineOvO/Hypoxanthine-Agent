@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from hypo_agent.gateway.app import AppDeps, create_app
 from hypo_agent.memory.session import SessionMemory
 from hypo_agent.memory.structured_store import StructuredStore
-from hypo_agent.models import Message
+from hypo_agent.models import Attachment, Message
 
 
 class DummyPipeline:
@@ -45,7 +45,20 @@ def test_get_sessions_returns_session_list(tmp_path) -> None:
 def test_get_session_messages_returns_history(tmp_path) -> None:
     with _build_app(tmp_path) as client:
         client.app.state.session_memory.append(
-            Message(text="first", sender="user", session_id="s1")
+            Message(
+                text="first",
+                sender="user",
+                session_id="s1",
+                attachments=[
+                    Attachment(
+                        type="image",
+                        url="/tmp/demo.png",
+                        filename="demo.png",
+                        mime_type="image/png",
+                        size_bytes=10,
+                    )
+                ],
+            )
         )
         client.app.state.session_memory.append(
             Message(text="second", sender="assistant", session_id="s1")
@@ -56,6 +69,7 @@ def test_get_session_messages_returns_history(tmp_path) -> None:
         payload = resp.json()
         assert [item["text"] for item in payload] == ["first", "second"]
         assert [item["sender"] for item in payload] == ["user", "assistant"]
+        assert payload[0]["attachments"][0]["filename"] == "demo.png"
 
 
 def test_get_session_tool_invocations_requires_token(tmp_path) -> None:

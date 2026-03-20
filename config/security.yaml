@@ -16,6 +16,9 @@ directory_whitelist:
       permissions:
         - read
         - write
+    - path: ~/trendradar/output
+      permissions:
+        - read
     - path: ${HYPO_AGENT_ROOT}/workflows
       permissions:
         - read
@@ -33,7 +36,7 @@ directory_whitelist:
     - ~/.python_history
     - /root
 circuit_breaker:
-  tool_level_max_failures: 5
-  session_level_max_failures: 10
+  tool_level_max_failures: 10
+  session_level_max_failures: 20
   cooldown_seconds: 120
   global_kill_switch: false

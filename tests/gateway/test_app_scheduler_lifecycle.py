@@ -107,6 +107,19 @@ class NoopRouter:
         yield "ok"
 
 
+class RecordingImageRenderer:
+    def __init__(self) -> None:
+        self.initialized = 0
+        self.stopped = 0
+        self.available = True
+
+    async def initialize(self) -> None:
+        self.initialized += 1
+
+    async def shutdown(self) -> None:
+        self.stopped += 1
+
+
 def test_app_lifespan_starts_and_stops_scheduler_and_pipeline_consumer(tmp_path) -> None:
     scheduler = RecordingScheduler()
     pipeline = RecordingPipeline()
@@ -151,6 +164,30 @@ def test_app_lifespan_starts_consumer_after_scheduler_and_callback_wiring(tmp_pa
 
     assert pipeline.consumer_stopped == 1
     assert scheduler.stopped == 1
+
+
+def test_app_lifespan_initializes_and_stops_image_renderer(tmp_path) -> None:
+    scheduler = RecordingScheduler()
+    pipeline = RecordingPipeline()
+    renderer = RecordingImageRenderer()
+    deps = AppDeps(
+        session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+        structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        scheduler=scheduler,
+        event_queue=DummyEventQueue(),
+        image_renderer=renderer,
+    )
+    app = create_app(
+        auth_token="test-token",
+        pipeline=pipeline,
+        deps=deps,
+    )
+
+    with TestClient(app):
+        assert renderer.initialized == 1
+        assert app.state.image_renderer is renderer
+
+    assert renderer.stopped == 1
 
 
 def test_event_consumer_starts_on_lifespan(tmp_path) -> None:
@@ -212,6 +249,85 @@ heartbeat:
         assert scheduler.interval_jobs == [("heartbeat", 1)]
 
 
+def test_app_registers_heartbeat_cron_job_from_tasks_config(tmp_path) -> None:
+    scheduler = RecordingScheduler()
+    pipeline = RecordingPipeline()
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "tasks.yaml").write_text(
+        """
+heartbeat:
+  enabled: true
+  mode: cron
+  cron: "*/10 * * * *"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    class DummyHeartbeatService:
+        async def run(self) -> None:
+            return None
+
+    deps = AppDeps(
+        session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+        structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        scheduler=scheduler,
+        event_queue=DummyEventQueue(),
+        heartbeat_service=DummyHeartbeatService(),
+    )
+    app = create_app(auth_token="test-token", pipeline=pipeline, deps=deps)
+    app.state.config_dir = config_dir
+
+    with TestClient(app):
+        assert scheduler.interval_jobs == []
+        assert scheduler.cron_jobs == [("heartbeat", "*/10 * * * *")]
+
+
+def test_app_registers_trendradar_summary_jobs_from_tasks_config(tmp_path) -> None:
+    scheduler = RecordingScheduler()
+    pipeline = RecordingPipeline()
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "tasks.yaml").write_text(
+        """
+heartbeat:
+  enabled: false
+trendradar_summary:
+  enabled: true
+  interval_minutes: 480
+  time: "09:00,21:00"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    class DummyInfoReachSkill:
+        async def run_scheduled_summary(self) -> dict[str, int]:
+            return {"pushed": 0}
+
+    class DummySkillManager:
+        def __init__(self) -> None:
+            self._skills = {"info_reach": DummyInfoReachSkill()}
+
+    deps = AppDeps(
+        session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+        structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        scheduler=scheduler,
+        event_queue=DummyEventQueue(),
+        skill_manager=DummySkillManager(),
+    )
+    app = create_app(auth_token="test-token", pipeline=pipeline, deps=deps)
+    app.state.config_dir = config_dir
+
+    with TestClient(app):
+        assert scheduler.interval_jobs == []
+        assert scheduler.cron_jobs == [
+            ("trendradar_summary_0900", "0 9 * * *"),
+            ("trendradar_summary_2100", "0 21 * * *"),
+        ]
+
+
 def test_app_points_heartbeat_service_to_config_prompt_file(tmp_path) -> None:
     scheduler = RecordingScheduler()
     pipeline = RecordingPipeline()
@@ -248,6 +364,47 @@ heartbeat:
 
     with TestClient(app):
         assert heartbeat_service.prompt_path == config_dir / "heartbeat_prompt.md"
+
+
+def test_app_registers_trendradar_summary_jobs_from_fixed_times(tmp_path) -> None:
+    scheduler = RecordingScheduler()
+    pipeline = RecordingPipeline()
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "tasks.yaml").write_text(
+        """
+heartbeat:
+  enabled: false
+trendradar_summary:
+  enabled: true
+  interval_minutes: 480
+  time: "09:00,21:00"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    class DummyInfoReachSkill:
+        async def run_scheduled_summary(self) -> None:
+            return None
+
+    class DummySkillManager:
+        def __init__(self) -> None:
+            self._skills = {"info_reach": DummyInfoReachSkill()}
+
+    deps = AppDeps(
+        session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+        structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        scheduler=scheduler,
+        event_queue=DummyEventQueue(),
+        skill_manager=DummySkillManager(),
+    )
+    app = create_app(auth_token="test-token", pipeline=pipeline, deps=deps)
+    app.state.config_dir = config_dir
+
+    with TestClient(app):
+        assert ("trendradar_summary_0900", "0 9 * * *") in scheduler.cron_jobs
+        assert ("trendradar_summary_2100", "0 21 * * *") in scheduler.cron_jobs
 
 
 def test_app_ignores_legacy_email_scan_interval_config(tmp_path) -> None:

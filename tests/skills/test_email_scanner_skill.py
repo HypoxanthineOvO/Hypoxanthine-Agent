@@ -20,6 +20,7 @@ class StubStore:
     def __init__(self) -> None:
         self._processed: set[tuple[str, str]] = set()
         self.records: list[dict] = []
+        self.preferences: dict[str, str] = {}
 
     async def has_processed_email(self, account_name: str, message_id: str) -> bool:
         return (account_name, message_id) in self._processed
@@ -31,6 +32,12 @@ class StubStore:
         self._processed.add(key)
         self.records.append(dict(kwargs))
         return True
+
+    async def get_preference(self, key: str) -> str | None:
+        return self.preferences.get(key)
+
+    async def set_preference(self, key: str, value: str) -> None:
+        self.preferences[key] = value
 
 
 def _write_rules(path: Path) -> None:
@@ -319,7 +326,7 @@ def test_scan_emails_iterates_accounts_and_isolates_failures(tmp_path: Path) -> 
     assert result["new_emails"] == 1
 
 
-def test_scan_emails_uses_peek_without_marking_seen(tmp_path: Path) -> None:
+def test_scan_emails_uses_peek_and_marks_seen_after_success_by_default(tmp_path: Path) -> None:
     rules_path = tmp_path / "email_rules.yaml"
     secrets_path = tmp_path / "secrets.yaml"
     _write_rules(rules_path)
@@ -343,9 +350,72 @@ def test_scan_emails_uses_peek_without_marking_seen(tmp_path: Path) -> None:
     )
 
     asyncio.run(skill.scan_emails(params={}))
-    assert main_imap.store_calls == []
     assert main_imap.fetch_calls
     assert main_imap.fetch_calls[0][1] == "(BODY.PEEK[])"
+    assert main_imap.store_calls == [(b"1", "+FLAGS", "(\\Seen)")]
+
+
+def test_scan_emails_can_disable_mark_as_read(tmp_path: Path) -> None:
+    rules_path = tmp_path / "email_rules.yaml"
+    secrets_path = tmp_path / "secrets.yaml"
+    _write_rules(rules_path)
+    _write_secrets(secrets_path)
+    main_imap = FakeImap([_email_bytes("<m2b>", "boss@example.com", "【紧急】发布", "请处理")])
+
+    def factory(host: str, port: int):
+        del port
+        if host == "imap.main.local":
+            return main_imap
+        return FakeImap([])
+
+    skill = EmailScannerSkill(
+        structured_store=StubStore(),
+        model_router=None,
+        message_queue=None,
+        rules_path=rules_path,
+        secrets_path=secrets_path,
+        imap_client_factory=factory,
+        mark_as_read=False,
+    )
+
+    asyncio.run(skill.scan_emails(params={}))
+
+    assert main_imap.fetch_calls
+    assert main_imap.store_calls == []
+
+
+def test_scan_emails_does_not_mark_seen_when_processing_fails(tmp_path: Path) -> None:
+    rules_path = tmp_path / "email_rules.yaml"
+    secrets_path = tmp_path / "secrets.yaml"
+    _write_rules(rules_path)
+    _write_secrets(secrets_path)
+    main_imap = FakeImap([_email_bytes("<m2c>", "boss@example.com", "【紧急】发布", "请处理")])
+
+    def factory(host: str, port: int):
+        del port
+        if host == "imap.main.local":
+            return main_imap
+        return FakeImap([])
+
+    skill = EmailScannerSkill(
+        structured_store=StubStore(),
+        model_router=None,
+        message_queue=None,
+        rules_path=rules_path,
+        secrets_path=secrets_path,
+        imap_client_factory=factory,
+    )
+
+    async def fail_classify(_: dict[str, str]) -> dict[str, str]:
+        raise RuntimeError("classification failed")
+
+    skill._classify_email = fail_classify  # type: ignore[method-assign]
+
+    result = asyncio.run(skill.scan_emails(params={}))
+
+    assert result["accounts_failed"] == 1
+    assert result["new_emails"] == 0
+    assert main_imap.store_calls == []
 
 def test_scan_emails_repeated_user_scans_still_return_recent_mail(tmp_path: Path) -> None:
     rules_path = tmp_path / "email_rules.yaml"
@@ -568,6 +638,81 @@ def test_scheduled_scan_does_not_repeat_already_reported_emails(tmp_path: Path) 
         assert queue.empty() is True
 
     asyncio.run(_run())
+
+
+def test_heartbeat_scan_uses_persisted_last_scan_timestamp(tmp_path: Path) -> None:
+    rules_path = tmp_path / "email_rules.yaml"
+    secrets_path = tmp_path / "secrets.yaml"
+    _write_rules(rules_path)
+    _write_secrets(secrets_path)
+    store = StubStore()
+    now = datetime.now(UTC)
+    store.preferences["email_scanner.last_heartbeat_scan_started_at"] = (
+        now - timedelta(minutes=30)
+    ).isoformat()
+    messages = [
+        _email_bytes(
+            "<old-heartbeat>",
+            "boss@example.com",
+            "旧邮件",
+            "旧内容",
+            received_at=now - timedelta(hours=2),
+        ),
+        _email_bytes(
+            "<new-heartbeat>",
+            "boss@example.com",
+            "新邮件",
+            "新内容",
+            received_at=now - timedelta(minutes=10),
+        ),
+    ]
+
+    def factory(host: str, port: int):
+        del port
+        if host == "imap.main.local":
+            return FakeImap(messages)
+        return FakeImap([])
+
+    skill = EmailScannerSkill(
+        structured_store=store,
+        model_router=None,
+        message_queue=None,
+        rules_path=rules_path,
+        secrets_path=secrets_path,
+        imap_client_factory=factory,
+    )
+
+    result = asyncio.run(skill.scan_emails(params={"triggered_by": "heartbeat"}))
+
+    assert result["new_emails"] == 1
+    assert [item["message_id"] for item in result["items"]] == ["<new-heartbeat>"]
+
+
+def test_heartbeat_scan_persists_started_at_timestamp(tmp_path: Path) -> None:
+    rules_path = tmp_path / "email_rules.yaml"
+    secrets_path = tmp_path / "secrets.yaml"
+    _write_rules(rules_path)
+    _write_secrets(secrets_path)
+    store = StubStore()
+
+    def factory(host: str, port: int):
+        del port
+        if host == "imap.main.local":
+            return FakeImap([])
+        return FakeImap([])
+
+    skill = EmailScannerSkill(
+        structured_store=store,
+        model_router=None,
+        message_queue=None,
+        rules_path=rules_path,
+        secrets_path=secrets_path,
+        imap_client_factory=factory,
+    )
+
+    asyncio.run(skill.scan_emails(params={"triggered_by": "heartbeat"}))
+
+    assert "email_scanner.last_heartbeat_scan_started_at" in store.preferences
 
 
 def test_scan_emails_updates_email_store_index(tmp_path: Path) -> None:

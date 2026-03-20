@@ -178,18 +178,23 @@ providers:
         load_runtime_model_config(models_yaml, secrets_yaml)
 
 
-def test_load_tasks_config_accepts_heartbeat_and_email_store(tmp_path: Path) -> None:
+def test_load_tasks_config_accepts_heartbeat_email_store_and_trendradar_summary(tmp_path: Path) -> None:
     tasks_yaml = tmp_path / "tasks.yaml"
     tasks_yaml.write_text(
         """
 heartbeat:
   enabled: true
   interval_minutes: 1
+  max_rounds: 8
 email_store:
   enabled: true
   max_entries: 4000
   retention_days: 60
   warmup_hours: 72
+trendradar_summary:
+  enabled: true
+  interval_minutes: 480
+  time: "09:00,21:00"
 """.strip(),
         encoding="utf-8",
     )
@@ -198,10 +203,33 @@ email_store:
 
     assert tasks.heartbeat.enabled is True
     assert tasks.heartbeat.interval_minutes == 1
+    assert tasks.heartbeat.max_rounds == 8
     assert tasks.email_store.enabled is True
     assert tasks.email_store.max_entries == 4000
     assert tasks.email_store.retention_days == 60
     assert tasks.email_store.warmup_hours == 72
+    assert tasks.trendradar_summary.enabled is True
+    assert tasks.trendradar_summary.interval_minutes == 480
+    assert tasks.trendradar_summary.time == "09:00,21:00"
+
+
+def test_load_tasks_config_accepts_heartbeat_cron_schedule(tmp_path: Path) -> None:
+    tasks_yaml = tmp_path / "tasks.yaml"
+    tasks_yaml.write_text(
+        """
+heartbeat:
+  enabled: true
+  mode: cron
+  cron: "*/10 * * * *"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    tasks = load_tasks_config(tasks_yaml)
+
+    assert tasks.heartbeat.enabled is True
+    assert tasks.heartbeat.mode == "cron"
+    assert tasks.heartbeat.cron == "*/10 * * * *"
 
 
 def test_memory_dir_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -307,12 +335,38 @@ system_prompt_template: |
     assert "${HYPO_AGENT_ROOT}" not in rendered
 
 
+def test_load_persona_config_accepts_multiline_personality_string(tmp_path: Path) -> None:
+    persona_yaml = tmp_path / "persona.yaml"
+    persona_yaml.write_text(
+        """
+name: Hypo
+aliases: [hypo]
+personality: |
+  搞心态沙雕小助手，日常吐槽、整活、逗乐；
+  遇到正事立刻切换专业模式，认真高效；
+  能自动识别并接受新昵称。
+speaking_style:
+  tone: direct
+""".strip(),
+        encoding="utf-8",
+    )
+
+    persona = load_persona_config(persona_yaml)
+
+    assert persona.personality == [
+        "搞心态沙雕小助手，日常吐槽、整活、逗乐",
+        "遇到正事立刻切换专业模式，认真高效",
+        "能自动识别并接受新昵称。",
+    ]
+
+
 def test_default_persona_mentions_directory_index_knowledge_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("HYPO_AGENT_ROOT", "/home/heyx/Hypo-Agent")
+    fixture_path = Path(__file__).resolve().parent.parent / "fixtures" / "example_persona.yaml"
 
-    rendered = render_persona_system_prompt(load_persona_config(Path("config/persona.yaml")))
+    rendered = render_persona_system_prompt(load_persona_config(fixture_path))
 
     assert "memory/knowledge/directory_index.yaml" in rendered
 

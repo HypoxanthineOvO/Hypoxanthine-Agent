@@ -13,7 +13,7 @@ from hypo_agent.models import SkillOutput
 from hypo_agent.security.permission_manager import PermissionManager
 from hypo_agent.skills.base import BaseSkill
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("hypo_agent.core.skill_manager")
 
 BuiltinToolHandler = Callable[..., Awaitable[SkillOutput] | SkillOutput]
 

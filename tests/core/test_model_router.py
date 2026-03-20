@@ -123,6 +123,78 @@ def test_model_router_fallback_on_failure(runtime_config: RuntimeModelConfig) ->
     ]
 
 
+def test_model_router_fallback_sanitizes_tool_call_ids_for_gpt5_responses_models() -> None:
+    runtime = RuntimeModelConfig.model_validate(
+        {
+            "default_model": "DeepseekV3_2",
+            "task_routing": {"chat": "DeepseekV3_2"},
+            "models": {
+                "DeepseekV3_2": {
+                    "provider": "volcengine_coding",
+                    "litellm_model": "openai/deepseek-v3.2",
+                    "fallback": "GPT",
+                    "api_base": "https://ark.cn-beijing.volces.com/api/v3",
+                    "api_key": "volc-key",
+                },
+                "GPT": {
+                    "provider": "AISTOCK",
+                    "litellm_model": "openai/gpt-5.2",
+                    "fallback": None,
+                    "api_base": "https://api.openai.example/v1",
+                    "api_key": "gpt-key",
+                },
+            },
+        }
+    )
+    captured: list[dict] = []
+    original_tool_call_id = "call_fXveNA5ZEadmkDm42ZZS7HnI"
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": original_tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "run_command",
+                        "arguments": "{\"command\": \"echo hi\"}",
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": original_tool_call_id,
+            "content": "{\"status\": \"success\", \"result\": \"hi\"}",
+        },
+    ]
+
+    async def fake_acompletion(**kwargs):
+        captured.append(kwargs)
+        if kwargs["model"] == "openai/deepseek-v3.2":
+            raise RuntimeError("primary failed")
+        return {
+            "choices": [{"message": {"content": "fallback ok", "tool_calls": []}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    router = ModelRouter(runtime, acompletion_fn=fake_acompletion)
+    text = asyncio.run(router.call("DeepseekV3_2", messages))
+
+    assert text == "fallback ok"
+    assert len(captured) == 2
+    assert captured[0]["messages"][0]["tool_calls"][0]["id"] == original_tool_call_id
+    assert captured[1]["model"] == "openai/gpt-5.2"
+    assert captured[1]["messages"][0]["tool_calls"][0]["id"].startswith("fc_")
+    assert (
+        captured[1]["messages"][1]["tool_call_id"]
+        == captured[1]["messages"][0]["tool_calls"][0]["id"]
+    )
+    assert messages[0]["tool_calls"][0]["id"] == original_tool_call_id
+    assert messages[1]["tool_call_id"] == original_tool_call_id
+
+
 def test_model_router_skips_null_provider_model(
     runtime_config_with_null_head: RuntimeModelConfig,
 ) -> None:

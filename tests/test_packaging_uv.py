@@ -25,6 +25,9 @@ def test_pyproject_declares_core_runtime_and_dev_dependencies() -> None:
     assert "litellm>=1.60.0,<2.0.0" in dependencies
     assert "websockets>=16.0,<17.0" in dependencies
     assert "tiktoken>=0.12.0,<1.0.0" in dependencies
+    assert "tavily-python>=0.7.0,<1.0.0" in dependencies
+    assert "python-multipart>=0.0.22" in dependencies
+    assert "playwright>=1.54.0,<2.0.0" in dependencies
     assert "pytest>=8.0.0,<9.0.0" in dev_dependencies
     assert "pytest-cov>=5.0.0,<6.0.0" in dev_dependencies
 

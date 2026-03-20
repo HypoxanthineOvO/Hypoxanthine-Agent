@@ -7,7 +7,7 @@ import structlog
 
 from hypo_agent.models import CircuitBreakerConfig
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("hypo_agent.security.circuit_breaker")
 
 
 class CircuitBreaker:

@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict
 import structlog
 
 router = APIRouter(prefix="/api")
-logger = structlog.get_logger()
+logger = structlog.get_logger("hypo_agent.gateway.kill_switch_api")
 
 
 class KillSwitchPayload(BaseModel):

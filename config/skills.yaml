@@ -8,6 +8,13 @@ skills:
     timeout_seconds: 30
   filesystem:
     enabled: true
+  agent_search:
+    enabled: true
+  info_reach:
+    enabled: true
+    output_root: ~/trendradar/output
+  export:
+    enabled: true
   qq:
     enabled: true
   reminder:
@@ -15,3 +22,4 @@ skills:
     auto_confirm: true
   email_scanner:
     enabled: true
+    mark_as_read: true

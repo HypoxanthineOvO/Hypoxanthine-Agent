@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 
 from hypo_agent.channels.qq_channel import QQChannelService
+from pathlib import Path
+
 from hypo_agent.models import Message
 
 
@@ -139,5 +141,60 @@ def test_qq_channel_push_proactive_to_allowed_users() -> None:
         )
 
         assert set(pushed) == {"10001", "10002"}
+
+    asyncio.run(_run())
+
+
+def test_qq_channel_downloads_image_attachments_immediately(tmp_path: Path) -> None:
+    async def _run() -> None:
+        service = QQChannelService(
+            napcat_http_url="http://localhost:3000",
+            bot_qq="123456789",
+            allowed_users={"10001"},
+            uploads_dir=tmp_path / "uploads",
+        )
+        pipeline = PipelineStub()
+
+        def fake_download_remote_file(*, url: str, target_path: str) -> dict[str, object]:
+            del url
+            path = Path(target_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"fake-png")
+            return {
+                "mime_type": "image/png",
+                "size_bytes": path.stat().st_size,
+            }
+
+        service.adapter.download_remote_file = fake_download_remote_file  # type: ignore[attr-defined,method-assign]
+
+        ok = await service.handle_onebot_event(
+            {
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": "10001",
+                "message": [
+                    {"type": "text", "data": {"text": "帮我看下这张图"}},
+                    {
+                        "type": "image",
+                        "data": {
+                            "file": "cat.png",
+                            "url": "http://napcat.local/file/cat.png",
+                        },
+                    },
+                ],
+            },
+            pipeline=pipeline,
+        )
+
+        assert ok is True
+        assert len(pipeline.inbounds) == 1
+        inbound = pipeline.inbounds[0]
+        assert inbound.text == "帮我看下这张图 [图片]"
+        assert len(inbound.attachments) == 1
+        attachment = inbound.attachments[0]
+        assert attachment.type == "image"
+        assert attachment.filename == "cat.png"
+        assert attachment.mime_type == "image/png"
+        assert Path(attachment.url).exists()
 
     asyncio.run(_run())

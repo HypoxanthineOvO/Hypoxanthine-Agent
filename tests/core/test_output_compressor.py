@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 
 from hypo_agent.core.output_compressor import OutputCompressor
@@ -34,6 +35,22 @@ class StubRouter:
         return self.response_fn(model_name=model_name, messages=messages, session_id=session_id)
 
 
+def _tool_output(stdout: str, *, stderr: str = "", exit_code: int = 0) -> str:
+    return json.dumps(
+        {
+            "status": "success" if exit_code == 0 else "error",
+            "result": {
+                "stdout": stdout,
+                "stderr": stderr,
+                "exit_code": exit_code,
+            },
+            "metadata": {},
+            "error_info": "" if exit_code == 0 else f"Command exited with status {exit_code}",
+        },
+        ensure_ascii=False,
+    )
+
+
 def test_output_compressor_passthrough_under_threshold() -> None:
     router = StubRouter(lambda **_: "unused")
     compressor = OutputCompressor(router=router)
@@ -47,18 +64,45 @@ def test_output_compressor_passthrough_under_threshold() -> None:
     asyncio.run(_run())
 
 
-def test_output_compressor_single_pass_for_medium_output() -> None:
+def test_output_compressor_keeps_moderate_structured_tool_output() -> None:
     router = StubRouter(lambda **_: "summary text")
     compressor = OutputCompressor(router=router)
-    large = "a" * 3000
+    stdout = "\n".join(
+        f"user{i:03d} {('python worker ' * 20).strip()}"
+        for i in range(90)
+    )
+    large = _tool_output(stdout)
 
     async def _run() -> None:
         output, compressed = await compressor.compress_if_needed(
             large,
             metadata={"session_id": "s1"},
         )
+        assert len(large) > compressor.threshold_chars
+        assert compressed is False
+        assert output == large
+        assert router.calls == []
+
+    asyncio.run(_run())
+
+
+def test_output_compressor_single_pass_for_line_heavy_output() -> None:
+    router = StubRouter(lambda **_: "summary text")
+    compressor = OutputCompressor(router=router)
+    stdout = "\n".join(
+        f"2026-03-17T00:{i % 60:02d}:00Z worker[{i:04d}] {'x' * 60}"
+        for i in range(420)
+    )
+    large = _tool_output(stdout)
+
+    async def _run() -> None:
+        output, compressed = await compressor.compress_if_needed(
+            large,
+            metadata={"session_id": "s1"},
+        )
+        assert len(large) > compressor.threshold_chars
         assert compressed is True
-        assert len(output) <= 2500
+        assert len(output) <= compressor.target_chars
         assert "summary text" in output
         assert len(router.calls) == 1
 
@@ -68,7 +112,7 @@ def test_output_compressor_single_pass_for_medium_output() -> None:
 def test_output_compressor_chunked_compression_for_very_large_output() -> None:
     router = StubRouter(lambda **_: "chunk summary")
     compressor = OutputCompressor(router=router)
-    huge = "b" * 170000
+    huge = _tool_output("b" * 170000)
 
     async def _run() -> None:
         output, compressed = await compressor.compress_if_needed(
@@ -76,7 +120,7 @@ def test_output_compressor_chunked_compression_for_very_large_output() -> None:
             metadata={"session_id": "s1"},
         )
         assert compressed is True
-        assert len(output) <= 2500
+        assert len(output) <= compressor.target_chars
         assert len(router.calls) >= 2
 
     asyncio.run(_run())
@@ -88,11 +132,13 @@ def test_output_compressor_stops_after_max_iterations() -> None:
         router=router,
         threshold_chars=2500,
         target_chars=2500,
+        hard_threshold_chars=2500,
+        structured_passthrough_chars=2500,
         max_chunk_chars=80000,
         chunk_model_limit_chars=10000,
         max_iterations=3,
     )
-    large = "c" * 3000
+    large = _tool_output("c" * 3000)
 
     async def _run() -> None:
         output, compressed = await compressor.compress_if_needed(
@@ -101,7 +147,7 @@ def test_output_compressor_stops_after_max_iterations() -> None:
         )
         assert compressed is True
         assert len(router.calls) == 3
-        assert len(output) <= 2500
+        assert len(output) <= compressor.target_chars
 
     asyncio.run(_run())
 
@@ -113,14 +159,14 @@ def test_output_compressor_keeps_recent_original_cache_of_ten_entries() -> None:
     async def _run() -> None:
         for i in range(11):
             await compressor.compress_if_needed(
-                "x" * 3000 + str(i),
+                _tool_output("x" * 110000 + str(i)),
                 metadata={"session_id": "s1", "index": i},
             )
 
         cache = compressor.get_recent_originals()
         assert len(cache) == 10
         originals = [item["output"] for item in cache.values()]
-        assert "x" * 3000 + "0" not in originals
+        assert _tool_output("x" * 110000 + "0") not in originals
 
     asyncio.run(_run())
 
@@ -131,7 +177,7 @@ def test_compression_marker_appended() -> None:
 
     async def _run() -> None:
         output, compressed = await compressor.compress_if_needed(
-            "y" * 3000,
+            _tool_output("y" * 110000),
             metadata={"session_id": "s1"},
         )
         assert compressed is True
@@ -149,13 +195,14 @@ def test_output_compressor_writes_compressed_meta_to_input_metadata() -> None:
 
     async def _run() -> None:
         metadata: dict[str, object] = {"session_id": "s1", "tool_name": "run_command"}
+        original_output = _tool_output("z" * 110000)
         output, compressed = await compressor.compress_if_needed(
-            "z" * 3000,
+            original_output,
             metadata=metadata,
         )
 
         assert compressed is True
-        assert len(output) <= 2500
+        assert len(output) <= compressor.target_chars
         compressed_meta = metadata.get("compressed_meta")
         assert isinstance(compressed_meta, dict)
         assert set(compressed_meta.keys()) == {
@@ -163,9 +210,9 @@ def test_output_compressor_writes_compressed_meta_to_input_metadata() -> None:
             "original_chars",
             "compressed_chars",
         }
-        assert int(compressed_meta["original_chars"]) == 3000
+        assert int(compressed_meta["original_chars"]) == len(original_output)
         assert int(compressed_meta["compressed_chars"]) == len(output)
         cache_id = str(compressed_meta["cache_id"])
-        assert compressor.get_original_output(cache_id) == "z" * 3000
+        assert compressor.get_original_output(cache_id) == original_output
 
     asyncio.run(_run())

@@ -33,10 +33,13 @@ skills:
     enabled: true
   filesystem:
     enabled: true
+  agent_search:
+    enabled: true
   reminder:
     enabled: true
   email_scanner:
     enabled: true
+    mark_as_read: false
 """.strip(),
         encoding="utf-8",
     )
@@ -65,10 +68,12 @@ skills:
     assert deps.skill_manager._structured_store is deps.structured_store
     assert deps.skill_manager._skills["code_run"].permission_manager is deps.permission_manager
     assert deps.skill_manager._skills["filesystem"].permission_manager is deps.permission_manager
+    assert deps.skill_manager._skills["agent_search"].secrets_path == Path("config/secrets.yaml")
     assert deps.skill_manager._skills["reminder"].structured_store is deps.structured_store
     assert deps.skill_manager._skills["reminder"].scheduler is deps.scheduler
     assert deps.skill_manager._skills["reminder"].auto_confirm is True
     assert deps.skill_manager._skills["email_scanner"].structured_store is deps.structured_store
+    assert deps.skill_manager._skills["email_scanner"].mark_as_read is False
     assert deps.event_queue is not None
     assert deps.scheduler is not None
 
