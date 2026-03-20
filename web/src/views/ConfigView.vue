@@ -338,7 +338,10 @@ watch(activeMode, (nextMode, previousMode) => {
     color-mix(in srgb, var(--panel) 94%, transparent);
   border: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
   border-radius: 1.1rem;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
+  overflow-y: auto;
 }
 
 .editor-header {

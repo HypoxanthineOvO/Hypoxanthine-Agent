@@ -137,6 +137,8 @@ const attachmentLabel = (rawPath: string, filename?: string | null): string =>
   display: grid;
   gap: 0.55rem;
   min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   padding: 0.6rem 0.72rem;
 }
 

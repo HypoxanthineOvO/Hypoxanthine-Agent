@@ -104,6 +104,12 @@ const rootObject = computed<Record<string, unknown>>(() =>
   isRecord(props.modelValue) ? props.modelValue : {},
 );
 
+const isSkillsRoot = computed(() => props.fileName === 'skills.yaml' && props.path === '');
+const skillsEntries = computed(() => {
+  const skillsObj = rootObject.value.skills;
+  return isRecord(skillsObj) ? Object.entries(skillsObj) : [];
+});
+
 const isPersonaRoot = computed(() => props.fileName === "persona.yaml" && props.path === "");
 const visibleEntries = computed(() => Object.entries(rootObject.value));
 
@@ -277,10 +283,114 @@ const updatePersonaExtraSpeaking = (next: unknown): void => {
   }
   updatePersonaSpeakingStyle(next);
 };
+
+const updateSkillField = (skillName: string, field: string, value: unknown): void => {
+  const currentSkills = isRecord(rootObject.value.skills) ? rootObject.value.skills : {};
+  const currentSkill = isRecord(currentSkills[skillName]) ? currentSkills[skillName] : {};
+
+  updateObjectField("skills", {
+    ...currentSkills,
+    [skillName]: {
+      ...currentSkill,
+      [field]: value,
+    },
+  });
+};
 </script>
 
 <template>
-  <div v-if="fileName === 'tasks.yaml' && path === ''" class="tasks-layout">
+  <div v-if="isSkillsRoot" class="skills-layout">
+    <div
+      v-for="[key, value] in visibleEntries"
+      :key="key"
+      class="skill-root-item"
+    >
+      <div v-if="key !== 'skills'" class="skill-global-config">
+        <div v-if="typeof value === 'boolean'" class="field-row">
+          <label class="field-label">{{ key }}</label>
+          <n-switch
+            :value="value"
+            :data-testid="testIdFor(pathFor(key))"
+            @update:value="(next) => updateObjectField(key, next)"
+          />
+        </div>
+        <div v-else-if="typeof value === 'number'" class="field-row">
+          <label class="field-label">{{ key }}</label>
+          <n-input-number
+            :value="value"
+            :data-testid="testIdFor(pathFor(key))"
+            @update:value="(next) => updateObjectField(key, next ?? 0)"
+          />
+        </div>
+        <div v-else-if="typeof value === 'string'" class="field-row">
+          <label class="field-label">{{ key }}</label>
+          <n-input
+            :value="value"
+            :data-testid="testIdFor(pathFor(key))"
+            @update:value="(next) => updateObjectField(key, next)"
+          />
+        </div>
+      </div>
+
+      <n-card v-else title="技能列表" :bordered="false" class="skills-card">
+        <n-collapse
+          class="skills-collapse"
+        >
+          <n-collapse-item
+            v-for="[skillName, skillConfig] in skillsEntries"
+            :key="skillName"
+            :name="skillName"
+          >
+            <template #header>
+              <div class="skill-header">
+                <span class="skill-name">{{ skillName }}</span>
+                <n-switch
+                  :value="isRecord(skillConfig) ? Boolean(skillConfig.enabled) : false"
+                  :data-testid="`skill-enable-${skillName}`"
+                  @click.stop
+                  @update:value="(next) => updateSkillField(skillName, 'enabled', next)"
+                />
+              </div>
+            </template>
+
+            <div v-if="isRecord(skillConfig)" class="skill-advanced-fields">
+              <div
+                v-for="[fieldKey, fieldValue] in Object.entries(skillConfig).filter(([k]) => k !== 'enabled')"
+                :key="fieldKey"
+              >
+                <div v-if="typeof fieldValue === 'boolean'" class="field-row">
+                  <label class="field-label">{{ fieldKey }}</label>
+                  <n-switch
+                    :value="fieldValue"
+                    :data-testid="`skill-${skillName}-${fieldKey}`"
+                    @update:value="(next) => updateSkillField(skillName, fieldKey, next)"
+                  />
+                </div>
+                <div v-else-if="typeof fieldValue === 'number'" class="field-row">
+                  <label class="field-label">{{ fieldKey }}</label>
+                  <n-input-number
+                    :value="fieldValue"
+                    :data-testid="`skill-${skillName}-${fieldKey}`"
+                    @update:value="(next) => updateSkillField(skillName, fieldKey, next ?? 0)"
+                  />
+                </div>
+                <div v-else-if="typeof fieldValue === 'string'" class="field-row">
+                  <label class="field-label">{{ fieldKey }}</label>
+                  <n-input
+                    :value="fieldValue"
+                    :data-testid="`skill-${skillName}-${fieldKey}`"
+                    @update:value="(next) => updateSkillField(skillName, fieldKey, next)"
+                  />
+                </div>
+              </div>
+            </div>
+          </n-collapse-item>
+        </n-collapse>
+      </n-card>
+    </div>
+  </div>
+
+  <div v-else-if="fileName === 'tasks.yaml' && path === ''" class="tasks-layout">
     <n-card
       v-for="[key, value] in taskEntries"
       :key="key"
@@ -602,6 +712,49 @@ const updatePersonaExtraSpeaking = (next: unknown): void => {
 .tasks-layout {
   display: grid;
   gap: 1rem;
+}
+
+.skills-layout {
+  display: grid;
+  gap: 1rem;
+}
+
+.skill-root-item {
+  display: grid;
+  gap: 1rem;
+}
+
+.skill-global-config {
+  background: color-mix(in srgb, var(--surface) 95%, transparent);
+  border: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
+  border-radius: 0.8rem;
+  padding: 1.25rem;
+}
+
+.skills-card {
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--brand) 6%, transparent), transparent 60%),
+    color-mix(in srgb, var(--surface) 95%, transparent);
+  border: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
+  border-radius: 1rem;
+}
+
+.skill-header {
+  align-items: center;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.skill-name {
+  font-weight: 600;
+}
+
+.skill-advanced-fields {
+  display: grid;
+  gap: 0.85rem;
+  padding: 0.5rem 0;
 }
 
 .persona-layout {

@@ -584,6 +584,18 @@ watch(
   },
 );
 
+watch(
+  () => props.sessionId,
+  (newId) => {
+    const normalized = (newId ?? '').trim() || 'main';
+    if (normalized !== activeSessionId.value) {
+      activeSessionId.value = normalized;
+      replaceMessages([]);
+      void loadSessionMessages(normalized);
+    }
+  },
+);
+
 watch(lastError, (error) => {
   if (!error || error.session_id !== activeSessionId.value || notification === null) {
     return;
@@ -1019,8 +1031,6 @@ useHotkey([
   flex-direction: column;
   gap: 0.7rem;
   padding: 0.85rem;
-  position: sticky;
-  bottom: 0;
 }
 
 .composer[data-drag-active="true"] {

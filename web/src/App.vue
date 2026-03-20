@@ -26,6 +26,12 @@ const apiBase = import.meta.env.VITE_API_BASE ?? "";
 
 const { mode, theme, toggleMode } = useThemeMode();
 const activeView = ref<"chat" | "dashboard" | "config" | "memory">("chat");
+const activeChatSessionId = ref<string>("");
+
+const onOpenSession = (sessionId: string) => {
+  activeView.value = "chat";
+  activeChatSessionId.value = sessionId;
+};
 const navItems = [
   { key: "chat", icon: "💬", label: "Chat" },
   { key: "dashboard", icon: "📊", label: "Dashboard" },
@@ -149,6 +155,7 @@ onUnmounted(() => {
             <section class="main-body">
               <ChatView
                 v-if="activeView === 'chat'"
+                :session-id="activeChatSessionId"
                 :ws-url="wsUrl"
                 :token="token"
                 :api-base="apiBase"
@@ -157,6 +164,7 @@ onUnmounted(() => {
                 v-else-if="activeView === 'dashboard'"
                 :token="token"
                 :api-base="apiBase"
+                @open-session="onOpenSession"
               />
               <ConfigView
                 v-else-if="activeView === 'config'"

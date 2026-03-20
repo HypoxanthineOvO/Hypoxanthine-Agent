@@ -2,6 +2,7 @@
 import {
   NButton,
   NCard,
+  NDataTable,
   NInput,
   NInputGroup,
   NInputNumber,
@@ -100,6 +101,16 @@ const filteredFiles = computed(() =>
 );
 
 const tableRows = computed(() => tableData.value?.rows ?? []);
+const tableColumns = computed(() => {
+  if (tableRows.value.length === 0) return [];
+  const firstRow = tableRows.value[0];
+  if (!firstRow) return [];
+  return Object.keys(firstRow).map((key) => ({
+    title: key,
+    key,
+    ellipsis: { tooltip: true },
+  }));
+});
 
 const loadSessions = async (): Promise<void> => {
   const data = await apiGetJson<SessionSummary[]>(withToken("sessions"));
@@ -291,7 +302,12 @@ watch(activeFile, () => {
                 <n-button @click="exportSession">导出</n-button>
                 <n-button type="error" secondary @click="deleteSession">删除会话</n-button>
               </div>
-              <pre class="preview">{{ JSON.stringify(sessionMessages, null, 2) }}</pre>
+              <MonacoEditor
+                :model-value="JSON.stringify(sessionMessages, null, 2)"
+                language="json"
+                height="360px"
+                :options="{ readOnly: true }"
+              />
             </main>
           </div>
         </n-card>
@@ -318,7 +334,12 @@ watch(activeFile, () => {
                 <n-input-number v-model:value="tablePage" :min="1" />
                 <n-input-number v-model:value="tableSize" :min="1" :max="200" />
               </div>
-              <pre class="preview">{{ JSON.stringify(tableRows, null, 2) }}</pre>
+              <n-data-table
+                :columns="tableColumns"
+                :data="tableRows"
+                :max-height="360"
+                virtual-scroll
+              />
               <div v-if="activeTable === 'preferences'" class="edit-box">
                 <h4>编辑 preferences</h4>
                 <n-input-group>
