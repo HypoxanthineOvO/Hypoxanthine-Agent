@@ -1,11 +1,24 @@
 default_model: KimiK25
 
 task_routing:
-  chat: KimiK25
+  chat: GPT
   lightweight: DeepseekV3_2
   embedding: VolcanoEmbedding
+  vision: Gpt52
 
 models:
+  GPT:
+    litellm_model: "openai/gpt-5.2"
+    provider: "AISTOCK"
+    supports_tool_calling: true
+    description: "OpenAI ChatGPT"
+    fallback: KimiK25
+
+  Gpt52:
+    litellm_model: "openai/gpt-5.2"
+    provider: "AISTOCK"
+    fallback: KimiK25
+
   KimiK25:
     litellm_model: "openai/kimi-k2.5"
     provider: "volcengine_coding"

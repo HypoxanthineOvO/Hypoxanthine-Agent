@@ -13,7 +13,7 @@ import ConnectionStatus from "../components/ConnectionStatus.vue";
 import ReconnectBanner from "../components/layout/ReconnectBanner.vue";
 import { useHotkey } from "../composables/useHotkey";
 import { useChatSocket } from "../composables/useChatSocket";
-import type { Message } from "../types/message";
+import type { Attachment, Message } from "../types/message";
 import {
   formatTimeSeparatorLabel,
   shouldInsertTimeSeparator,
@@ -57,10 +57,15 @@ const capabilitySummary = [
 ] as const;
 
 const draft = ref("");
+const fileInputRef = ref<HTMLInputElement | null>(null);
 const composerExpanded = ref(false);
 const composerRef = ref<HTMLTextAreaElement | null>(null);
 const messagesRef = ref<HTMLElement | null>(null);
 const activeSessionId = ref(resolveInitialSessionId());
+const pendingAttachments = ref<Attachment[]>([]);
+const isComposerDragActive = ref(false);
+const isUploadingAttachments = ref(false);
+const MAX_ATTACHMENTS_PER_MESSAGE = 5;
 
 const normalizedApiBase = computed(() => {
   const explicitBase = props.apiBase.trim();
@@ -85,7 +90,7 @@ const {
   reconnectDelayMs,
   reconnectNow,
   replaceMessages,
-  sendText,
+  sendMessage,
   status,
 } = useChatSocket({
   url: props.wsUrl,
@@ -102,7 +107,10 @@ const notification = (() => {
 })();
 
 const canSend = computed(
-  () => status.value === "connected" && draft.value.trim().length > 0,
+  () =>
+    status.value === "connected" &&
+    !isUploadingAttachments.value &&
+    (draft.value.trim().length > 0 || pendingAttachments.value.length > 0),
 );
 const showReconnectBanner = computed(
   () => status.value === "reconnecting" || reconnectDelayMs.value !== null,
@@ -196,6 +204,7 @@ const toToolInvocationMessages = (
       tool_name: row.tool_name,
       tool_call_id: toolCallId,
       arguments: params,
+      metadata: { ephemeral: true },
     });
     messagesFromRows.push({
       sender: "assistant",
@@ -207,7 +216,7 @@ const toToolInvocationMessages = (
       status: row.status,
       result: row.result_summary ?? "",
       error_info: row.error_info ?? "",
-      metadata: {},
+      metadata: { ephemeral: true },
       compressed_meta: compressedMeta,
     });
   }
@@ -319,6 +328,9 @@ const hasMedia = (message: Message): boolean => {
   return /\.(png|jpe?g|gif|svg|webp|mp4|webm)$/i.test(source);
 };
 
+const mediaType = (message: Message): "image" | "video" =>
+  /\.(mp4|webm)$/i.test(message.image ?? message.file ?? "") ? "video" : "image";
+
 const hasCodeFilePreview = (message: Message): boolean =>
   Boolean(
     message.file &&
@@ -406,13 +418,128 @@ const resolveCompressedFilePath = (message: Message): string => {
 };
 
 const onSubmit = (): void => {
-  if (!sendText(draft.value)) {
+  if (!sendMessage(draft.value, pendingAttachments.value)) {
     return;
   }
   draft.value = "";
+  pendingAttachments.value = [];
+  if (fileInputRef.value) {
+    fileInputRef.value.value = "";
+  }
   void nextTick(() => {
     adjustComposerHeight();
   });
+};
+
+const normalizeSelectedFiles = (files: FileList | File[] | null | undefined): File[] =>
+  Array.from(files ?? []).filter((file) => file.size >= 0);
+
+const formatAttachmentSize = (sizeBytes: number | null | undefined): string => {
+  if (typeof sizeBytes !== "number" || !Number.isFinite(sizeBytes) || sizeBytes < 0) {
+    return "";
+  }
+  if (sizeBytes < 1024) {
+    return `${sizeBytes} B`;
+  }
+  if (sizeBytes < 1024 * 1024) {
+    return `${(sizeBytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+const attachmentPreviewUrl = (attachment: Attachment): string =>
+  resolveAssetUrl(attachment.url);
+
+const attachmentLabel = (attachment: Attachment): string =>
+  attachment.filename || attachment.url.split("/").pop() || attachment.url;
+
+const openFilePicker = (): void => {
+  fileInputRef.value?.click();
+};
+
+const removePendingAttachment = (index: number): void => {
+  pendingAttachments.value = pendingAttachments.value.filter((_, itemIndex) => itemIndex !== index);
+};
+
+const uploadFiles = async (incomingFiles: File[]): Promise<void> => {
+  const remainingSlots = MAX_ATTACHMENTS_PER_MESSAGE - pendingAttachments.value.length;
+  if (remainingSlots <= 0) {
+    notification?.warning({
+      title: "附件已达上限",
+      content: "每条消息最多上传 5 个附件。",
+      duration: 3000,
+    });
+    return;
+  }
+
+  const files = incomingFiles.slice(0, remainingSlots);
+  if (!files.length) {
+    return;
+  }
+
+  const formData = new FormData();
+  files.forEach((file) => {
+    formData.append("file", file);
+  });
+
+  isUploadingAttachments.value = true;
+  try {
+    const response = await fetch(withApiToken(makeApiUrl("upload")), {
+      method: "POST",
+      body: formData,
+    });
+    if (!response.ok) {
+      const message =
+        response.status === 413
+          ? "单个文件不能超过 100MB。"
+          : "上传失败，请稍后重试。";
+      throw new Error(message);
+    }
+    const payload = (await response.json()) as { attachments?: Attachment[] };
+    const uploaded = Array.isArray(payload.attachments) ? payload.attachments : [];
+    pendingAttachments.value = [...pendingAttachments.value, ...uploaded];
+  } catch (error) {
+    notification?.error({
+      title: "附件上传失败",
+      content: error instanceof Error ? error.message : "上传失败，请稍后重试。",
+      duration: 3500,
+    });
+  } finally {
+    isUploadingAttachments.value = false;
+  }
+};
+
+const onFileInputChange = async (event: Event): Promise<void> => {
+  const input = event.target as HTMLInputElement | null;
+  await uploadFiles(normalizeSelectedFiles(input?.files));
+  if (input) {
+    input.value = "";
+  }
+};
+
+const onComposerDragOver = (event: DragEvent): void => {
+  event.preventDefault();
+  isComposerDragActive.value = true;
+};
+
+const onComposerDragLeave = (event: DragEvent): void => {
+  event.preventDefault();
+  isComposerDragActive.value = false;
+};
+
+const onComposerDrop = async (event: DragEvent): Promise<void> => {
+  event.preventDefault();
+  isComposerDragActive.value = false;
+  await uploadFiles(normalizeSelectedFiles(event.dataTransfer?.files));
+};
+
+const onComposerPaste = async (event: ClipboardEvent): Promise<void> => {
+  const files = normalizeSelectedFiles(event.clipboardData?.files);
+  if (!files.length) {
+    return;
+  }
+  event.preventDefault();
+  await uploadFiles(files);
 };
 
 const scrollToBottom = (): void => {
@@ -597,6 +724,7 @@ useHotkey([
             <MessageBubble
               v-else
               :message="item.message"
+              :asset-url-resolver="resolveAssetUrl"
             >
             <CompressedMessage
               v-if="isCompressedToolResult(item.message)"
@@ -621,6 +749,7 @@ useHotkey([
             <MediaMessage
               v-else-if="hasMedia(item.message)"
               :src="mediaSource(item.message)"
+              :media-type="mediaType(item.message)"
             />
             <FileAttachment
               v-else-if="hasCodeFilePreview(item.message)"
@@ -632,7 +761,7 @@ useHotkey([
               :path="resolveAssetUrl(item.message.file)"
             />
             <TextMessage
-              v-else
+              v-else-if="(item.message.text ?? '').trim().length > 0"
               :text="item.message.text ?? ''"
             />
             </MessageBubble>
@@ -640,7 +769,24 @@ useHotkey([
         </template>
       </main>
 
-      <form class="composer" :data-expanded="composerExpanded" @submit.prevent="onSubmit">
+      <form
+        class="composer"
+        :data-drag-active="isComposerDragActive"
+        :data-expanded="composerExpanded"
+        @dragenter.prevent="isComposerDragActive = true"
+        @dragleave="onComposerDragLeave"
+        @dragover="onComposerDragOver"
+        @drop="onComposerDrop"
+        @submit.prevent="onSubmit"
+      >
+        <input
+          ref="fileInputRef"
+          data-testid="attachment-input"
+          type="file"
+          multiple
+          class="composer-file-input"
+          @change="onFileInputChange"
+        />
         <textarea
           ref="composerRef"
           v-model="draft"
@@ -648,10 +794,39 @@ useHotkey([
           autocomplete="off"
           placeholder="输入消息（Enter 发送）"
           class="composer-input"
+          @paste="onComposerPaste"
         />
+        <div v-if="pendingAttachments.length" class="composer-attachments">
+          <article
+            v-for="(attachment, index) in pendingAttachments"
+            :key="`${attachment.url}-${index}`"
+            class="composer-attachment"
+          >
+            <img
+              v-if="attachment.type === 'image'"
+              :src="attachmentPreviewUrl(attachment)"
+              :alt="attachment.filename ?? 'image preview'"
+              class="composer-attachment-thumb"
+            />
+            <div class="composer-attachment-meta">
+              <strong>{{ attachmentLabel(attachment) }}</strong>
+              <span>{{ formatAttachmentSize(attachment.size_bytes) }}</span>
+            </div>
+            <button
+              type="button"
+              class="attachment-remove"
+              @click="removePendingAttachment(index)"
+            >
+              ×
+            </button>
+          </article>
+        </div>
         <div class="composer-actions">
           <button type="button" class="ghost-button" @click="toggleComposerExpanded">
             {{ composerExpanded ? "收起输入框" : "展开输入框" }}
+          </button>
+          <button type="button" class="ghost-button" @click="openFilePicker">
+            📎
           </button>
           <button type="submit" :disabled="!canSend">Send</button>
         </div>
@@ -848,6 +1023,15 @@ useHotkey([
   bottom: 0;
 }
 
+.composer[data-drag-active="true"] {
+  border-color: color-mix(in srgb, var(--brand) 72%, var(--panel-edge));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand) 36%, transparent);
+}
+
+.composer-file-input {
+  display: none;
+}
+
 .composer[data-expanded="true"] {
   min-height: 42vh;
 }
@@ -875,6 +1059,60 @@ useHotkey([
   gap: 0.55rem;
   justify-content: flex-end;
   width: 100%;
+}
+
+.composer-attachments {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.composer-attachment {
+  align-items: center;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  border: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
+  border-radius: 0.85rem;
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  padding: 0.55rem 0.7rem;
+}
+
+.composer-attachment-thumb {
+  border-radius: 0.65rem;
+  height: 3rem;
+  object-fit: cover;
+  width: 3rem;
+}
+
+.composer-attachment-meta {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.composer-attachment-meta strong {
+  font-size: 0.84rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-attachment-meta span {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.attachment-remove {
+  align-items: center;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
+  border-radius: 999px;
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+  height: 1.8rem;
+  justify-content: center;
+  width: 1.8rem;
 }
 
 .composer-actions button {

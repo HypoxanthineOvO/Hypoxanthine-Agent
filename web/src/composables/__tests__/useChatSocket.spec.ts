@@ -122,11 +122,20 @@ describe("useChatSocket", () => {
         type: "assistant_done",
         sender: "assistant",
         session_id: "session-1",
+        attachments: [
+          {
+            type: "file",
+            url: "/tmp/export.pdf",
+            filename: "export.pdf",
+            mime_type: "application/pdf",
+          },
+        ],
       }),
     );
 
     expect(socket.messages.value[0]?.text).toBe("hello");
     expect(socket.messages.value[1]?.text).toBe("**ok**");
+    expect(socket.messages.value[1]?.attachments?.[0]?.filename).toBe("export.pdf");
     expect(socket.messages.value).toHaveLength(2);
   });
 
@@ -148,6 +157,39 @@ describe("useChatSocket", () => {
     sessionId.value = "s2";
     socket.sendText("hello");
     expect(JSON.parse(ws.sent[0] ?? "{}").session_id).toBe("s2");
+  });
+
+  it("sends attachment payloads and allows empty text when attachments exist", () => {
+    const sessionId = ref("s1");
+    const socket = useChatSocket({
+      url: "ws://localhost:8000/ws",
+      token: "abc123",
+      sessionId,
+    });
+
+    socket.connect();
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+
+    const sent = socket.sendMessage("", [
+      {
+        type: "image",
+        url: "/tmp/cat.png",
+        filename: "cat.png",
+        mime_type: "image/png",
+        size_bytes: 123,
+      },
+    ]);
+
+    expect(sent).toBe(true);
+    const outbound = JSON.parse(ws.sent[0] ?? "{}");
+    expect(outbound.text).toBeNull();
+    expect(outbound.attachments).toHaveLength(1);
+    expect(outbound.attachments[0].filename).toBe("cat.png");
+    expect(socket.messages.value[0]?.attachments?.[0]?.type).toBe("image");
   });
 
   it("replaces local messages when restoring session history", () => {

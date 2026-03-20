@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script async src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script async src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script async src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+  <script async src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      --border: #d0d7de;
+      --muted: #656d76;
+      --surface: #ffffff;
+      --surface-alt: #f6f8fa;
+      --surface-head: #eff2f5;
+      --text: #1f2328;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: #ffffff;
+      color: var(--text);
+      font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+      font-size: 15px;
+      line-height: 1.6;
+    }
+
+    #render-target {
+      width: 800px;
+      padding: 24px;
+      margin: 0 auto;
+      background: var(--surface);
+      overflow-wrap: anywhere;
+    }
+
+    #render-target > :first-child {
+      margin-top: 0;
+    }
+
+    #render-target > :last-child {
+      margin-bottom: 0;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+      margin: 0 0 16px;
+      line-height: 1.3;
+    }
+
+    p, ul, ol, blockquote, pre, table {
+      margin: 0 0 16px;
+    }
+
+    code, pre {
+      font-family: "SFMono-Regular", "JetBrains Mono", "Consolas", monospace;
+    }
+
+    pre {
+      padding: 16px;
+      border-radius: 6px;
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      overflow-x: auto;
+    }
+
+    pre code {
+      display: block;
+      background: transparent;
+      padding: 0;
+    }
+
+    .hljs-keyword,
+    .hljs-selector-tag,
+    .hljs-literal,
+    .hljs-name,
+    .hljs-tag {
+      color: #cf222e;
+    }
+
+    .hljs-string,
+    .hljs-attr,
+    .hljs-template-tag,
+    .hljs-template-variable {
+      color: #0a3069;
+    }
+
+    .hljs-comment,
+    .hljs-quote {
+      color: #6e7781;
+      font-style: italic;
+    }
+
+    .hljs-number,
+    .hljs-built_in,
+    .hljs-builtin-name,
+    .hljs-title,
+    .hljs-section {
+      color: #953800;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1px solid var(--border);
+    }
+
+    th, td {
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: var(--surface-head);
+      font-weight: 600;
+    }
+
+    tbody tr:nth-child(even) {
+      background: var(--surface-alt);
+    }
+
+    .katex-display {
+      margin: 0;
+      text-align: center;
+    }
+
+    .mathml-block math {
+      font-size: 1.2em;
+    }
+
+    .math-fallback,
+    .mermaid-fallback {
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface-alt);
+      text-align: center;
+      white-space: pre-wrap;
+    }
+
+    .mermaid {
+      display: flex;
+      justify-content: center;
+    }
+
+    img,
+    svg {
+      max-width: 100%;
+      height: auto;
+    }
+
+    blockquote {
+      margin: 0 0 16px;
+      padding-left: 16px;
+      border-left: 4px solid var(--border);
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body data-ready="false">
+  <div id="render-target"></div>
+  <script>
+    const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+    async function waitFor(predicate, timeoutMs = 1500) {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < timeoutMs) {
+        if (predicate()) {
+          return true;
+        }
+        await sleep(50);
+      }
+      return predicate();
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    async function highlightCodeBlocks(root) {
+      const codeBlocks = Array.from(root.querySelectorAll("pre code"));
+      if (codeBlocks.length === 0) {
+        return;
+      }
+      const hasHighlighter = await waitFor(() => typeof window.hljs !== "undefined", 800);
+      if (!hasHighlighter) {
+        return;
+      }
+      for (const code of codeBlocks) {
+        window.hljs.highlightElement(code);
+      }
+    }
+
+    function normalizeMath(content) {
+      const trimmed = String(content).trim();
+      if (trimmed.startsWith("$$") && trimmed.endsWith("$$")) {
+        return trimmed.slice(2, -2).trim();
+      }
+      if (trimmed.startsWith("$") && trimmed.endsWith("$")) {
+        return trimmed.slice(1, -1).trim();
+      }
+      return trimmed;
+    }
+
+    window.renderContent = async function renderContent(content, blockType) {
+      const target = document.getElementById("render-target");
+      document.body.dataset.ready = "false";
+      target.innerHTML = "";
+      target.className = `block-${blockType}`;
+
+      if (blockType === "code") {
+        const pre = document.createElement("pre");
+        const code = document.createElement("code");
+        code.textContent = String(content);
+        pre.appendChild(code);
+        target.appendChild(pre);
+        await highlightCodeBlocks(target);
+      } else if (blockType === "math") {
+        const hasKatex = await waitFor(() => typeof window.katex !== "undefined");
+        if (hasKatex) {
+          window.katex.render(normalizeMath(content), target, {
+            displayMode: true,
+            throwOnError: false,
+            output: "mathml"
+          });
+          target.classList.add("mathml-block");
+        } else {
+          target.innerHTML = `<div class="math-fallback">${escapeHtml(content)}</div>`;
+        }
+      } else if (blockType === "mermaid") {
+        const hasMermaid = await waitFor(() => typeof window.mermaid !== "undefined");
+        if (hasMermaid) {
+          window.mermaid.initialize({
+            startOnLoad: false,
+            theme: "default",
+            securityLevel: "loose"
+          });
+          const renderId = `mermaid-${Date.now()}`;
+          const result = await window.mermaid.render(renderId, String(content));
+          const wrapper = document.createElement("div");
+          wrapper.className = "mermaid";
+          wrapper.innerHTML = result.svg;
+          target.appendChild(wrapper);
+        } else {
+          target.innerHTML = `<pre class="mermaid-fallback">${escapeHtml(content)}</pre>`;
+        }
+      } else if (blockType === "table") {
+        const hasMarked = await waitFor(() => typeof window.marked !== "undefined");
+        if (hasMarked) {
+          target.innerHTML = window.marked.parse(String(content));
+        } else {
+          target.innerHTML = `<pre>${escapeHtml(content)}</pre>`;
+        }
+      } else {
+        const hasMarked = await waitFor(() => typeof window.marked !== "undefined");
+        if (hasMarked) {
+          target.innerHTML = window.marked.parse(String(content));
+        } else {
+          target.innerHTML = `<pre>${escapeHtml(content)}</pre>`;
+        }
+        await highlightCodeBlocks(target);
+      }
+
+      document.body.dataset.ready = "true";
+    };
+  </script>
+</body>
+</html>

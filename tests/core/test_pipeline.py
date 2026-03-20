@@ -8,7 +8,8 @@ import pytest
 from hypo_agent.core.pipeline import ChatPipeline
 from hypo_agent.memory.semantic_memory import ChunkResult
 from hypo_agent.memory.structured_store import StructuredStore
-from hypo_agent.models import Message
+from hypo_agent.models import Attachment, Message
+from hypo_agent.models import SkillOutput
 
 
 class StubSessionMemory:
@@ -65,6 +66,82 @@ def test_pipeline_injects_recent_history_before_inbound() -> None:
     assert memory.appended[1].text == "新回答"
 
 
+def test_pipeline_routes_image_attachments_to_vision_model(tmp_path: Path) -> None:
+    memory = StubSessionMemory()
+    image_path = tmp_path / "cat.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+
+    class StubRouter:
+        def get_model_for_task(self, task_type: str) -> str:
+            assert task_type == "vision"
+            return "Gpt52"
+
+        async def call(self, model_name, messages, *, session_id=None, tools=None):
+            del session_id, tools
+            assert model_name == "Gpt52"
+            user_message = messages[-1]
+            assert user_message["role"] == "user"
+            assert isinstance(user_message["content"], list)
+            assert user_message["content"][0]["type"] == "text"
+            assert user_message["content"][0]["text"] == "这是什么"
+            assert user_message["content"][1]["type"] == "image_url"
+            assert user_message["content"][1]["image_url"]["url"].startswith(
+                "data:image/png;base64,"
+            )
+            return "是一张图片"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+    )
+
+    reply = asyncio.run(
+        pipeline.run_once(
+            Message(
+                text="这是什么",
+                sender="user",
+                session_id="s1",
+                attachments=[
+                    Attachment(
+                        type="image",
+                        url=str(image_path),
+                        filename="cat.png",
+                        mime_type="image/png",
+                    )
+                ],
+            )
+        )
+    )
+
+    assert reply.text == "是一张图片"
+
+
+def test_pipeline_keeps_text_only_messages_on_default_chat_model() -> None:
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        async def call(self, model_name, messages, *, session_id=None, tools=None):
+            del session_id, tools
+            assert model_name == "Gemini3Pro"
+            assert messages[-1] == {"role": "user", "content": "普通文本"}
+            return "ok"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+    )
+
+    reply = asyncio.run(
+        pipeline.run_once(Message(text="普通文本", sender="user", session_id="s1"))
+    )
+
+    assert reply.text == "ok"
+
+
 def test_pipeline_stream_reply_emits_chunk_and_done_events_and_persists() -> None:
     memory = StubSessionMemory()
 
@@ -101,6 +178,65 @@ def test_pipeline_stream_reply_emits_chunk_and_done_events_and_persists() -> Non
     assert all(str(event["timestamp"]).endswith("Z") for event in events)
     assert [m.sender for m in memory.appended] == ["user", "assistant"]
     assert memory.appended[1].text == "Hello"
+
+
+def test_pipeline_attaches_skill_output_attachments_to_final_message() -> None:
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            if not hasattr(self, "called"):
+                self.called = 1
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_export",
+                            "function": {
+                                "name": "export_to_file",
+                                "arguments": "{\"content\":\"hello\"}",
+                            },
+                        }
+                    ],
+                }
+            return {"text": "已导出", "tool_calls": []}
+
+    class StubSkillManager:
+        def get_tools_schema(self):
+            return [{"type": "function", "function": {"name": "export_to_file"}}]
+
+        async def invoke(self, tool_name, params, *, session_id=None):
+            del tool_name, params, session_id
+            return SkillOutput(
+                status="success",
+                result="/tmp/export.pdf",
+                attachments=[
+                    Attachment(
+                        type="file",
+                        url="/tmp/export.pdf",
+                        filename="export.pdf",
+                        mime_type="application/pdf",
+                    )
+                ],
+            )
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        skill_manager=StubSkillManager(),
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="导出", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+
+    assert any(event["type"] == "tool_call_result" for event in events)
+    assert memory.appended[-1].attachments[0].filename == "export.pdf"
 
 
 def test_pipeline_rejects_empty_text() -> None:
@@ -473,6 +609,44 @@ def test_pipeline_injects_semantic_memory_before_history() -> None:
     reply = asyncio.run(pipeline.run_once(Message(text="新问题", sender="user", session_id="s1")))
 
     assert reply.text == "新回答"
+
+
+def test_pipeline_skips_semantic_memory_for_heartbeat_messages() -> None:
+    memory = StubSessionMemory()
+
+    class StubSemanticMemory:
+        async def search(self, query: str, top_k: int = 5) -> list[ChunkResult]:
+            raise AssertionError(f"semantic memory should be skipped for heartbeat: {query=} {top_k=}")
+
+    class StubRouter:
+        async def call(self, model_name, messages):
+            del model_name
+            system_messages = [item for item in messages if item["role"] == "system"]
+            assert all("[相关记忆]" not in item["content"] for item in system_messages)
+            return "heartbeat ok"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        semantic_memory=StubSemanticMemory(),
+    )
+
+    reply = asyncio.run(
+        pipeline.run_once(
+            Message(
+                text="heartbeat prompt",
+                sender="user",
+                session_id="s1",
+                channel="system",
+                message_tag="heartbeat",
+                metadata={"source": "heartbeat", "skip_memory_search": True},
+            )
+        )
+    )
+
+    assert reply.text == "heartbeat ok"
 
 
 def test_pipeline_marks_sop_usage_after_semantic_hit() -> None:

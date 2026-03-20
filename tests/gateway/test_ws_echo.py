@@ -66,6 +66,25 @@ class ToolEventPipeline:
         }
 
 
+class AttachmentPipeline:
+    def __init__(self) -> None:
+        self.inbound = None
+
+    async def stream_reply(self, inbound):
+        self.inbound = inbound
+        yield {
+            "type": "assistant_chunk",
+            "text": "image ok",
+            "sender": "assistant",
+            "session_id": inbound.session_id,
+        }
+        yield {
+            "type": "assistant_done",
+            "sender": "assistant",
+            "session_id": inbound.session_id,
+        }
+
+
 def _client(token: str = "test-token", pipeline=None) -> TestClient:
     app = create_app(auth_token=token, pipeline=pipeline or StubPipeline())
     return TestClient(app)
@@ -204,3 +223,34 @@ def test_ws_broadcasts_server_timestamped_user_message_to_peer() -> None:
 
             sender.receive_json()
             sender.receive_json()
+
+
+def test_ws_accepts_attachment_only_message_payload() -> None:
+    pipeline = AttachmentPipeline()
+
+    with _client(pipeline=pipeline) as client:
+        with client.websocket_connect("/ws?token=test-token") as ws:
+            ws.send_json(
+                {
+                    "sender": "user",
+                    "session_id": "s1",
+                    "attachments": [
+                        {
+                            "type": "image",
+                            "url": "/tmp/demo.png",
+                            "filename": "demo.png",
+                            "mime_type": "image/png",
+                            "size_bytes": 10,
+                        }
+                    ],
+                }
+            )
+            first = ws.receive_json()
+            second = ws.receive_json()
+
+    assert first["type"] == "assistant_chunk"
+    assert second["type"] == "assistant_done"
+    assert pipeline.inbound is not None
+    assert pipeline.inbound.text is None
+    assert len(pipeline.inbound.attachments) == 1
+    assert pipeline.inbound.attachments[0].type == "image"

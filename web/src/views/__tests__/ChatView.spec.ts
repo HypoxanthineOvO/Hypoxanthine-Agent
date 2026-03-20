@@ -259,6 +259,49 @@ describe("ChatView", () => {
     expect(resultIndex).toBeGreaterThan(startIndex);
   });
 
+  it("does not render restored tool invocations as visible chat messages", async () => {
+    const fetchMock = vi.fn();
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            id: 42,
+            session_id: "main",
+            tool_name: "run_command",
+            skill_name: "tmux",
+            params_json: "{\"command\":\"echo hi\"}",
+            status: "success",
+            result_summary: "{\"stdout\":\"ok\"}",
+            duration_ms: 12.3,
+            error_info: "",
+            compressed_meta_json: null,
+            created_at: "2026-03-06 10:02:00",
+          },
+        ],
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(ChatView, {
+      props: {
+        wsUrl: "ws://localhost:8000/ws",
+        token: "test-token",
+        apiBase: "http://localhost:8000/api",
+      },
+    });
+
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    expect(wrapper.text()).not.toContain("🔧 执行了 run_command");
+    expect(wrapper.text()).toContain("Hi，我是 Hypo-Agent");
+  });
+
   it("renders a QQ source badge for synced qq messages", async () => {
     const fetchMock = vi.fn();
     fetchMock
@@ -293,6 +336,52 @@ describe("ChatView", () => {
 
     expect(wrapper.text()).toContain("via QQ");
     expect(wrapper.text()).toContain("你好，来自 QQ");
+  });
+
+  it("renders image attachments from restored session history", async () => {
+    const fetchMock = vi.fn();
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            text: "看图",
+            sender: "user",
+            session_id: "main",
+            attachments: [
+              {
+                type: "image",
+                url: "/tmp/cat.png",
+                filename: "cat.png",
+                mime_type: "image/png",
+                size_bytes: 12,
+              },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [],
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(ChatView, {
+      props: {
+        wsUrl: "ws://localhost:8000/ws",
+        token: "test-token",
+        apiBase: "http://localhost:8000/api",
+      },
+    });
+
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    const image = wrapper.get('img[alt="image attachment"]');
+    expect(image.attributes("src")).toContain(
+      "http://localhost:8000/api/files?path=%2Ftmp%2Fcat.png&token=test-token",
+    );
   });
 
   it("hides runtime tool events when marked ephemeral", async () => {

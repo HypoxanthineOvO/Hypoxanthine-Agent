@@ -4,10 +4,24 @@ from typing import Any, Protocol
 
 from hypo_agent.core.rich_response import RichResponse
 from hypo_agent.core.time_utils import utc_isoformat, utc_now
+from hypo_agent.models import Attachment
+
+
+def _serialize_attachments(
+    attachments: list[Attachment | dict[str, Any]],
+) -> list[dict[str, Any]]:
+    serialized: list[dict[str, Any]] = []
+    for attachment in attachments:
+        if isinstance(attachment, Attachment):
+            serialized.append(attachment.model_dump(mode="json"))
+            continue
+        if isinstance(attachment, dict):
+            serialized.append(dict(attachment))
+    return serialized
 
 
 class ChannelAdapter(Protocol):
-    def format(
+    async def format(
         self,
         event: dict[str, Any] | RichResponse,
         *,
@@ -19,7 +33,7 @@ class ChannelAdapter(Protocol):
 
 
 class WebUIAdapter:
-    def format(
+    async def format(
         self,
         event: dict[str, Any] | RichResponse,
         *,
@@ -44,12 +58,15 @@ class WebUIAdapter:
             }
 
         if event_type == "assistant_done":
-            return {
+            payload = {
                 "type": "assistant_done",
                 "sender": sender,
                 "session_id": session_id,
                 "timestamp": utc_isoformat(utc_now()),
             }
+            if event.attachments:
+                payload["attachments"] = _serialize_attachments(event.attachments)
+            return payload
 
         tool_call = event.tool_calls[0] if event.tool_calls else {}
 
@@ -75,6 +92,8 @@ class WebUIAdapter:
             }
             if event.compressed_meta is not None:
                 payload["compressed_meta"] = dict(event.compressed_meta)
+            if event.attachments:
+                payload["attachments"] = _serialize_attachments(event.attachments)
             return payload
 
         raise ValueError(f"Unsupported event_type '{event_type}'")

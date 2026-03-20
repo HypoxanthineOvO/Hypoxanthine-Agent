@@ -27,6 +27,7 @@ from hypo_agent.core.channel_dispatcher import ChannelDispatcher
 from hypo_agent.core.directory_index import refresh_directory_index
 from hypo_agent.core.event_queue import EventQueue
 from hypo_agent.core.heartbeat import HeartbeatService
+from hypo_agent.core.image_renderer import ImageRenderer
 from hypo_agent.core.model_router import ModelRouter
 from hypo_agent.core.narration_observer import NarrationObserver
 from hypo_agent.core.output_compressor import OutputCompressor
@@ -44,6 +45,7 @@ from hypo_agent.gateway.files_api import router as files_api_router
 from hypo_agent.gateway.kill_switch_api import router as kill_switch_api_router
 from hypo_agent.gateway.memory_api import router as memory_api_router
 from hypo_agent.gateway.sessions_api import router as sessions_api_router
+from hypo_agent.gateway.upload_api import router as upload_api_router
 from hypo_agent.gateway.middleware import WsTokenAuthMiddleware
 from hypo_agent.gateway.qq_ws import router as qq_ws_router
 from hypo_agent.gateway.qq_ws_client import NapCatWebSocketClient
@@ -53,9 +55,12 @@ from hypo_agent.memory import MemoryGC, SemanticMemory, SessionMemory, Structure
 from hypo_agent.models import Message, QQServiceConfig, SecurityConfig, SkillOutput
 from hypo_agent.security import CircuitBreaker, PermissionManager
 from hypo_agent.skills import (
+    AgentSearchSkill,
     CodeRunSkill,
     EmailScannerSkill,
+    ExportSkill,
     FileSystemSkill,
+    InfoReachSkill,
     MemorySkill,
     ReminderSkill,
     TmuxSkill,
@@ -65,11 +70,31 @@ logger = structlog.get_logger("hypo_agent.gateway.app")
 TEST_MODE_BANNER = "⚠️  HYPO_TEST_MODE enabled — data isolated to test/sandbox/"
 
 
+def _parse_fixed_times(raw: str) -> list[tuple[int, int]]:
+    parsed: list[tuple[int, int]] = []
+    for chunk in str(raw or "").split(","):
+        item = chunk.strip()
+        if not item:
+            continue
+        hour_text, _, minute_text = item.partition(":")
+        if not minute_text:
+            continue
+        try:
+            hour = int(hour_text)
+            minute = int(minute_text)
+        except ValueError:
+            continue
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            parsed.append((hour, minute))
+    return parsed
+
+
 @dataclass(slots=True)
 class AppDeps:
     session_memory: SessionMemory
     structured_store: StructuredStore
     semantic_memory: SemanticMemory | None = None
+    image_renderer: ImageRenderer | Any | None = None
     persona_manager: PersonaManager | None = None
     sop_manager: SopManager | None = None
     event_queue: EventQueue | None = None
@@ -91,6 +116,8 @@ def _register_enabled_skills(
     scheduler: SchedulerService | None = None,
     message_queue: EventQueue | Any | None = None,
     model_router: ModelRouter | None = None,
+    heartbeat_service: HeartbeatService | Any | None = None,
+    image_renderer: ImageRenderer | Any | None = None,
     skills_config_path: Path = Path("config/skills.yaml"),
 ) -> None:
     skills_payload: dict[str, Any] = {}
@@ -109,9 +136,13 @@ def _register_enabled_skills(
     tmux_cfg = per_skill.get("tmux", {}) if isinstance(per_skill, dict) else {}
     code_run_cfg = per_skill.get("code_run", {}) if isinstance(per_skill, dict) else {}
     reminder_cfg = per_skill.get("reminder", {}) if isinstance(per_skill, dict) else {}
+    email_scanner_cfg = per_skill.get("email_scanner", {}) if isinstance(per_skill, dict) else {}
+    info_reach_cfg = per_skill.get("info_reach", {}) if isinstance(per_skill, dict) else {}
     tmux_timeout = int(tmux_cfg.get("timeout_seconds", default_timeout))
     code_run_timeout = int(code_run_cfg.get("timeout_seconds", default_timeout))
     auto_confirm = bool(reminder_cfg.get("auto_confirm", True))
+    email_mark_as_read = bool(email_scanner_cfg.get("mark_as_read", True))
+    trendradar_output_root = str(info_reach_cfg.get("output_root", "~/trendradar/output"))
 
     if "tmux" in enabled_skills:
         skill_manager.register(
@@ -129,6 +160,28 @@ def _register_enabled_skills(
     if "filesystem" in enabled_skills:
         skill_manager.register(FileSystemSkill(permission_manager=permission_manager))
 
+    if "agent_search" in enabled_skills:
+        skill_manager.register(AgentSearchSkill())
+
+    if "info_reach" in enabled_skills and structured_store is not None:
+        skill_manager.register(
+            InfoReachSkill(
+                structured_store=structured_store,
+                permission_manager=permission_manager,
+                model_router=model_router,
+                message_queue=message_queue,
+                heartbeat_service=heartbeat_service,
+                output_root=trendradar_output_root,
+            )
+        )
+
+    if "export" in enabled_skills and image_renderer is not None:
+        skill_manager.register(
+            ExportSkill(
+                image_renderer=image_renderer,
+            )
+        )
+
     if "reminder" in enabled_skills and structured_store is not None and scheduler is not None:
         skill_manager.register(
             ReminderSkill(
@@ -144,6 +197,7 @@ def _register_enabled_skills(
             structured_store=structured_store,
             model_router=model_router,
             message_queue=message_queue,
+            mark_as_read=email_mark_as_read,
         )
         skill_manager.register(email_skill)
 
@@ -165,6 +219,7 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
     resolved_security = security or _default_security()
     structured_store = StructuredStore()
     event_queue = EventQueue()
+    image_renderer = ImageRenderer()
     scheduler = SchedulerService(
         structured_store=structured_store,
         event_queue=event_queue,
@@ -186,11 +241,14 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
         structured_store=structured_store,
         scheduler=scheduler,
         message_queue=event_queue,
+        heartbeat_service=heartbeat_service,
+        image_renderer=image_renderer,
     )
 
     return AppDeps(
         session_memory=SessionMemory(buffer_limit=20, active_window_days=7),
         structured_store=structured_store,
+        image_renderer=image_renderer,
         event_queue=event_queue,
         scheduler=scheduler,
         heartbeat_service=heartbeat_service,
@@ -280,8 +338,13 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
     )
     if email_skill is not None and hasattr(email_skill, "model_router"):
         email_skill.model_router = router
-    if deps.output_compressor is None:
-        deps.output_compressor = OutputCompressor(router=router)
+    info_reach_skill = (
+        deps.skill_manager._skills.get("info_reach")  # type: ignore[attr-defined]
+        if deps.skill_manager is not None and hasattr(deps.skill_manager, "_skills")
+        else None
+    )
+    if info_reach_skill is not None and hasattr(info_reach_skill, "model_router"):
+        info_reach_skill.model_router = router
     chat_model = router.get_model_for_task("chat")
     slash_commands = SlashCommandHandler(
         router=router,
@@ -419,7 +482,7 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
         history_window=20,
         skill_manager=deps.skill_manager,
         structured_store=deps.structured_store,
-        max_react_rounds=5,
+        max_react_rounds=15,
         slash_commands=slash_commands,
         output_compressor=deps.output_compressor,
         channel_adapter=WebUIAdapter(),
@@ -547,6 +610,8 @@ def create_app(
             permission_manager=resolved_deps.permission_manager,
             structured_store=resolved_deps.structured_store,
         )
+    if resolved_deps.image_renderer is None:
+        resolved_deps.image_renderer = ImageRenderer()
 
     pipeline_instance = pipeline or _build_default_pipeline(resolved_deps)
     _ensure_pipeline_lifecycle_hooks(pipeline_instance)
@@ -554,6 +619,17 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await resolved_deps.structured_store.init()
+        image_renderer = resolved_deps.image_renderer
+        if image_renderer is not None and callable(getattr(image_renderer, "initialize", None)):
+            try:
+                await image_renderer.initialize()
+            except Exception:
+                logger.warning("image_renderer.initialize_failed", exc_info=True)
+            else:
+                if getattr(image_renderer, "available", False):
+                    logger.info("image_renderer.ready")
+                else:
+                    logger.warning("image_renderer.unavailable")
         semantic_memory = getattr(app.state, "semantic_memory", None)
         knowledge_dir = Path(getattr(app.state, "knowledge_dir", get_memory_dir() / "knowledge"))
         if semantic_memory is not None and callable(getattr(semantic_memory, "build_index", None)):
@@ -577,6 +653,14 @@ def create_app(
                     tasks_cfg = None
                 app.state.tasks_config = tasks_cfg
                 if tasks_cfg is not None:
+                    try:
+                        setattr(
+                            app.state.pipeline,
+                            "heartbeat_max_react_rounds",
+                            tasks_cfg.heartbeat.max_rounds,
+                        )
+                    except Exception:
+                        pass
                     heartbeat_prompt_path = (
                         Path(getattr(app.state, "config_dir", Path("config")))
                         / "heartbeat_prompt.md"
@@ -591,18 +675,58 @@ def create_app(
                                 max_entries=tasks_cfg.email_store.max_entries,
                                 retention_days=tasks_cfg.email_store.retention_days,
                             )
+                        info_reach_skill = resolved_deps.skill_manager._skills.get("info_reach")
+                        if (
+                            getattr(tasks_cfg, "trendradar_summary", None) is not None
+                            and info_reach_skill is not None
+                            and hasattr(info_reach_skill, "run_scheduled_summary")
+                        ):
+                            trend_cfg = tasks_cfg.trendradar_summary
+                            if bool(getattr(trend_cfg, "enabled", False)):
+                                fixed_times = str(getattr(trend_cfg, "time", "") or "").strip()
+                                if fixed_times and hasattr(resolved_deps.scheduler, "register_cron_job"):
+                                    for hour, minute in _parse_fixed_times(fixed_times):
+                                        resolved_deps.scheduler.register_cron_job(
+                                            f"trendradar_summary_{hour:02d}{minute:02d}",
+                                            f"{minute} {hour} * * *",
+                                            info_reach_skill.run_scheduled_summary,
+                                        )
+                                elif (
+                                    getattr(trend_cfg, "mode", "interval") == "cron"
+                                    and hasattr(resolved_deps.scheduler, "register_cron_job")
+                                ):
+                                    resolved_deps.scheduler.register_cron_job(
+                                        "trendradar_summary",
+                                        str(getattr(trend_cfg, "cron", "") or "").strip(),
+                                        info_reach_skill.run_scheduled_summary,
+                                    )
+                                elif hasattr(resolved_deps.scheduler, "register_interval_job"):
+                                    resolved_deps.scheduler.register_interval_job(
+                                        "trendradar_summary",
+                                        int(getattr(trend_cfg, "interval_minutes", 480) or 480),
+                                        info_reach_skill.run_scheduled_summary,
+                                    )
                     if (
                         tasks_cfg.heartbeat.enabled
                         and resolved_deps.heartbeat_service is not None
-                        and hasattr(resolved_deps.scheduler, "register_interval_job")
                     ):
                         if hasattr(resolved_deps.heartbeat_service, "prompt_path"):
                             resolved_deps.heartbeat_service.prompt_path = heartbeat_prompt_path
-                        resolved_deps.scheduler.register_interval_job(
-                            "heartbeat",
-                            tasks_cfg.heartbeat.interval_minutes,
-                            resolved_deps.heartbeat_service.run,
-                        )
+                        if (
+                            tasks_cfg.heartbeat.mode == "cron"
+                            and hasattr(resolved_deps.scheduler, "register_cron_job")
+                        ):
+                            resolved_deps.scheduler.register_cron_job(
+                                "heartbeat",
+                                str(tasks_cfg.heartbeat.cron or "").strip(),
+                                resolved_deps.heartbeat_service.run,
+                            )
+                        elif hasattr(resolved_deps.scheduler, "register_interval_job"):
+                            resolved_deps.scheduler.register_interval_job(
+                                "heartbeat",
+                                tasks_cfg.heartbeat.interval_minutes,
+                                resolved_deps.heartbeat_service.run,
+                            )
             else:
                 app.state.tasks_config = None
             if (
@@ -639,6 +763,11 @@ def create_app(
             await app.state.pipeline.stop_event_consumer()
             if resolved_deps.scheduler is not None:
                 await resolved_deps.scheduler.stop()
+            if image_renderer is not None and callable(getattr(image_renderer, "shutdown", None)):
+                try:
+                    await image_renderer.shutdown()
+                except Exception:
+                    logger.exception("image_renderer.shutdown_failed")
 
     app = FastAPI(title="Hypo-Agent Gateway", lifespan=lifespan)
     app.add_middleware(
@@ -652,16 +781,19 @@ def create_app(
     memory_dir = get_memory_dir()
     knowledge_dir = memory_dir / "knowledge"
     sessions_dir = memory_dir / "sessions"
+    uploads_dir = memory_dir / "uploads"
     db_path = Path(getattr(resolved_deps.structured_store, "db_path", get_database_path()))
     memory_dir.mkdir(parents=True, exist_ok=True)
     knowledge_dir.mkdir(parents=True, exist_ok=True)
     sessions_dir.mkdir(parents=True, exist_ok=True)
+    uploads_dir.mkdir(parents=True, exist_ok=True)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     app.state.auth_token = auth_token
     app.state.started_at = datetime.now(UTC)
     app.state.config_dir = Path("config")
     app.state.knowledge_dir = knowledge_dir
+    app.state.uploads_dir = uploads_dir
     app.state.runtime_mode = "test" if test_mode_enabled else "prod"
     app.state.test_mode = test_mode_enabled
     app.state.db_path = db_path
@@ -669,6 +801,7 @@ def create_app(
     app.state.session_memory = resolved_deps.session_memory
     app.state.structured_store = resolved_deps.structured_store
     app.state.semantic_memory = resolved_deps.semantic_memory
+    app.state.image_renderer = resolved_deps.image_renderer
     app.state.persona_manager = resolved_deps.persona_manager
     app.state.sop_manager = resolved_deps.sop_manager
     app.state.skill_manager = resolved_deps.skill_manager
@@ -754,13 +887,9 @@ def create_app(
         elif message.sender != "assistant":
             return
 
-        text = raw_text
-        if message.sender == "assistant" and len(text) > 500:
-            text = f"{text[:500]}... [完整内容请查看 WebUI]"
-
         await service.send_message(
             Message(
-                text=f"{prefix}{text}",
+                text=f"{prefix}{raw_text}",
                 sender="assistant",
                 session_id=message.session_id,
                 channel="webui",
@@ -845,6 +974,7 @@ def create_app(
         service = QQChannelService(
             napcat_http_url=qq_cfg.napcat_http_url,
             napcat_http_token=qq_cfg.napcat_http_token,
+            image_renderer=resolved_deps.image_renderer,
             bot_qq=qq_cfg.bot_qq,
             allowed_users={item.strip() for item in qq_cfg.allowed_users if item and item.strip()},
             on_message_sent=on_message_sent,
@@ -965,6 +1095,8 @@ def create_app(
             structured_store=deps.structured_store,
             scheduler=deps.scheduler,
             message_queue=deps.event_queue,
+            heartbeat_service=deps.heartbeat_service,
+            image_renderer=deps.image_renderer,
         )
 
         deps.output_compressor = None
@@ -997,4 +1129,5 @@ def create_app(
     app.include_router(dashboard_api_router)
     app.include_router(config_api_router)
     app.include_router(memory_api_router)
+    app.include_router(upload_api_router)
     return app

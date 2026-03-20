@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from datetime import UTC, datetime
+import json
 from typing import Any
 from uuid import uuid4
 
@@ -15,12 +16,16 @@ class OutputCompressor:
         self,
         *,
         router: Any,
-        threshold_chars: int = 2500,
-        target_chars: int = 2500,
+        threshold_chars: int = 25600,
+        target_chars: int = 12800,
         max_chunk_chars: int = 80 * 1024,
         chunk_model_limit_chars: int = 128 * 1024,
         max_iterations: int = 3,
         cache_size: int = 10,
+        hard_threshold_chars: int = 96 * 1024,
+        line_threshold: int = 220,
+        structured_passthrough_chars: int = 96 * 1024,
+        structured_line_threshold: int = 260,
     ) -> None:
         self.router = router
         self.threshold_chars = threshold_chars
@@ -29,6 +34,13 @@ class OutputCompressor:
         self.chunk_model_limit_chars = chunk_model_limit_chars
         self.max_iterations = max_iterations
         self.cache_size = cache_size
+        self.hard_threshold_chars = max(self.threshold_chars, hard_threshold_chars)
+        self.line_threshold = max(1, line_threshold)
+        self.structured_passthrough_chars = max(
+            self.threshold_chars,
+            structured_passthrough_chars,
+        )
+        self.structured_line_threshold = max(1, structured_line_threshold)
         self._recent_originals: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
     async def compress_if_needed(
@@ -36,7 +48,7 @@ class OutputCompressor:
         output: str,
         metadata: dict[str, Any],
     ) -> tuple[str, bool]:
-        if len(output) <= self.threshold_chars:
+        if not self._should_compress(output):
             return output, False
 
         cache_id = self._save_original(output, metadata)
@@ -81,6 +93,74 @@ class OutputCompressor:
             compressed_chars=len(final_output),
         )
         return final_output, True
+
+    def _should_compress(self, output: str) -> bool:
+        if len(output) <= self.threshold_chars:
+            return False
+
+        analysis = self._analyze_output(output)
+        char_limit = (
+            self.structured_passthrough_chars
+            if analysis["is_structured"]
+            else self.hard_threshold_chars
+        )
+        line_limit = (
+            self.structured_line_threshold
+            if analysis["is_structured"]
+            else self.line_threshold
+        )
+        if analysis["chars"] > char_limit:
+            return True
+        if analysis["line_count"] > line_limit:
+            return True
+        return False
+
+    def _analyze_output(self, output: str) -> dict[str, Any]:
+        extracted_text = output
+        is_structured = False
+        try:
+            parsed = json.loads(output)
+        except json.JSONDecodeError:
+            parsed = None
+        else:
+            is_structured = not isinstance(parsed, str)
+            preferred = self._extract_text_for_analysis(parsed)
+            if preferred:
+                extracted_text = preferred
+
+        line_count = extracted_text.count("\n") + 1 if extracted_text else 0
+        return {
+            "chars": len(output),
+            "line_count": line_count,
+            "is_structured": is_structured,
+        }
+
+    def _extract_text_for_analysis(self, payload: Any) -> str:
+        if isinstance(payload, dict):
+            result = payload.get("result")
+            if isinstance(result, dict):
+                chunks = [
+                    value
+                    for key in ("stdout", "stderr", "text", "output", "content")
+                    if isinstance((value := result.get(key)), str) and value
+                ]
+                if chunks:
+                    return "\n".join(chunks)
+
+            chunks = [
+                value
+                for key in ("text", "summary", "content", "message", "error_info")
+                if isinstance((value := payload.get(key)), str) and value
+            ]
+            if chunks:
+                return "\n".join(chunks)
+
+        if isinstance(payload, list):
+            chunks = [item for item in payload if isinstance(item, str) and item]
+            if chunks:
+                return "\n".join(chunks)
+
+        return ""
 
     def get_recent_originals(self) -> dict[str, dict[str, Any]]:
         return dict(self._recent_originals)

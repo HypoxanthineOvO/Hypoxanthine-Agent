@@ -149,7 +149,10 @@ async def websocket_chat(ws: WebSocket) -> None:
             if isinstance(payload, dict) and not str(payload.get("session_id") or "").strip():
                 payload = {**payload, "session_id": "main"}
             inbound = Message.model_validate(payload)
-            if not any((inbound.text, inbound.image, inbound.file, inbound.audio)):
+            has_text = bool(str(inbound.text or "").strip())
+            has_legacy_media = any((inbound.image, inbound.file, inbound.audio))
+            has_attachments = bool(inbound.attachments)
+            if not any((has_text, has_legacy_media, has_attachments)):
                 raise ValueError("message content is required")
             inbound = inbound.model_copy(
                 update={

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import AsyncIterator
 from contextvars import ContextVar
 from datetime import datetime
 import inspect
 import json
+from pathlib import Path
 from time import perf_counter
 from typing import Any, Protocol
 
@@ -14,11 +16,12 @@ import structlog
 from hypo_agent.core.channel_adapter import ChannelAdapter, WebUIAdapter
 from hypo_agent.core.rich_response import RichResponse
 from hypo_agent.core.time_utils import utc_isoformat, utc_now
+from hypo_agent.core.uploads import guess_mime_type
 from hypo_agent.memory.semantic_memory import ChunkResult, estimate_token_count
 from hypo_agent.memory.session import SessionMemory
-from hypo_agent.models import Message, SkillOutput
+from hypo_agent.models import Attachment, Message, SkillOutput
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("hypo_agent.core.pipeline")
 
 _PIPELINE_INTERNAL_SOURCE: ContextVar[str] = ContextVar(
     "pipeline_internal_source",
@@ -107,6 +110,8 @@ TOOL_STATUS_TEMPLATES: dict[str, dict[str, str]] = {
 
 
 class ChatModelRouter(Protocol):
+    def get_model_for_task(self, task_type: str) -> str: ...
+
     async def call(
         self,
         model_name: str,
@@ -168,7 +173,8 @@ class ChatPipeline:
         skill_manager: ChatSkillManager | None = None,
         structured_store: Any | None = None,
         circuit_breaker: Any | None = None,
-        max_react_rounds: int = 5,
+        max_react_rounds: int = 15,
+        heartbeat_max_react_rounds: int | None = None,
         slash_commands: SlashCommands | None = None,
         output_compressor: ChatOutputCompressor | None = None,
         channel_adapter: ChannelAdapter | None = None,
@@ -189,6 +195,7 @@ class ChatPipeline:
         self.structured_store = structured_store
         self.circuit_breaker = circuit_breaker
         self.max_react_rounds = max_react_rounds
+        self.heartbeat_max_react_rounds = heartbeat_max_react_rounds
         self.slash_commands = slash_commands
         self.output_compressor = output_compressor
         self.channel_adapter = channel_adapter or WebUIAdapter()
@@ -239,7 +246,12 @@ class ChatPipeline:
 
     def _is_internal_heartbeat_message(self, inbound: Message) -> bool:
         source = str(inbound.metadata.get("source") or "").strip().lower()
-        return source == "heartbeat"
+        event_source = str(inbound.metadata.get("event_source") or "").strip().lower()
+        tag = str(inbound.message_tag or "").strip().lower()
+        return source == "heartbeat" or event_source == "heartbeat" or tag == "heartbeat"
+
+    def _current_internal_source(self) -> str:
+        return str(_PIPELINE_INTERNAL_SOURCE.get()).strip().lower()
 
     def _session_persistence_suppressed(self) -> bool:
         return bool(_PIPELINE_SUPPRESS_PERSISTENCE.get())
@@ -252,6 +264,101 @@ class ChatPipeline:
 
     def _history_suppressed(self) -> bool:
         return bool(_PIPELINE_SUPPRESS_HISTORY.get())
+
+    def _augment_tool_arguments(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        if tool_name == "scan_emails" and self._current_internal_source() == "heartbeat":
+            updated = dict(arguments)
+            updated.setdefault("triggered_by", "heartbeat")
+            return updated
+        return arguments
+
+    def _metadata_flag_enabled(self, metadata: dict[str, Any], key: str) -> bool:
+        raw = metadata.get(key)
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+        if isinstance(raw, (int, float)):
+            return bool(raw)
+        return False
+
+    def _is_heartbeat_request(self, inbound: Message | None = None) -> bool:
+        if self._current_internal_source() == "heartbeat":
+            return True
+        if inbound is None:
+            return False
+        return self._is_internal_heartbeat_message(inbound)
+
+    def _should_skip_semantic_memory(self, inbound: Message) -> bool:
+        return self._is_heartbeat_request(inbound) or self._metadata_flag_enabled(
+            inbound.metadata,
+            "skip_memory_search",
+        )
+
+    def _effective_max_react_rounds(self, inbound: Message | None = None) -> int:
+        if self._is_heartbeat_request(inbound):
+            heartbeat_max_rounds = self.heartbeat_max_react_rounds
+            if heartbeat_max_rounds is not None and heartbeat_max_rounds > 0:
+                return heartbeat_max_rounds
+        return self.max_react_rounds
+
+    def _should_force_final_response(self, round_num: int, *, max_react_rounds: int) -> bool:
+        return max_react_rounds > 0 and round_num >= max(1, max_react_rounds - 1)
+
+    async def _generate_round_limit_summary(
+        self,
+        react_messages: list[dict[str, Any]],
+        *,
+        session_id: str,
+        max_react_rounds: int,
+    ) -> str:
+        final_messages = list(react_messages)
+        final_messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "You have reached the tool-use round limit. Do not call any more tools. "
+                    "Provide the best possible final answer based only on the information already gathered. "
+                    "If anything remains uncertain, state it briefly."
+                ),
+            }
+        )
+
+        try:
+            decision = await self.router.call_with_tools(
+                self.chat_model,
+                final_messages,
+                tools=None,
+                session_id=session_id,
+            )
+            text = str(decision.get("text") or "").strip()
+            if text:
+                return text
+            if not (decision.get("tool_calls") or []):
+                streamed = ""
+                async for chunk in self.router.stream(
+                    self.chat_model,
+                    final_messages,
+                    session_id=session_id,
+                    tools=None,
+                ):
+                    if not chunk:
+                        continue
+                    streamed += chunk
+                if streamed.strip():
+                    return streamed.strip()
+        except Exception:
+            logger.exception(
+                "react.round_limit.degrading_failed",
+                session_id=session_id,
+                max_rounds=max_react_rounds,
+            )
+
+        return "Stopped due to max ReAct rounds limit."
 
     def _append_session_message(self, message: Message) -> None:
         if self._session_persistence_suppressed():
@@ -293,8 +400,9 @@ class ChatPipeline:
             return outbound
 
         llm_messages = await self._build_llm_messages(inbound)
+        model_name = self._resolve_model_for_inbound(inbound)
         self._append_session_message(inbound)
-        text = await self.router.call(self.chat_model, llm_messages)
+        text = await self.router.call(model_name, llm_messages)
         outbound = Message(
             text=text,
             sender="assistant",
@@ -314,9 +422,10 @@ class ChatPipeline:
     async def stream_reply(self, inbound: Message) -> AsyncIterator[dict[str, Any]]:
         narration_tasks: set[asyncio.Task[None]] = set()
         try:
+            collected_attachments: list[Attachment] = []
             slash_result = await self._try_handle_slash(inbound)
             if slash_result is not None:
-                yield self._format_event(
+                yield await self._format_event(
                     event_type="assistant_chunk",
                     response=RichResponse(text=slash_result),
                     session_id=inbound.session_id,
@@ -333,7 +442,7 @@ class ChatPipeline:
                     origin_channel=inbound.channel,
                     origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
                 )
-                yield self._format_event(
+                yield await self._format_event(
                     event_type="assistant_done",
                     response=RichResponse(),
                     session_id=inbound.session_id,
@@ -343,7 +452,7 @@ class ChatPipeline:
             if self._kill_switch_active():
                 self._append_session_message(inbound)
                 kill_text = KILL_SWITCH_MESSAGE
-                yield self._format_event(
+                yield await self._format_event(
                     event_type="assistant_chunk",
                     response=RichResponse(text=kill_text),
                     session_id=inbound.session_id,
@@ -361,18 +470,17 @@ class ChatPipeline:
                     origin_channel=inbound.channel,
                     origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
                 )
-                yield self._format_event(
+                yield await self._format_event(
                     event_type="assistant_done",
                     response=RichResponse(),
                     session_id=inbound.session_id,
                 )
                 return
 
-            use_tools = (
-                self.skill_manager is not None
-                and self.max_react_rounds > 0
-            )
+            max_react_rounds = self._effective_max_react_rounds(inbound)
+            use_tools = self.skill_manager is not None and max_react_rounds > 0
             llm_messages = await self._build_llm_messages(inbound, use_tools=use_tools)
+            model_name = self._resolve_model_for_inbound(inbound)
             self._append_session_message(inbound)
 
             full_text = ""
@@ -393,7 +501,7 @@ class ChatPipeline:
                 logger.info(
                     "react.start",
                     session_id=inbound.session_id,
-                    max_rounds=self.max_react_rounds,
+                    max_rounds=max_react_rounds,
                 )
                 logger.debug(
                     "react.tools",
@@ -402,10 +510,10 @@ class ChatPipeline:
                     tool_count=len(tool_names),
                 )
 
-                for round_num in range(1, self.max_react_rounds + 1):
+                for round_num in range(1, max_react_rounds + 1):
                     if self._kill_switch_active():
                         full_text = KILL_SWITCH_MESSAGE
-                        yield self._format_event(
+                        yield await self._format_event(
                             event_type="assistant_chunk",
                             response=RichResponse(text=full_text),
                             session_id=inbound.session_id,
@@ -413,7 +521,7 @@ class ChatPipeline:
                         killed = True
                         break
                     decision = await self.router.call_with_tools(
-                        self.chat_model,
+                        model_name,
                         react_messages,
                         tools=tools,
                         session_id=inbound.session_id,
@@ -429,21 +537,21 @@ class ChatPipeline:
                         text = str(decision.get("text") or "")
                         if text:
                             full_text = text
-                            yield self._format_event(
+                            yield await self._format_event(
                                 event_type="assistant_chunk",
                                 response=RichResponse(text=text),
                                 session_id=inbound.session_id,
                             )
                         else:
                             async for chunk in self.router.stream(
-                                self.chat_model,
+                                model_name,
                                 react_messages,
                                 session_id=inbound.session_id,
                                 tools=tools,
                             ):
                                 if self._kill_switch_active():
                                     full_text = KILL_SWITCH_MESSAGE
-                                    yield self._format_event(
+                                    yield await self._format_event(
                                         event_type="assistant_chunk",
                                         response=RichResponse(text=full_text),
                                         session_id=inbound.session_id,
@@ -453,7 +561,7 @@ class ChatPipeline:
                                 if not chunk:
                                     continue
                                 full_text += chunk
-                                yield self._format_event(
+                                yield await self._format_event(
                                     event_type="assistant_chunk",
                                     response=RichResponse(text=chunk),
                                     session_id=inbound.session_id,
@@ -472,7 +580,10 @@ class ChatPipeline:
                     for tool_call in tool_calls:
                         tool_name = self._extract_tool_name(tool_call)
                         tool_call_id = str(tool_call.get("id") or "")
-                        arguments = self._parse_tool_arguments(tool_call)
+                        arguments = self._augment_tool_arguments(
+                            tool_name,
+                            self._parse_tool_arguments(tool_call),
+                        )
                         narration_task = self._schedule_narration_task(
                             inbound=inbound,
                             tool_name=tool_name,
@@ -486,7 +597,7 @@ class ChatPipeline:
                             status="start",
                             session_id=inbound.session_id,
                         )
-                        yield self._format_event(
+                        yield await self._format_event(
                             event_type="tool_call_start",
                             response=RichResponse(
                                 tool_calls=[
@@ -544,6 +655,12 @@ class ChatPipeline:
                         tool_result_for_event: Any = output.result
                         tool_metadata_for_event = dict(output.metadata)
                         tool_metadata_for_event["ephemeral"] = True
+                        tool_attachments_for_event = [
+                            attachment.model_copy()
+                            for attachment in output.attachments
+                        ]
+                        if tool_attachments_for_event:
+                            collected_attachments.extend(tool_attachments_for_event)
                         compressed_meta_for_event: dict[str, Any] | None = None
                         if self.output_compressor is not None:
                             compression_metadata: dict[str, Any] = {
@@ -568,10 +685,11 @@ class ChatPipeline:
                                         output=output,
                                         compressed_meta=compressed_meta_for_event,
                                     )
-                        yield self._format_event(
+                        yield await self._format_event(
                             event_type="tool_call_result",
                             response=RichResponse(
                                 compressed_meta=compressed_meta_for_event,
+                                attachments=tool_attachments_for_event,
                                 tool_calls=[
                                     {
                                         "tool_name": tool_name,
@@ -598,7 +716,7 @@ class ChatPipeline:
                         ):
                             session_fused = True
                             full_text = SESSION_FUSED_MESSAGE
-                            yield self._format_event(
+                            yield await self._format_event(
                                 event_type="assistant_chunk",
                                 response=RichResponse(text=full_text),
                                 session_id=inbound.session_id,
@@ -606,24 +724,46 @@ class ChatPipeline:
                             break
                     if session_fused:
                         break
+                    if self._should_force_final_response(
+                        round_num,
+                        max_react_rounds=max_react_rounds,
+                    ):
+                        reached_round_limit = False
+                        logger.warning(
+                            "react.round_limit.degrading",
+                            session_id=inbound.session_id,
+                            round=round_num,
+                            max_rounds=max_react_rounds,
+                        )
+                        full_text = await self._generate_round_limit_summary(
+                            react_messages,
+                            session_id=inbound.session_id,
+                            max_react_rounds=max_react_rounds,
+                        )
+                        yield await self._format_event(
+                            event_type="assistant_chunk",
+                            response=RichResponse(text=full_text),
+                            session_id=inbound.session_id,
+                        )
+                        break
 
                 if reached_round_limit:
                     logger.warning("react.round_limit", session_id=inbound.session_id)
                     full_text = "Stopped due to max ReAct rounds limit."
-                    yield self._format_event(
+                    yield await self._format_event(
                         event_type="assistant_chunk",
                         response=RichResponse(text=full_text),
                         session_id=inbound.session_id,
                     )
             else:
                 async for chunk in self.router.stream(
-                    self.chat_model,
+                    model_name,
                     llm_messages,
                     session_id=inbound.session_id,
                 ):
                     if self._kill_switch_active():
                         full_text = KILL_SWITCH_MESSAGE
-                        yield self._format_event(
+                        yield await self._format_event(
                             event_type="assistant_chunk",
                             response=RichResponse(text=full_text),
                             session_id=inbound.session_id,
@@ -633,7 +773,7 @@ class ChatPipeline:
                     if not chunk:
                         continue
                     full_text += chunk
-                    yield self._format_event(
+                    yield await self._format_event(
                         event_type="assistant_chunk",
                         response=RichResponse(text=chunk),
                         session_id=inbound.session_id,
@@ -642,6 +782,7 @@ class ChatPipeline:
             if session_fused:
                 outbound = Message(
                     text=full_text,
+                    attachments=[attachment.model_copy() for attachment in collected_attachments],
                     sender="assistant",
                     session_id=inbound.session_id,
                     channel=inbound.channel,
@@ -653,9 +794,11 @@ class ChatPipeline:
                     origin_channel=inbound.channel,
                     origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
                 )
-                yield self._format_event(
+                yield await self._format_event(
                     event_type="assistant_done",
-                    response=RichResponse(),
+                    response=RichResponse(
+                        attachments=[attachment.model_copy() for attachment in collected_attachments],
+                    ),
                     session_id=inbound.session_id,
                 )
                 return
@@ -663,6 +806,7 @@ class ChatPipeline:
             if killed:
                 outbound = Message(
                     text=full_text,
+                    attachments=[attachment.model_copy() for attachment in collected_attachments],
                     sender="assistant",
                     session_id=inbound.session_id,
                     channel=inbound.channel,
@@ -670,9 +814,11 @@ class ChatPipeline:
                 )
                 self._append_session_message(outbound)
                 await self._broadcast_message(outbound, origin_channel=inbound.channel)
-                yield self._format_event(
+                yield await self._format_event(
                     event_type="assistant_done",
-                    response=RichResponse(),
+                    response=RichResponse(
+                        attachments=[attachment.model_copy() for attachment in collected_attachments],
+                    ),
                     session_id=inbound.session_id,
                 )
                 return
@@ -683,7 +829,7 @@ class ChatPipeline:
             )
             if extra_chunk is not None:
                 full_text += extra_chunk
-                yield self._format_event(
+                yield await self._format_event(
                     event_type="assistant_chunk",
                     response=RichResponse(text=extra_chunk),
                     session_id=inbound.session_id,
@@ -691,6 +837,7 @@ class ChatPipeline:
 
             outbound = Message(
                 text=full_text,
+                attachments=[attachment.model_copy() for attachment in collected_attachments],
                 sender="assistant",
                 session_id=inbound.session_id,
                 channel=inbound.channel,
@@ -703,9 +850,11 @@ class ChatPipeline:
                 origin_channel=inbound.channel,
                 origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
             )
-            yield self._format_event(
+            yield await self._format_event(
                 event_type="assistant_done",
-                response=RichResponse(),
+                response=RichResponse(
+                    attachments=[attachment.model_copy() for attachment in collected_attachments],
+                ),
                 session_id=inbound.session_id,
             )
         finally:
@@ -735,12 +884,18 @@ class ChatPipeline:
         inbound: Message,
         *,
         use_tools: bool = False,
-    ) -> list[dict[str, str]]:
-        text = (inbound.text or "").strip()
-        if not text:
+    ) -> list[dict[str, Any]]:
+        text = self._message_text_for_llm(inbound)
+        if not text and not self._has_image_attachments(inbound):
             raise ValueError("text is required for M2 chat pipeline")
 
-        llm_messages: list[dict[str, str]] = []
+        user_content: str | list[dict[str, Any]]
+        if self._has_image_attachments(inbound):
+            user_content = self._build_multimodal_user_content(inbound, text=text)
+        else:
+            user_content = text
+
+        llm_messages: list[dict[str, Any]] = []
         persona_prompt = await self._resolve_persona_prompt(text)
         if persona_prompt:
             llm_messages.append({"role": "system", "content": persona_prompt})
@@ -750,7 +905,10 @@ class ChatPipeline:
         prefs_context = self._preferences_context()
         if prefs_context:
             llm_messages.append({"role": "system", "content": prefs_context})
-        semantic_context = await self._semantic_memory_context(text)
+        semantic_context = await self._semantic_memory_context(
+            text,
+            skip_search=self._should_skip_semantic_memory(inbound),
+        )
         if semantic_context:
             llm_messages.append({"role": "system", "content": semantic_context})
 
@@ -764,7 +922,7 @@ class ChatPipeline:
                 if llm_item is not None:
                     llm_messages.append(llm_item)
 
-        llm_messages.append({"role": "user", "content": text})
+        llm_messages.append({"role": "user", "content": user_content})
         return llm_messages
 
     async def _resolve_persona_prompt(self, query: str) -> str:
@@ -779,7 +937,10 @@ class ChatPipeline:
                     return prompt
         return self.persona_system_prompt
 
-    async def _semantic_memory_context(self, query: str) -> str:
+    async def _semantic_memory_context(self, query: str, *, skip_search: bool = False) -> str:
+        if skip_search:
+            self._pending_sop_usage = set()
+            return ""
         if self.semantic_memory is None:
             self._pending_sop_usage = set()
             return ""
@@ -899,8 +1060,8 @@ class ChatPipeline:
             lines.append(f"- {key}: {value}")
         return "\n".join(lines)
 
-    def _to_llm_message(self, message: Message) -> dict[str, str] | None:
-        text = (message.text or "").strip()
+    def _to_llm_message(self, message: Message) -> dict[str, Any] | None:
+        text = self._message_text_for_llm(message)
         if not text:
             return None
 
@@ -911,6 +1072,91 @@ class ChatPipeline:
         else:
             return None
         return {"role": role, "content": text}
+
+    def _resolve_model_for_inbound(self, inbound: Message) -> str:
+        if self._has_image_attachments(inbound):
+            getter = getattr(self.router, "get_model_for_task", None)
+            if callable(getter):
+                return str(getter("vision") or self.chat_model)
+        return self.chat_model
+
+    def _message_text_for_llm(self, message: Message) -> str:
+        text = (message.text or "").strip()
+        if text:
+            return text
+
+        attachment_summary = self._attachments_summary_text(message.attachments)
+        if attachment_summary:
+            return attachment_summary
+
+        legacy_items: list[str] = []
+        if message.image:
+            legacy_items.append(f"image: {message.image}")
+        if message.file:
+            legacy_items.append(f"file: {message.file}")
+        if message.audio:
+            legacy_items.append(f"audio: {message.audio}")
+        if not legacy_items:
+            return ""
+        return "[Attachments]\n- " + "\n- ".join(legacy_items)
+
+    def _attachments_summary_text(self, attachments: list[Attachment]) -> str:
+        if not attachments:
+            return ""
+        lines = ["[Attachments]"]
+        for attachment in attachments:
+            label = attachment.filename or Path(attachment.url).name or attachment.url
+            details: list[str] = []
+            if attachment.type:
+                details.append(attachment.type)
+            if attachment.mime_type:
+                details.append(attachment.mime_type)
+            if attachment.size_bytes is not None:
+                details.append(f"{attachment.size_bytes} bytes")
+            suffix = f" ({', '.join(details)})" if details else ""
+            lines.append(f"- {label}{suffix}")
+        return "\n".join(lines)
+
+    def _has_image_attachments(self, message: Message) -> bool:
+        return any(attachment.type == "image" for attachment in message.attachments)
+
+    def _build_multimodal_user_content(
+        self,
+        inbound: Message,
+        *,
+        text: str,
+    ) -> list[dict[str, Any]]:
+        content: list[dict[str, Any]] = []
+        if text:
+            content.append({"type": "text", "text": text})
+        for attachment in inbound.attachments:
+            if attachment.type != "image":
+                continue
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": self._image_attachment_url(attachment),
+                    },
+                }
+            )
+        if not content:
+            raise ValueError("image attachment is required for multimodal content")
+        return content
+
+    def _image_attachment_url(self, attachment: Attachment) -> str:
+        raw_url = str(attachment.url or "").strip()
+        if not raw_url:
+            raise ValueError("attachment url is required")
+        lowered = raw_url.lower()
+        if lowered.startswith(("http://", "https://", "data:")):
+            return raw_url
+
+        file_path = Path(raw_url).expanduser().resolve(strict=False)
+        payload = file_path.read_bytes()
+        mime_type = guess_mime_type(file_path.name, attachment.mime_type)
+        encoded = base64.b64encode(payload).decode("ascii")
+        return f"data:{mime_type};base64,{encoded}"
 
     async def _broadcast_message(
         self,
@@ -999,18 +1245,21 @@ class ChatPipeline:
             return None
         return await self.slash_commands.try_handle(inbound)
 
-    def _format_event(
+    async def _format_event(
         self,
         *,
         event_type: str,
         response: RichResponse,
         session_id: str,
     ) -> dict[str, Any]:
-        return self.channel_adapter.format(
+        formatted = self.channel_adapter.format(
             response,
             event_type=event_type,
             session_id=session_id,
         )
+        if inspect.isawaitable(formatted):
+            formatted = await formatted
+        return dict(formatted)
 
     async def _persist_tool_invocation_compressed_meta(
         self,
@@ -1314,6 +1563,22 @@ class ChatPipeline:
                 sender="assistant",
                 session_id=session_id,
                 message_tag="email_scan",
+                channel="system",
+            )
+
+        if event_type == "trendradar_trigger":
+            header = title or "TrendRadar 更新"
+            body = summary or description
+            text = header
+            if body:
+                text = f"{header}\n{body}"
+            if not text.startswith(("📰", "📡", "ℹ️")):
+                text = f"📰 {text}"
+            return Message(
+                text=text,
+                sender="assistant",
+                session_id=session_id,
+                message_tag="tool_status",
                 channel="system",
             )
 

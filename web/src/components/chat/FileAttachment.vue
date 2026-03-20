@@ -6,9 +6,10 @@ import CodeBlock from "./CodeBlock.vue";
 const props = defineProps<{
   path: string;
   content?: string;
+  label?: string;
 }>();
 
-const fileName = computed(() => props.path.split("/").pop() || props.path);
+const fileName = computed(() => props.label || props.path.split("/").pop() || props.path);
 const ext = computed(() => {
   const parts = fileName.value.toLowerCase().split(".");
   return parts.length > 1 ? parts[parts.length - 1] ?? "" : "";

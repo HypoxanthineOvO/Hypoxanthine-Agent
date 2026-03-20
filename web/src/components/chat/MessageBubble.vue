@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { computed } from "vue";
 
+import FileAttachment from "./FileAttachment.vue";
+import MediaMessage from "./MediaMessage.vue";
 import type { Message } from "../../types/message";
 import { formatMessageTime } from "../../utils/timeFormat";
 
 const props = defineProps<{
   message: Message;
+  assetUrlResolver?: ((rawPath: string) => string) | undefined;
 }>();
 
 const isNarration = (): boolean => props.message.message_tag === "narration";
@@ -35,6 +38,24 @@ const formattedTime = computed(() => {
   }
   return formatMessageTime(raw);
 });
+
+const messageAttachments = computed(() => props.message.attachments ?? []);
+const imageAttachments = computed(() =>
+  messageAttachments.value.filter((attachment) => attachment.type === "image"),
+);
+const fileAttachments = computed(() =>
+  messageAttachments.value.filter((attachment) => attachment.type !== "image"),
+);
+
+const resolveAttachmentUrl = (rawPath: string): string => {
+  if (typeof props.assetUrlResolver === "function") {
+    return props.assetUrlResolver(rawPath);
+  }
+  return rawPath;
+};
+
+const attachmentLabel = (rawPath: string, filename?: string | null): string =>
+  filename || rawPath.split("/").pop() || rawPath;
 </script>
 
 <template>
@@ -53,6 +74,20 @@ const formattedTime = computed(() => {
         <span v-else-if="message.message_tag === 'heartbeat'" class="message-tag">💓 巡检</span>
         <span v-else-if="sourceLabel()" class="message-tag">{{ sourceLabel() }}</span>
       </header>
+      <div v-if="imageAttachments.length || fileAttachments.length" class="bubble-attachments">
+        <MediaMessage
+          v-for="(attachment, index) in imageAttachments"
+          :key="`${attachment.url}-${index}`"
+          :src="resolveAttachmentUrl(attachment.url)"
+          media-type="image"
+        />
+        <FileAttachment
+          v-for="(attachment, index) in fileAttachments"
+          :key="`${attachment.url}-${index}`"
+          :path="resolveAttachmentUrl(attachment.url)"
+          :label="attachmentLabel(attachment.url, attachment.filename)"
+        />
+      </div>
       <slot />
       <div v-if="formattedTime" class="bubble-time">{{ formattedTime }}</div>
     </div>
@@ -99,6 +134,8 @@ const formattedTime = computed(() => {
   background: color-mix(in srgb, var(--surface) 92%, transparent);
   border: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
   border-radius: 0.9rem;
+  display: grid;
+  gap: 0.55rem;
   min-width: 0;
   padding: 0.6rem 0.72rem;
 }
@@ -150,6 +187,11 @@ const formattedTime = computed(() => {
   display: flex;
   font-size: 0.75rem;
   margin-top: 0.45rem;
+}
+
+.bubble-attachments {
+  display: grid;
+  gap: 0.55rem;
 }
 
 .message-bubble[data-sender="user"] .bubble-time {

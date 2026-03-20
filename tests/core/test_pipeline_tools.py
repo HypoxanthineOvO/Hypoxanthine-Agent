@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import hypo_agent.core.pipeline as pipeline_module
 from hypo_agent.core.pipeline import ChatPipeline
@@ -515,6 +516,147 @@ def test_pipeline_stream_reply_respects_max_react_rounds() -> None:
     assert events[-1]["type"] == "assistant_done"
 
 
+def test_pipeline_stream_reply_gracefully_degrades_before_round_limit() -> None:
+    memory = StubSessionMemory()
+    skills = StubSkillManager()
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.tools_history: list[list[dict] | None] = []
+
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, session_id
+            self.tools_history.append(tools)
+            if tools is None:
+                return {"text": "基于现有结果：CPU 正常，邮件无异常。", "tool_calls": []}
+            return {
+                "text": "",
+                "tool_calls": [
+                    {
+                        "id": "loop",
+                        "type": "function",
+                        "function": {
+                            "name": "run_command",
+                            "arguments": "{\"command\": \"uptime\"}",
+                        },
+                    }
+                ],
+            }
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            del model_name, messages, session_id, tools
+            raise AssertionError("stream should not be called when graceful degradation succeeds")
+            yield ""  # pragma: no cover
+
+    router = StubRouter()
+    pipeline = ChatPipeline(
+        router=router,
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skills,
+        max_react_rounds=2,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="loop", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+    combined = "".join(event.get("text", "") for event in events if event.get("type") == "assistant_chunk")
+
+    assert "基于现有结果" in combined
+    assert "max react rounds" not in combined.lower()
+    assert router.tools_history == [skills.get_tools_schema(), None]
+
+
+def test_pipeline_default_max_react_rounds_is_higher_than_before() -> None:
+    class DefaultRouter:
+        async def call(self, model_name, messages, *, session_id=None, tools=None):
+            del model_name, messages, session_id, tools
+            return "ok"
+
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            return {"text": "ok", "tool_calls": []}
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            del model_name, messages, session_id, tools
+            if False:  # pragma: no cover
+                yield ""
+
+    pipeline = ChatPipeline(
+        router=DefaultRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=StubSessionMemory(),
+        skill_manager=StubSkillManager(),
+    )
+
+    assert pipeline.max_react_rounds >= 15
+
+
+def test_pipeline_stream_reply_uses_heartbeat_specific_round_limit() -> None:
+    memory = StubSessionMemory()
+    skills = StubSkillManager()
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.tools_history: list[list[dict] | None] = []
+
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, session_id
+            self.tools_history.append(tools)
+            if tools is None:
+                return {"text": "heartbeat summary", "tool_calls": []}
+            return {
+                "text": "",
+                "tool_calls": [
+                    {
+                        "id": f"call_{len(self.tools_history)}",
+                        "type": "function",
+                        "function": {
+                            "name": "run_command",
+                            "arguments": "{\"command\": \"uptime\"}",
+                        },
+                    }
+                ],
+            }
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            del model_name, messages, session_id, tools
+            raise AssertionError("stream should not be called")
+            yield ""  # pragma: no cover
+
+    router = StubRouter()
+    pipeline = ChatPipeline(
+        router=router,
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skills,
+        max_react_rounds=15,
+        heartbeat_max_react_rounds=3,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(
+            text="heartbeat",
+            sender="user",
+            session_id="s1",
+            channel="system",
+            message_tag="heartbeat",
+            metadata={"source": "heartbeat", "skip_memory_search": True},
+        )
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+    combined = "".join(event.get("text", "") for event in events if event.get("type") == "assistant_chunk")
+
+    assert "heartbeat summary" in combined
+    assert len(router.tools_history) == 3
+    assert router.tools_history[0] is not None
+    assert router.tools_history[1] is not None
+    assert router.tools_history[2] is None
+
+
 def test_pipeline_stream_reply_emits_error_when_tool_blocked() -> None:
     memory = StubSessionMemory()
     skills = StubSkillManager(
@@ -689,6 +831,72 @@ def test_pipeline_stream_reply_compresses_tool_output_before_tool_message() -> N
     tool_messages = [m for m in router.last_messages if m.get("role") == "tool"]
     assert tool_messages
     assert str(tool_messages[-1]["content"]).endswith("Ask me for details.]")
+
+
+def test_pipeline_stream_reply_keeps_tool_output_uncompressed_when_compressor_disabled() -> None:
+    memory = StubSessionMemory()
+    original_output = SkillOutput(
+        status="success",
+        result={"stdout": "a" * 5000, "stderr": "", "exit_code": 0},
+    )
+    skills = StubSkillManager(output=original_output)
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.last_messages: list[dict] = []
+
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, tools, session_id
+            self.calls += 1
+            self.last_messages = messages
+            if self.calls == 1:
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "run_command",
+                                "arguments": "{\"command\": \"echo big\"}",
+                            },
+                        }
+                    ],
+                }
+            return {"text": "done", "tool_calls": []}
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            del model_name, messages, session_id, tools
+            raise AssertionError("stream should not be called")
+            yield ""  # pragma: no cover
+
+    router = StubRouter()
+    pipeline = ChatPipeline(
+        router=router,
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skills,
+        output_compressor=None,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="run", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+
+    assert events[1]["type"] == "tool_call_result"
+    assert events[1]["result"] == original_output.result
+    assert "compressed_meta" not in events[1]
+    tool_messages = [message for message in router.last_messages if message.get("role") == "tool"]
+    assert tool_messages == [
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": json.dumps(original_output.model_dump(mode="json"), ensure_ascii=False),
+        }
+    ]
 
 
 def test_pipeline_stream_reply_persists_compressed_meta_with_invocation_id() -> None:

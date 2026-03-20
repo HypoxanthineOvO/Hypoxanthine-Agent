@@ -231,6 +231,44 @@ def test_pipeline_event_consumer_writes_email_scan_message() -> None:
     asyncio.run(_run())
 
 
+def test_pipeline_event_consumer_writes_trendradar_message() -> None:
+    async def _run() -> None:
+        queue = EventQueue()
+        memory = StubSessionMemory()
+        pushed: list[Message] = []
+
+        async def on_proactive_message(message: Message) -> None:
+            pushed.append(message)
+
+        pipeline = ChatPipeline(
+            router=StubRouter(),
+            chat_model="Gemini3Pro",
+            session_memory=memory,
+            event_queue=queue,
+            on_proactive_message=on_proactive_message,
+        )
+
+        await pipeline.start_event_consumer()
+        await queue.put(
+            {
+                "event_type": "trendradar_trigger",
+                "session_id": "main",
+                "title": "TrendRadar 摘要",
+                "summary": "技术：阿里云涨价；财经：云厂商定价",
+            }
+        )
+        await asyncio.sleep(0.05)
+        await pipeline.stop_event_consumer()
+
+        assert len(memory.appended) == 1
+        assert memory.appended[0].message_tag == "tool_status"
+        assert "TrendRadar" in (memory.appended[0].text or "")
+        assert len(pushed) == 1
+        assert pushed[0].message_tag == "tool_status"
+
+    asyncio.run(_run())
+
+
 def test_pipeline_event_consumer_processes_user_message_tasks() -> None:
     async def _run() -> None:
         queue = EventQueue()

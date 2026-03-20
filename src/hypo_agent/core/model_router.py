@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import inspect
+from copy import deepcopy
 from collections.abc import AsyncIterator
 from collections.abc import Awaitable, Callable
 import asyncio
@@ -84,9 +85,13 @@ class ModelRouter:
                 continue
 
             try:
+                prepared_messages, remapped_ids = self._prepare_messages_for_candidate(
+                    messages,
+                    cfg.litellm_model,
+                )
                 kwargs: dict[str, Any] = {
                     "model": cfg.litellm_model,
-                    "messages": messages,
+                    "messages": prepared_messages,
                 }
                 if isinstance(cfg.api_base, str) and cfg.api_base.strip():
                     kwargs["api_base"] = cfg.api_base
@@ -94,11 +99,18 @@ class ModelRouter:
                     kwargs["api_key"] = cfg.api_key
                 if tools is not None:
                     kwargs["tools"] = tools
+                if remapped_ids:
+                    self.logger.info(
+                        "tool_call_ids_sanitized",
+                        requested_model=model_name,
+                        resolved_model=candidate,
+                        remapped_ids=remapped_ids,
+                    )
                 self.logger.debug(
                     "call_with_tools.request",
                     model=cfg.litellm_model,
                     tools_count=len(tools or []),
-                    messages_count=len(messages),
+                    messages_count=len(prepared_messages),
                 )
 
                 response = await self._acompletion(**kwargs)
@@ -174,9 +186,13 @@ class ModelRouter:
             usage = {"input_tokens": None, "output_tokens": None, "total_tokens": None}
 
             try:
+                prepared_messages, remapped_ids = self._prepare_messages_for_candidate(
+                    messages,
+                    cfg.litellm_model,
+                )
                 kwargs: dict[str, Any] = {
                     "model": cfg.litellm_model,
-                    "messages": messages,
+                    "messages": prepared_messages,
                     "stream": True,
                 }
                 if isinstance(cfg.api_base, str) and cfg.api_base.strip():
@@ -185,6 +201,13 @@ class ModelRouter:
                     kwargs["api_key"] = cfg.api_key
                 if tools is not None:
                     kwargs["tools"] = tools
+                if remapped_ids:
+                    self.logger.info(
+                        "tool_call_ids_sanitized",
+                        requested_model=model_name,
+                        resolved_model=candidate,
+                        remapped_ids=remapped_ids,
+                    )
 
                 response_stream = await self._acompletion(**kwargs)
 
@@ -426,6 +449,149 @@ class ModelRouter:
 
     def _has_tool_call_payload(self, payload: Any) -> bool:
         return bool(self._extract_tool_calls(payload))
+
+    def _prepare_messages_for_candidate(
+        self,
+        messages: list[dict[str, Any]],
+        litellm_model: str | None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+        if not self._candidate_requires_fc_tool_call_ids(litellm_model):
+            return messages, []
+
+        id_mapping = self._build_tool_call_id_mapping(messages)
+        if not id_mapping:
+            return messages, []
+
+        prepared_messages: list[dict[str, Any]] = []
+        changed = False
+        for message in messages:
+            if not isinstance(message, dict):
+                prepared_messages.append(message)
+                continue
+
+            role = message.get("role")
+            updated_message = message
+
+            if role == "assistant":
+                tool_calls = message.get("tool_calls")
+                if isinstance(tool_calls, list):
+                    updated_tool_calls: list[Any] = []
+                    tool_calls_changed = False
+                    for tool_call in tool_calls:
+                        if not isinstance(tool_call, dict):
+                            updated_tool_calls.append(tool_call)
+                            continue
+                        original_id = tool_call.get("id")
+                        replacement_id = (
+                            id_mapping.get(original_id)
+                            if isinstance(original_id, str)
+                            else None
+                        )
+                        if replacement_id is None:
+                            updated_tool_calls.append(tool_call)
+                            continue
+                        updated_tool_call = deepcopy(tool_call)
+                        updated_tool_call["id"] = replacement_id
+                        updated_tool_calls.append(updated_tool_call)
+                        tool_calls_changed = True
+                    if tool_calls_changed:
+                        updated_message = dict(message)
+                        updated_message["tool_calls"] = updated_tool_calls
+                        changed = True
+
+            elif role == "tool":
+                original_tool_call_id = message.get("tool_call_id")
+                replacement_id = (
+                    id_mapping.get(original_tool_call_id)
+                    if isinstance(original_tool_call_id, str)
+                    else None
+                )
+                if replacement_id is not None:
+                    updated_message = dict(message)
+                    updated_message["tool_call_id"] = replacement_id
+                    changed = True
+
+            prepared_messages.append(updated_message)
+
+        if not changed:
+            return messages, []
+
+        remapped_ids = [
+            {"original_id": original_id, "sanitized_id": sanitized_id}
+            for original_id, sanitized_id in id_mapping.items()
+            if original_id != sanitized_id
+        ]
+        return prepared_messages, remapped_ids
+
+    def _build_tool_call_id_mapping(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> dict[str, str]:
+        discovered_ids: list[str] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+
+            role = message.get("role")
+            if role == "assistant":
+                tool_calls = message.get("tool_calls")
+                if not isinstance(tool_calls, list):
+                    continue
+                for tool_call in tool_calls:
+                    if not isinstance(tool_call, dict):
+                        continue
+                    call_id = tool_call.get("id")
+                    if isinstance(call_id, str) and call_id.strip():
+                        discovered_ids.append(call_id.strip())
+            elif role == "tool":
+                tool_call_id = message.get("tool_call_id")
+                if isinstance(tool_call_id, str) and tool_call_id.strip():
+                    discovered_ids.append(tool_call_id.strip())
+
+        if not discovered_ids:
+            return {}
+
+        mapping: dict[str, str] = {}
+        reserved_ids: set[str] = set()
+        for call_id in discovered_ids:
+            if call_id in mapping:
+                continue
+            mapping[call_id] = self._build_fc_compatible_tool_call_id(
+                call_id,
+                reserved_ids,
+            )
+            reserved_ids.add(mapping[call_id])
+        return {
+            original_id: sanitized_id
+            for original_id, sanitized_id in mapping.items()
+            if sanitized_id != original_id
+        }
+
+    def _candidate_requires_fc_tool_call_ids(self, litellm_model: str | None) -> bool:
+        # GPT-5 family requests can be bridged onto OpenAI Responses API, which
+        # rejects historical function-call IDs unless they use the `fc_` prefix.
+        model_name = str(litellm_model or "").split("/")[-1].strip().lower()
+        return model_name.startswith("gpt-5")
+
+    def _build_fc_compatible_tool_call_id(
+        self,
+        original_id: str,
+        reserved_ids: set[str],
+    ) -> str:
+        normalized = original_id.strip()
+        if normalized.startswith("fc_") and normalized not in reserved_ids:
+            return normalized
+
+        safe_id = re.sub(r"[^A-Za-z0-9_-]+", "_", normalized).strip("_")
+        if not safe_id:
+            safe_id = "tool_call"
+        base_id = safe_id if safe_id.startswith("fc_") else f"fc_{safe_id}"
+        candidate_id = base_id
+        suffix = 1
+        while candidate_id in reserved_ids:
+            candidate_id = f"{base_id}_{suffix}"
+            suffix += 1
+        return candidate_id
 
     def _normalize_tool_call_item(
         self,

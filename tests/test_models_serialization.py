@@ -5,6 +5,7 @@ import yaml
 
 from hypo_agent.core.logging import configure_logging
 from hypo_agent.models import (
+    Attachment,
     HeartbeatCheck,
     Message,
     ModelConfig,
@@ -39,6 +40,59 @@ def test_message_round_trip_serialization(fixed_timestamp):
     assert restored.sender == "user"
     assert restored.timestamp == fixed_timestamp
     assert restored.session_id == "session-1"
+
+
+def test_attachment_round_trip_serialization() -> None:
+    attachment = Attachment(
+        type="image",
+        url="/tmp/example.png",
+        filename="example.png",
+        mime_type="image/png",
+        size_bytes=1234,
+    )
+
+    payload = attachment.model_dump()
+    restored = Attachment.model_validate(payload)
+
+    assert restored.type == "image"
+    assert restored.url == "/tmp/example.png"
+    assert restored.filename == "example.png"
+    assert restored.mime_type == "image/png"
+    assert restored.size_bytes == 1234
+
+
+def test_message_serializes_attachments_and_backfills_legacy_payload(fixed_timestamp) -> None:
+    message = Message(
+        text="describe this",
+        sender="user",
+        timestamp=fixed_timestamp,
+        session_id="session-vision",
+        attachments=[
+            Attachment(
+                type="image",
+                url="/tmp/cat.png",
+                filename="cat.png",
+                mime_type="image/png",
+                size_bytes=42,
+            )
+        ],
+    )
+
+    payload = message.model_dump_json()
+    restored = Message.model_validate_json(payload)
+    legacy = Message.model_validate(
+        {
+            "text": "legacy",
+            "sender": "user",
+            "timestamp": fixed_timestamp,
+            "session_id": "session-legacy",
+        }
+    )
+
+    assert len(restored.attachments) == 1
+    assert restored.attachments[0].type == "image"
+    assert restored.attachments[0].filename == "cat.png"
+    assert legacy.attachments == []
 
 
 def test_message_accepts_optional_message_tag(fixed_timestamp):
@@ -82,6 +136,27 @@ def test_message_accepts_email_scan_tag(fixed_timestamp):
     payload = message.model_dump_json()
     restored = Message.model_validate_json(payload)
     assert restored.message_tag == "email_scan"
+
+
+def test_skill_output_serializes_attachments() -> None:
+    output = SkillOutput(
+        status="success",
+        result="/tmp/export.pdf",
+        attachments=[
+            Attachment(
+                type="file",
+                url="/tmp/export.pdf",
+                filename="export.pdf",
+                mime_type="application/pdf",
+                size_bytes=128,
+            )
+        ],
+    )
+
+    payload = output.model_dump_json()
+    restored = SkillOutput.model_validate_json(payload)
+
+    assert restored.attachments[0].filename == "export.pdf"
 
 
 def test_message_accepts_qq_channel_and_sender_id(fixed_timestamp):
@@ -243,6 +318,23 @@ def test_secrets_config_accepts_services_qq():
     assert config.services.qq.allowed_users == ["10001"]
 
 
+def test_secrets_config_accepts_services_tavily():
+    config = SecretsConfig.model_validate(
+        {
+            "providers": {},
+            "services": {
+                "tavily": {
+                    "api_key": "tvly-dev-key",
+                }
+            },
+        }
+    )
+
+    assert config.services is not None
+    assert config.services.tavily is not None
+    assert config.services.tavily.api_key == "tvly-dev-key"
+
+
 def test_secrets_yaml_example_includes_qq_template() -> None:
     example_path = Path(__file__).resolve().parents[1] / "config" / "secrets.yaml.example"
     payload = yaml.safe_load(example_path.read_text(encoding="utf-8"))
@@ -255,6 +347,8 @@ def test_secrets_yaml_example_includes_qq_template() -> None:
     assert config.services.qq.napcat_ws_token == ""
     assert config.services.qq.bot_qq == "123456789"
     assert config.services.qq.allowed_users == ["10001"]
+    assert config.services.tavily is not None
+    assert config.services.tavily.api_key == "PLACEHOLDER_TAVILY_API_KEY"
 
 
 def test_security_config_whitelist_and_circuit_breaker():

@@ -6,11 +6,20 @@ export type MessageTag =
   | "narration"
   | string;
 
+export interface Attachment {
+  type: "image" | "file" | "audio" | "video";
+  url: string;
+  filename?: string | null;
+  mime_type?: string | null;
+  size_bytes?: number | null;
+}
+
 export interface Message {
   text?: string | null;
   image?: string | null;
   file?: string | null;
   audio?: string | null;
+  attachments?: Attachment[];
   sender: string;
   timestamp?: string | null;
   session_id: string;
@@ -49,6 +58,7 @@ export interface AssistantDoneEvent {
   sender: "assistant";
   session_id: string;
   timestamp?: string;
+  attachments?: Attachment[];
 }
 
 export interface CompressedMeta {
@@ -75,6 +85,7 @@ export interface ToolCallResultEvent {
   metadata: Record<string, unknown>;
   session_id: string;
   compressed_meta?: CompressedMeta;
+  attachments?: Attachment[];
 }
 
 export interface WsErrorEvent {

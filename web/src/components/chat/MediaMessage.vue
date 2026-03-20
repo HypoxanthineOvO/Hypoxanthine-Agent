@@ -3,11 +3,16 @@ import { computed } from "vue";
 
 const props = defineProps<{
   src: string;
+  mediaType?: "image" | "video";
 }>();
 
 const lowered = computed(() => props.src.toLowerCase());
-const isImage = computed(() => /\.(png|jpe?g|gif|svg|webp)$/.test(lowered.value));
-const isVideo = computed(() => /\.(mp4|webm)$/.test(lowered.value));
+const isImage = computed(
+  () => props.mediaType === "image" || /\.(png|jpe?g|gif|svg|webp)(\?|$)/.test(lowered.value),
+);
+const isVideo = computed(
+  () => props.mediaType === "video" || /\.(mp4|webm)(\?|$)/.test(lowered.value),
+);
 </script>
 
 <template>

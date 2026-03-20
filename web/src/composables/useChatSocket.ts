@@ -2,6 +2,7 @@ import { ref } from "vue";
 import type { Ref } from "vue";
 
 import type {
+  Attachment,
   AssistantChunkEvent,
   AssistantDoneEvent,
   ConnectionStatus,
@@ -215,6 +216,9 @@ export function useChatSocket(options: UseChatSocketOptions) {
             const existing = messages.value[streamingAssistantIndex];
             if (existing) {
               existing.timestamp = existing.timestamp ?? payload.timestamp;
+              if (Array.isArray(payload.attachments) && payload.attachments.length > 0) {
+                existing.attachments = payload.attachments.map((attachment) => ({ ...attachment }));
+              }
             }
           }
           streamingAssistantIndex = null;
@@ -251,6 +255,7 @@ export function useChatSocket(options: UseChatSocketOptions) {
             error_info: payload.error_info,
             metadata: payload.metadata,
             compressed_meta: payload.compressed_meta,
+            attachments: payload.attachments,
           });
           return;
         }
@@ -286,9 +291,10 @@ export function useChatSocket(options: UseChatSocketOptions) {
     status.value = "disconnected";
   };
 
-  const sendText = (text: string): boolean => {
+  const sendMessage = (text: string, attachments: Attachment[] = []): boolean => {
     const trimmed = text.trim();
-    if (!trimmed) {
+    const normalizedAttachments = attachments.map((attachment) => ({ ...attachment }));
+    if (!trimmed && normalizedAttachments.length === 0) {
       return false;
     }
     if (!socket || socket.readyState !== WebSocket.OPEN) {
@@ -296,7 +302,8 @@ export function useChatSocket(options: UseChatSocketOptions) {
     }
 
     const message: Message = {
-      text: trimmed,
+      text: trimmed || null,
+      attachments: normalizedAttachments,
       sender: "user",
       session_id: options.sessionId.value,
       timestamp: new Date().toISOString(),
@@ -305,6 +312,8 @@ export function useChatSocket(options: UseChatSocketOptions) {
     messages.value.push(message);
     return true;
   };
+
+  const sendText = (text: string): boolean => sendMessage(text);
 
   const replaceMessages = (nextMessages: Message[]): void => {
     messages.value = nextMessages.map((item) => ({ ...item }));
@@ -319,6 +328,7 @@ export function useChatSocket(options: UseChatSocketOptions) {
     reconnectDelayMs,
     reconnectNow,
     replaceMessages,
+    sendMessage,
     sendText,
     status,
   };
