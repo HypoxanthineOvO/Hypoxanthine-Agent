@@ -52,6 +52,12 @@ const language = computed(() => {
 </template>
 
 <style scoped>
+.file-attachment {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .file-head {
   margin-bottom: 0.35rem;
 }

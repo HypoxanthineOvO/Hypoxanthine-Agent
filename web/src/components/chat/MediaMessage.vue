@@ -19,10 +19,16 @@ const isVideo = computed(() => /\.(mp4|webm)$/.test(lowered.value));
 </template>
 
 <style scoped>
+.media-message {
+  min-width: 0;
+  overflow: hidden;
+}
+
 .media-image,
 .media-video {
   border-radius: 0.65rem;
   max-height: 20rem;
   max-width: 100%;
+  width: 100%;
 }
 </style>

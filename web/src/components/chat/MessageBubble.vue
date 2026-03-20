@@ -100,6 +100,8 @@ const formattedTime = computed(() => {
   border: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
   border-radius: 0.9rem;
   min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   padding: 0.6rem 0.72rem;
 }
 
