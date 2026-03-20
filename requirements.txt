@@ -13,8 +13,8 @@ PyMuPDF==1.27.1
 python-pptx==1.0.2
 python-docx==1.2.0
 websockets==16.0
+tavily-python==0.7.23
 
 # Test tooling (repo expects `pytest -q` to work out of the box)
 pytest==8.4.2
 pytest-cov==5.0.0
-

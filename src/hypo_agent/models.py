@@ -3,18 +3,29 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from hypo_agent.core.time_utils import normalize_utc_datetime, utc_isoformat, utc_now
+
+
+class Attachment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["image", "file", "audio", "video"]
+    url: str
+    filename: str | None = None
+    mime_type: str | None = None
+    size_bytes: int | None = None
 
 
 class Message(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str | None = None
-    image: str | None = None
-    file: str | None = None
-    audio: str | None = None
+    image: str | None = Field(default=None, json_schema_extra={"deprecated": True})
+    file: str | None = Field(default=None, json_schema_extra={"deprecated": True})
+    audio: str | None = Field(default=None, json_schema_extra={"deprecated": True})
+    attachments: list[Attachment] = Field(default_factory=list)
     sender: str
     message_tag: Literal["reminder", "heartbeat", "email_scan", "tool_status"] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -40,6 +51,7 @@ class SkillOutput(BaseModel):
     result: Any = None
     error_info: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
+    attachments: list[Attachment] = Field(default_factory=list)
 
 
 class SingleModelConfig(BaseModel):
@@ -98,11 +110,18 @@ class QQServiceConfig(BaseModel):
     allowed_users: list[str] = Field(default_factory=list)
 
 
+class TavilyServiceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    api_key: str
+
+
 class ServicesConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     email: EmailServiceConfig | None = None
     qq: QQServiceConfig | None = None
+    tavily: TavilyServiceConfig | None = None
 
 
 class SecretsConfig(BaseModel):
@@ -116,7 +135,23 @@ class TaskScheduleConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
-    interval_minutes: int = Field(default=15, ge=1)
+    mode: Literal["interval", "cron"] = "interval"
+    cron: str | None = None
+    interval_minutes: int = Field(default=10, ge=1)
+    max_rounds: int | None = Field(default=None, ge=1)
+    time: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_schedule(self) -> "TaskScheduleConfig":
+        if self.mode == "cron" and not str(self.cron or "").strip():
+            raise ValueError("cron is required when heartbeat mode is 'cron'")
+        return self
+
+
+class TrendRadarSummaryTaskConfig(TaskScheduleConfig):
+    model_config = ConfigDict(extra="forbid")
+
+    time: str | None = None
 
 
 class EmailStoreTaskConfig(BaseModel):
@@ -133,6 +168,7 @@ class TasksConfig(BaseModel):
 
     heartbeat: TaskScheduleConfig = Field(default_factory=TaskScheduleConfig)
     email_store: EmailStoreTaskConfig = Field(default_factory=EmailStoreTaskConfig)
+    trendradar_summary: TrendRadarSummaryTaskConfig = Field(default_factory=TrendRadarSummaryTaskConfig)
 
 
 class WhitelistRule(BaseModel):
@@ -174,6 +210,25 @@ class PersonaConfig(BaseModel):
     personality: list[str] = Field(default_factory=list)
     speaking_style: dict[str, Any] = Field(default_factory=dict)
     system_prompt_template: str = ""
+
+    @field_validator("personality", mode="before")
+    @classmethod
+    def _normalize_personality(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            normalized: list[str] = []
+            for raw_line in value.splitlines():
+                item = raw_line.strip()
+                if not item:
+                    continue
+                item = item.rstrip("；;").strip()
+                if item:
+                    normalized.append(item)
+            return normalized
+        return [str(value).strip()] if str(value).strip() else []
 
 
 class NarrationToolLevels(BaseModel):
