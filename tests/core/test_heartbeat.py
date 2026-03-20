@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import hypo_agent.core.heartbeat as heartbeat_module
 from hypo_agent.core.event_queue import EventQueue
 from hypo_agent.core.heartbeat import HeartbeatService, SILENT_SENTINEL
 from hypo_agent.core.pipeline import ChatPipeline
@@ -159,6 +160,26 @@ class RecordingSkillManager:
         )
 
 
+class RecordingLogger:
+    def __init__(self) -> None:
+        self.info_calls: list[tuple[str, dict[str, Any]]] = []
+        self.warning_calls: list[tuple[str, dict[str, Any]]] = []
+        self.error_calls: list[tuple[str, dict[str, Any]]] = []
+        self.exception_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def info(self, event: str, **kwargs: Any) -> None:
+        self.info_calls.append((event, kwargs))
+
+    def warning(self, event: str, **kwargs: Any) -> None:
+        self.warning_calls.append((event, kwargs))
+
+    def error(self, event: str, **kwargs: Any) -> None:
+        self.error_calls.append((event, kwargs))
+
+    def exception(self, event: str, **kwargs: Any) -> None:
+        self.exception_calls.append((event, kwargs))
+
+
 def test_heartbeat_reads_prompt_and_enqueues_non_silent_push(tmp_path: Path) -> None:
     async def _run() -> None:
         prompt_path = tmp_path / "heartbeat_prompt.md"
@@ -257,6 +278,7 @@ def test_heartbeat_pipeline_invokes_tools_and_stays_silent_when_agent_returns_se
             "scan_emails",
             "list_reminders",
         ]
+        assert skill_manager.invocations[1][1]["triggered_by"] == "heartbeat"
         assert memory.appended == []
         assert pushed == []
 
@@ -297,6 +319,7 @@ def test_heartbeat_pipeline_invokes_tools_and_emits_single_final_push(tmp_path: 
             "scan_emails",
             "list_reminders",
         ]
+        assert skill_manager.invocations[1][1]["triggered_by"] == "heartbeat"
         assert len(memory.appended) == 1
         assert memory.appended[0].message_tag == "heartbeat"
         assert "重要邮件" in str(memory.appended[0].text)
@@ -330,3 +353,172 @@ def test_heartbeat_status_reports_running_when_scheduler_has_active_jobs() -> No
     assert status["status"] == "running"
     assert status["active_tasks"] == 2
 
+
+def test_heartbeat_logs_start_and_push_on_success(tmp_path: Path, monkeypatch) -> None:
+    async def _run() -> None:
+        prompt_path = tmp_path / "heartbeat_prompt.md"
+        prompt_path.write_text("ok", encoding="utf-8")
+        queue = AutoRespondingQueue(
+            [
+                {"type": "assistant_chunk", "text": "发现异常"},
+                {"type": "assistant_done"},
+            ]
+        )
+        logger = RecordingLogger()
+        monkeypatch.setattr(heartbeat_module, "logger", logger)
+        service = HeartbeatService(
+            message_queue=queue,
+            scheduler=StubScheduler(running=True),
+            default_session_id="main",
+            prompt_path=prompt_path,
+        )
+
+        await service.run()
+
+        assert logger.info_calls[0][0] == "heartbeat.start"
+        assert logger.info_calls[0][1]["session_id"] == "main"
+        assert logger.info_calls[-1][0] == "heartbeat.push"
+
+    asyncio.run(_run())
+
+
+def test_heartbeat_logs_error_when_prompt_missing(tmp_path: Path, monkeypatch) -> None:
+    async def _run() -> None:
+        logger = RecordingLogger()
+        monkeypatch.setattr(heartbeat_module, "logger", logger)
+        service = HeartbeatService(
+            message_queue=AutoRespondingQueue([]),
+            scheduler=StubScheduler(running=True),
+            default_session_id="main",
+            prompt_path=tmp_path / "missing-heartbeat-prompt.md",
+        )
+
+        result = await service.run()
+
+        assert result["error"] == "prompt_missing"
+        assert logger.error_calls[-1][0] == "heartbeat.prompt.missing"
+
+    asyncio.run(_run())
+
+
+def test_heartbeat_logs_timeout_as_error(tmp_path: Path, monkeypatch) -> None:
+    async def _run() -> None:
+        prompt_path = tmp_path / "heartbeat_prompt.md"
+        prompt_path.write_text("ok", encoding="utf-8")
+        logger = RecordingLogger()
+        monkeypatch.setattr(heartbeat_module, "logger", logger)
+
+        async def fake_wait_for(awaitable, timeout):
+            del awaitable, timeout
+            raise TimeoutError
+
+        monkeypatch.setattr(heartbeat_module.asyncio, "wait_for", fake_wait_for)
+        service = HeartbeatService(
+            message_queue=AutoRespondingQueue([]),
+            scheduler=StubScheduler(running=True),
+            default_session_id="main",
+            prompt_path=prompt_path,
+        )
+
+        result = await service.run()
+
+        assert result["error"] == "timeout"
+        assert logger.info_calls[0][0] == "heartbeat.start"
+        assert logger.error_calls[-1][0] == "heartbeat.timeout"
+
+    asyncio.run(_run())
+
+
+def test_heartbeat_logs_pipeline_error_as_error(tmp_path: Path, monkeypatch) -> None:
+    async def _run() -> None:
+        prompt_path = tmp_path / "heartbeat_prompt.md"
+        prompt_path.write_text("ok", encoding="utf-8")
+        logger = RecordingLogger()
+        monkeypatch.setattr(heartbeat_module, "logger", logger)
+        queue = AutoRespondingQueue(
+            [
+                {
+                    "type": "error",
+                    "message": "pipeline exploded",
+                }
+            ]
+        )
+        service = HeartbeatService(
+            message_queue=queue,
+            scheduler=StubScheduler(running=True),
+            default_session_id="main",
+            prompt_path=prompt_path,
+        )
+
+        result = await service.run()
+
+        assert result["error"] == "pipeline_error"
+        assert logger.error_calls[-1][0] == "heartbeat.failed"
+        assert logger.error_calls[-1][1]["error"] == "pipeline exploded"
+
+    asyncio.run(_run())
+
+
+def test_heartbeat_skips_overlapping_run_and_logs_it(tmp_path: Path, monkeypatch) -> None:
+    async def _run() -> None:
+        prompt_path = tmp_path / "heartbeat_prompt.md"
+        prompt_path.write_text("ok", encoding="utf-8")
+        logger = RecordingLogger()
+        monkeypatch.setattr(heartbeat_module, "logger", logger)
+        queue = EventQueue()
+        service = HeartbeatService(
+            message_queue=queue,
+            scheduler=StubScheduler(running=True),
+            default_session_id="main",
+            prompt_path=prompt_path,
+        )
+
+        await service._run_lock.acquire()
+        try:
+            result = await service.run()
+        finally:
+            service._run_lock.release()
+
+        assert result["should_push"] is False
+        assert result["summary"] == SILENT_SENTINEL
+        assert result["error"] == "overlap_skipped"
+        assert queue.empty() is True
+        assert logger.warning_calls[-1][0] == "heartbeat.skipped_overlap"
+
+    asyncio.run(_run())
+
+
+def test_heartbeat_appends_registered_event_source_context_to_prompt(tmp_path: Path) -> None:
+    async def _run() -> None:
+        prompt_path = tmp_path / "heartbeat_prompt.md"
+        prompt_path.write_text("base prompt", encoding="utf-8")
+        queue = AutoRespondingQueue(
+            [
+                {"type": "assistant_chunk", "text": SILENT_SENTINEL},
+                {"type": "assistant_done"},
+            ]
+        )
+        service = HeartbeatService(
+            message_queue=queue,
+            scheduler=StubScheduler(running=True),
+            default_session_id="main",
+            prompt_path=prompt_path,
+        )
+
+        async def fake_source() -> dict[str, Any]:
+            return {
+                "name": "trendradar",
+                "new_items": 1,
+                "items": [{"subscription": "ai-watch", "title": "阿里云 AI 产品涨价"}],
+            }
+
+        service.register_event_source("trendradar", fake_source)
+
+        result = await service.run()
+
+        assert result["should_push"] is False
+        inbound = queue.events[0]["message"]
+        assert "trendradar" in inbound.text
+        assert "阿里云 AI 产品涨价" in inbound.text
+
+    asyncio.run(_run())

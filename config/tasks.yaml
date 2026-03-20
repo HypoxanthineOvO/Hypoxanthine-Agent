@@ -1,17 +1,24 @@
 scheduler:
-  tick_interval_seconds: 15
+  tick_interval_seconds: 60
   max_concurrent_tasks: 2
 retry_policy:
   max_retries: 2
   backoff_seconds: 3
 task_defaults:
-  timeout_seconds: 120
+  timeout_seconds: 600
   priority: normal
 heartbeat:
   enabled: true
-  interval_minutes: 60
+  mode: cron
+  # Every hour except quiet hours 02:00-07:59
+  cron: "0 0-1,8-23 * * *"
+  max_rounds: 20
 email_store:
   enabled: true
   max_entries: 5000
   retention_days: 90
   warmup_hours: 168
+trendradar_summary:
+  enabled: true
+  interval_minutes: 480
+  time: "10:00,15:00,21:00"

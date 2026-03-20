@@ -573,6 +573,27 @@ def test_scheduler_registers_interval_job_for_heartbeat() -> None:
     asyncio.run(_run())
 
 
+def test_scheduler_registers_cron_job_for_heartbeat() -> None:
+    async def _run() -> None:
+        service = SchedulerService(
+            structured_store=StubStore(),
+            event_queue=EventQueue(),
+            default_timezone="Asia/Shanghai",
+        )
+
+        async def heartbeat_job() -> None:
+            return None
+
+        service.register_cron_job("heartbeat", "*/10 * * * *", heartbeat_job)
+        job = service._scheduler.get_job("heartbeat")
+
+        assert job is not None
+        assert job.trigger is not None
+        assert "minute='*/10'" in str(job.trigger)
+
+    asyncio.run(_run())
+
+
 def test_scheduler_registers_interval_job_for_email_scan() -> None:
     async def _run() -> None:
         service = SchedulerService(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
@@ -39,6 +40,8 @@ class HeartbeatService:
         self.timeout_seconds = max(5, int(timeout_seconds))
         self.last_heartbeat_at: str | None = None
         self._prompt_missing_reported = False
+        self._run_lock = asyncio.Lock()
+        self._event_sources: dict[str, Any] = {}
 
     def _load_prompt_text(self) -> str:
         try:
@@ -49,18 +52,60 @@ class HeartbeatService:
             logger.exception("heartbeat.prompt.load_failed", path=str(self.prompt_path))
             return ""
 
+    def register_event_source(self, name: str, callback: Any) -> None:
+        source_name = str(name or "").strip()
+        if not source_name:
+            raise ValueError("event source name is required")
+        if not callable(callback):
+            raise TypeError("event source callback must be callable")
+        self._event_sources[source_name] = callback
+
     async def run(self) -> dict[str, Any]:
+        if self._run_lock.locked():
+            logger.warning(
+                "heartbeat.skipped_overlap",
+                session_id=self.default_session_id,
+            )
+            return {
+                "should_push": False,
+                "summary": SILENT_SENTINEL,
+                "error": "overlap_skipped",
+            }
+
+        async with self._run_lock:
+            return await self._run_unlocked()
+
+    async def _run_unlocked(self) -> dict[str, Any]:
         started_at = perf_counter()
+        logger.info(
+            "heartbeat.start",
+            session_id=self.default_session_id,
+            prompt_path=str(self.prompt_path),
+            timeout_seconds=self.timeout_seconds,
+        )
         prompt = self._load_prompt_text()
         if not prompt:
             summary = f"Heartbeat 配置异常：未找到或内容为空 - {self.prompt_path.as_posix()}"
             self.last_heartbeat_at = datetime.now(UTC).isoformat()
+            logger.error(
+                "heartbeat.prompt.missing",
+                session_id=self.default_session_id,
+                path=str(self.prompt_path),
+                already_reported=self._prompt_missing_reported,
+            )
             if not self._prompt_missing_reported:
                 self._prompt_missing_reported = True
                 await self._push_summary(summary)
                 return {"should_push": True, "summary": summary, "error": "prompt_missing"}
-            logger.warning("heartbeat.prompt.missing", path=str(self.prompt_path))
             return {"should_push": False, "summary": SILENT_SENTINEL, "error": "prompt_missing"}
+
+        event_source_context = await self._collect_event_source_context()
+        if event_source_context:
+            prompt = (
+                f"{prompt}\n\n## 外部事件源预检\n"
+                f"{event_source_context}\n\n"
+                "这些是额外线索，不替代你自行调用工具核实。"
+            )
 
         inbound = Message(
             text=prompt,
@@ -68,7 +113,7 @@ class HeartbeatService:
             session_id=self.default_session_id,
             channel="system",
             message_tag="heartbeat",
-            metadata={"source": "heartbeat"},
+            metadata={"source": "heartbeat", "skip_memory_search": True},
         )
 
         loop = asyncio.get_running_loop()
@@ -90,13 +135,21 @@ class HeartbeatService:
                 if not done_future.done():
                     done_future.set_result({"ok": False, "error": dict(payload)})
 
-        await self.message_queue.put(
-            {
-                "event_type": "user_message",
-                "message": inbound,
-                "emit": emit,
-            }
-        )
+        try:
+            await self.message_queue.put(
+                {
+                    "event_type": "user_message",
+                    "message": inbound,
+                    "emit": emit,
+                }
+            )
+        except Exception:
+            logger.exception(
+                "heartbeat.enqueue.failed",
+                session_id=self.default_session_id,
+                event_type="user_message",
+            )
+            raise
 
         assistant_text = ""
         error_payload: dict[str, Any] | None = None
@@ -109,7 +162,12 @@ class HeartbeatService:
             summary = "Heartbeat 检查超时（可能是模型/工具调用异常）。请查看日志或稍后重试。"
             await self._push_summary(summary)
             self.last_heartbeat_at = datetime.now(UTC).isoformat()
-            logger.warning("heartbeat.timeout", timeout_seconds=self.timeout_seconds)
+            logger.error(
+                "heartbeat.timeout",
+                session_id=self.default_session_id,
+                timeout_seconds=self.timeout_seconds,
+                duration_ms=int((perf_counter() - started_at) * 1000),
+            )
             return {"should_push": True, "summary": summary, "error": "timeout"}
         finally:
             self.last_heartbeat_at = datetime.now(UTC).isoformat()
@@ -120,8 +178,9 @@ class HeartbeatService:
             error_message = str(error_payload.get("message") or "").strip() or "unknown error"
             summary = f"Heartbeat 执行失败：{error_message}"
             await self._push_summary(summary)
-            logger.warning(
+            logger.error(
                 "heartbeat.failed",
+                session_id=self.default_session_id,
                 duration_ms=duration_ms,
                 error=error_message,
             )
@@ -129,31 +188,51 @@ class HeartbeatService:
 
         normalized = assistant_text.strip()
         if normalized == SILENT_SENTINEL:
-            logger.info("heartbeat.silent", duration_ms=duration_ms)
+            logger.info(
+                "heartbeat.silent",
+                session_id=self.default_session_id,
+                duration_ms=duration_ms,
+            )
             return {"should_push": False, "summary": SILENT_SENTINEL}
 
         if not normalized:
-            logger.info("heartbeat.empty_reply", duration_ms=duration_ms)
+            logger.info(
+                "heartbeat.empty_reply",
+                session_id=self.default_session_id,
+                duration_ms=duration_ms,
+            )
             return {"should_push": False, "summary": SILENT_SENTINEL}
 
         await self._push_summary(normalized)
-        logger.info("heartbeat.push", duration_ms=duration_ms)
+        logger.info(
+            "heartbeat.push",
+            session_id=self.default_session_id,
+            duration_ms=duration_ms,
+        )
         return {"should_push": True, "summary": normalized}
 
     async def _push_summary(self, summary: str) -> None:
         cleaned = str(summary or "").strip()
         if not cleaned:
             return
-        await self.message_queue.put(
-            {
-                "event_type": "heartbeat_trigger",
-                "session_id": self.default_session_id,
-                "message_tag": "heartbeat",
-                "summary": cleaned,
-                "title": "heartbeat",
-                "description": cleaned,
-            }
-        )
+        try:
+            await self.message_queue.put(
+                {
+                    "event_type": "heartbeat_trigger",
+                    "session_id": self.default_session_id,
+                    "message_tag": "heartbeat",
+                    "summary": cleaned,
+                    "title": "heartbeat",
+                    "description": cleaned,
+                }
+            )
+        except Exception:
+            logger.exception(
+                "heartbeat.enqueue.failed",
+                session_id=self.default_session_id,
+                event_type="heartbeat_trigger",
+            )
+            raise
 
     def get_status(self, *, scheduler: Any | None = None) -> dict[str, Any]:
         runtime_scheduler = scheduler or self.scheduler
@@ -170,3 +249,54 @@ class HeartbeatService:
             "active_tasks": active_tasks,
         }
 
+    async def _collect_event_source_context(self) -> str:
+        if not self._event_sources:
+            return ""
+        blocks: list[str] = []
+        for name, callback in self._event_sources.items():
+            try:
+                payload = callback()
+                if inspect.isawaitable(payload):
+                    payload = await payload
+            except Exception:
+                logger.exception("heartbeat.event_source.failed", source=name)
+                continue
+            rendered = self._render_event_source_payload(name=name, payload=payload)
+            if rendered:
+                blocks.append(rendered)
+        return "\n\n".join(blocks).strip()
+
+    def _render_event_source_payload(self, *, name: str, payload: Any) -> str:
+        if payload is None:
+            return ""
+        if isinstance(payload, str):
+            cleaned = payload.strip()
+            return f"### {name}\n- {cleaned}" if cleaned else ""
+        if not isinstance(payload, dict):
+            return ""
+
+        lines = [f"### {name}"]
+        new_items = payload.get("new_items")
+        if new_items is not None:
+            lines.append(f"- new_items: {new_items}")
+        items = payload.get("items")
+        if isinstance(items, list):
+            for item in items[:5]:
+                if isinstance(item, dict):
+                    title = str(item.get("title") or item.get("summary") or "").strip()
+                    subscription = str(item.get("subscription") or "").strip()
+                    platform = str(item.get("platform") or "").strip()
+                    if title:
+                        prefix = "订阅命中" if subscription else "条目"
+                        details = " / ".join(part for part in (subscription, platform) if part)
+                        if details:
+                            lines.append(f"- {prefix}: {title} ({details})")
+                        else:
+                            lines.append(f"- {prefix}: {title}")
+                else:
+                    text = str(item).strip()
+                    if text:
+                        lines.append(f"- {text}")
+        if len(lines) == 1:
+            return ""
+        return "\n".join(lines)
