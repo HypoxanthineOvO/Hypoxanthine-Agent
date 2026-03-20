@@ -6,7 +6,6 @@ import {
   NInput,
   NInputGroup,
   NInputNumber,
-  NPagination,
   NSelect,
   NTabPane,
   NTabs,

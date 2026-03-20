@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { NButton, NCard, NDataTable, NEmpty, NGrid, NGridItem, NTag } from "naive-ui";
+import { NButton, NCard, NEmpty, NGrid, NGridItem, NTag } from "naive-ui";
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import VChart from "vue-echarts";
 import { use } from "echarts/core";
@@ -419,24 +419,6 @@ const latencyChartOption = computed(() => {
   };
 });
 
-const taskColumns = [
-  {
-    title: "时间",
-    key: "created_at",
-  },
-  {
-    title: "工具",
-    key: "tool_name",
-  },
-  {
-    title: "状态",
-    key: "status",
-  },
-  {
-    title: "耗时(ms)",
-    key: "duration_ms",
-  },
-];
 
 const loadDashboard = async (): Promise<void> => {
   loading.value = true;
