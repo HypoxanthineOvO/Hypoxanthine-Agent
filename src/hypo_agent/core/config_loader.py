@@ -16,6 +16,7 @@ from hypo_agent.models import (
     PersonaConfig,
     SecretsConfig,
     TasksConfig,
+    WeixinServiceConfig,
 )
 
 _PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")

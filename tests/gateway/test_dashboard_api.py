@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from hypo_agent.gateway.app import AppDeps, create_app
+from hypo_agent.core.recent_logs import clear_recent_logs, record_recent_log
 from hypo_agent.memory.session import SessionMemory
 from hypo_agent.memory.structured_store import StructuredStore
 from hypo_agent.models import CircuitBreakerConfig, DirectoryWhitelist
@@ -57,6 +58,13 @@ def test_dashboard_status_returns_runtime_payload(tmp_path) -> None:
 
 def test_dashboard_token_latency_recent_and_skills_endpoints(tmp_path) -> None:
     client = _build_client(tmp_path)
+    clear_recent_logs()
+    record_recent_log(
+        level="error",
+        message="model timeout",
+        detail="traceback...",
+        source="hypo_agent.gateway.ws",
+    )
     with client:
         asyncio.run(
             client.app.state.structured_store.record_token_usage(
@@ -90,9 +98,21 @@ def test_dashboard_token_latency_recent_and_skills_endpoints(tmp_path) -> None:
             "/api/dashboard/latency-stats",
             params={"token": "test-token", "days": 7},
         )
+        latency_by_model = client.get(
+            "/api/dashboard/latency-stats",
+            params={"token": "test-token", "days": 7, "group_by": "model"},
+        )
+        recent_latency = client.get(
+            "/api/dashboard/recent-latency",
+            params={"token": "test-token", "limit": 20},
+        )
         recent_tasks = client.get(
             "/api/dashboard/recent-tasks",
             params={"token": "test-token", "limit": 20},
+        )
+        recent_errors = client.get(
+            "/api/dashboard/errors/recent",
+            params={"token": "test-token", "limit": 5, "level": "all"},
         )
         skills = client.get(
             "/api/dashboard/skills",
@@ -103,10 +123,24 @@ def test_dashboard_token_latency_recent_and_skills_endpoints(tmp_path) -> None:
     assert token_stats.json()["data"]
     assert latency_stats.status_code == 200
     assert latency_stats.json()["data"]
+    assert latency_by_model.status_code == 200
+    latency_by_model_payload = latency_by_model.json()
+    assert latency_by_model_payload["group_by"] == "model"
+    assert latency_by_model_payload["data"][0]["model"] == "Gemini3Pro"
+    assert latency_by_model_payload["data"][0]["p50_ms"] == 120.0
+    assert recent_latency.status_code == 200
+    recent_latency_payload = recent_latency.json()
+    assert recent_latency_payload["limit"] == 20
+    assert recent_latency_payload["data"][0]["model"] == "Gemini3Pro"
+    assert recent_latency_payload["data"][0]["latency_ms"] == 120.0
     assert recent_tasks.status_code == 200
     recent_payload = recent_tasks.json()
     assert recent_payload["limit"] == 20
     assert len(recent_payload["data"]) == 1
+    assert recent_errors.status_code == 200
+    recent_errors_payload = recent_errors.json()
+    assert recent_errors_payload["data"][0]["level"] == "error"
+    assert recent_errors_payload["data"][0]["message"] == "model timeout"
     assert skills.status_code == 200
     assert "data" in skills.json()
 

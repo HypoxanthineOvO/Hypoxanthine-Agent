@@ -5,6 +5,7 @@ import logging
 import structlog
 
 from hypo_agent.core.config_loader import is_test_mode
+from hypo_agent.core.recent_logs import install_recent_log_handler
 
 
 def configure_logging(level: str = "INFO", json_logs: bool = True) -> None:
@@ -29,6 +30,7 @@ def configure_logging(level: str = "INFO", json_logs: bool = True) -> None:
         format="%(message)s",
         level=getattr(logging, level.upper(), logging.INFO),
     )
+    install_recent_log_handler()
 
     structlog.configure(
         processors=[

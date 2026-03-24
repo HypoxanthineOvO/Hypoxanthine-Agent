@@ -55,6 +55,17 @@ class DummyQQClient:
         return None
 
 
+class DummyQQService:
+    def __init__(self, *, online: bool | None) -> None:
+        self._online = online
+
+    def get_runtime_status(self) -> dict:
+        return {
+            "online": self._online,
+            "good": True if self._online is not None else None,
+        }
+
+
 class DummyHeartbeatService:
     def get_status(self, *, scheduler=None):
         del scheduler
@@ -63,6 +74,21 @@ class DummyHeartbeatService:
             "last_heartbeat_at": "2026-03-11T20:50:00+08:00",
             "active_tasks": 2,
         }
+
+
+class DummyWeixinChannel:
+    def get_status(self) -> dict:
+        return {
+            "status": "connected",
+            "bot_id": "wx-bot-1",
+            "user_id": "target@im.wechat",
+            "last_message_at": "2026-03-11T20:40:00+08:00",
+            "messages_received": 12,
+            "messages_sent": 9,
+        }
+
+    async def stop(self) -> None:
+        return None
 
 
 class DummyWsManager:
@@ -102,14 +128,26 @@ skills:
 """.strip(),
         encoding="utf-8",
     )
+    (config_dir / "secrets.yaml").write_text(
+        """
+providers: {}
+services:
+  weixin:
+    enabled: true
+    token_path: memory/weixin_auth.json
+    allowed_users: []
+""".strip(),
+        encoding="utf-8",
+    )
 
     monkeypatch.setattr("hypo_agent.gateway.dashboard_api.connection_manager", DummyWsManager())
 
     with client:
         client.app.state.config_dir = config_dir
         client.app.state.qq_ws_client = DummyQQClient()
-        client.app.state.qq_channel_service = object()
+        client.app.state.qq_channel_service = DummyQQService(online=True)
         client.app.state.heartbeat_service = DummyHeartbeatService()
+        client.app.state.weixin_channel = DummyWeixinChannel()
         response = client.get("/api/channels/status", params={"token": "test-token"})
 
     assert response.status_code == 200
@@ -117,6 +155,9 @@ skills:
     assert payload["channels"]["webui"]["status"] == "connected"
     assert payload["channels"]["webui"]["active_connections"] == 1
     assert payload["channels"]["qq"]["status"] == "connected"
+    assert payload["channels"]["qq"]["online"] is True
+    assert payload["channels"]["weixin"]["status"] == "connected"
+    assert payload["channels"]["weixin"]["bot_id"] == "wx-bot-1"
     assert payload["channels"]["qq"]["messages_received"] == 42
     assert payload["channels"]["email"]["status"] == "enabled"
     assert payload["channels"]["email"]["accounts"] == ["hyx021203@shanghaitech.edu.cn"]
@@ -138,6 +179,7 @@ skills:
 """.strip(),
         encoding="utf-8",
     )
+    (config_dir / "secrets.yaml").write_text("providers: {}\nservices: {}\n", encoding="utf-8")
 
     monkeypatch.setattr("hypo_agent.gateway.dashboard_api.connection_manager", DummyWsManager())
 
@@ -148,6 +190,7 @@ skills:
     assert response.status_code == 200
     payload = response.json()
     assert payload["channels"]["qq"]["status"] == "disabled"
+    assert payload["channels"]["weixin"]["status"] == "disabled"
 
 
 def test_channels_status_returns_disabled_when_email_not_enabled(tmp_path, monkeypatch) -> None:
@@ -175,3 +218,31 @@ skills:
     assert response.status_code == 200
     payload = response.json()
     assert payload["channels"]["email"]["status"] == "disabled"
+
+
+def test_channels_status_marks_qq_disconnected_when_napcat_reports_offline(tmp_path, monkeypatch) -> None:
+    client = _build_client(tmp_path)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "skills.yaml").write_text(
+        """
+skills:
+  qq:
+    enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+    (config_dir / "secrets.yaml").write_text("providers: {}\nservices: {}\n", encoding="utf-8")
+
+    monkeypatch.setattr("hypo_agent.gateway.dashboard_api.connection_manager", DummyWsManager())
+
+    with client:
+        client.app.state.config_dir = config_dir
+        client.app.state.qq_ws_client = DummyQQClient()
+        client.app.state.qq_channel_service = DummyQQService(online=False)
+        response = client.get("/api/channels/status", params={"token": "test-token"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["channels"]["qq"]["status"] == "disconnected"
+    assert payload["channels"]["qq"]["online"] is False

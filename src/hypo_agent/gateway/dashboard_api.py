@@ -5,10 +5,11 @@ from datetime import UTC, datetime, timedelta
 import math
 from pathlib import Path
 import shutil
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Query, Request
 
+from hypo_agent.core.recent_logs import get_recent_logs
 from hypo_agent.core.skill_manager import SkillManager
 from hypo_agent.gateway.auth import require_api_token
 from hypo_agent.gateway.ws import connection_manager
@@ -77,6 +78,8 @@ def _disabled_qq_status() -> dict[str, Any]:
         "last_message_at": None,
         "messages_received": 0,
         "messages_sent": 0,
+        "online": None,
+        "good": None,
     }
 
 
@@ -87,6 +90,17 @@ def _disabled_email_status() -> dict[str, Any]:
         "last_scan_at": None,
         "next_scan_at": None,
         "emails_processed": 0,
+    }
+
+
+def _disabled_weixin_status() -> dict[str, Any]:
+    return {
+        "status": "disabled",
+        "bot_id": "",
+        "user_id": "",
+        "last_message_at": None,
+        "messages_received": 0,
+        "messages_sent": 0,
     }
 
 
@@ -151,7 +165,17 @@ async def channels_status(request: Request) -> dict[str, Any]:
                 "last_message_at": None,
                 "messages_received": 0,
                 "messages_sent": 0,
+                "online": None,
+                "good": None,
             }
+        if qq_channel_service is not None and hasattr(qq_channel_service, "get_runtime_status"):
+            runtime_status = qq_channel_service.get_runtime_status()
+            qq_status = {
+                **dict(qq_status),
+                **runtime_status,
+            }
+            if runtime_status.get("online") is False:
+                qq_status["status"] = "disconnected"
 
     email_status = _disabled_email_status()
     email_skill = None
@@ -165,10 +189,37 @@ async def channels_status(request: Request) -> dict[str, Any]:
     if heartbeat_service is not None and hasattr(heartbeat_service, "get_status"):
         heartbeat_status = heartbeat_service.get_status(scheduler=scheduler)
 
+    weixin_status = _disabled_weixin_status()
+    config_dir = Path(getattr(request.app.state, "config_dir", Path("config")))
+    secrets_path = config_dir / "secrets.yaml"
+    weixin_enabled = False
+    if secrets_path.exists():
+        try:
+            from hypo_agent.core.config_loader import load_secrets_config
+
+            services = load_secrets_config(secrets_path).services
+            weixin_enabled = bool(services and services.weixin and services.weixin.enabled)
+        except Exception:
+            weixin_enabled = False
+    if weixin_enabled:
+        channel = getattr(request.app.state, "weixin_channel", None)
+        if channel is not None and hasattr(channel, "get_status"):
+            weixin_status = channel.get_status()
+        else:
+            weixin_status = {
+                "status": "disconnected",
+                "bot_id": "",
+                "user_id": "",
+                "last_message_at": None,
+                "messages_received": 0,
+                "messages_sent": 0,
+            }
+
     return {
         "channels": {
             "webui": connection_manager.get_status(),
             "qq": qq_status,
+            "weixin": weixin_status,
             "email": email_status,
             "heartbeat": heartbeat_status,
         }
@@ -221,14 +272,45 @@ async def dashboard_token_stats(
 async def dashboard_latency_stats(
     request: Request,
     days: int = Query(default=7, ge=1, le=365),
+    group_by: Literal["day", "model"] = Query(default="day"),
 ) -> dict[str, Any]:
     require_api_token(request)
 
     structured_store = request.app.state.structured_store
     since = datetime.now(UTC) - timedelta(days=days)
+    token_rows = await structured_store.list_token_usage(since_iso=since.isoformat())
+
+    source = "token_usage.latency_ms"
+    if group_by == "model":
+        latency_by_model: dict[str, list[float]] = defaultdict(list)
+        for row in token_rows:
+            latency = row.get("latency_ms")
+            model = str(row.get("resolved_model") or "unknown").strip() or "unknown"
+            if latency is None:
+                continue
+            latency_by_model[model].append(float(latency))
+
+        data: list[dict[str, Any]] = []
+        for model in sorted(latency_by_model.keys(), key=str.lower):
+            values = sorted(latency_by_model[model])
+            data.append(
+                {
+                    "model": model,
+                    "count": len(values),
+                    "p50_ms": _quantile(values, 0.50),
+                    "p95_ms": _quantile(values, 0.95),
+                    "p99_ms": _quantile(values, 0.99),
+                }
+            )
+
+        return {
+            "days": days,
+            "group_by": group_by,
+            "source": source,
+            "data": data,
+        }
 
     latency_by_day: dict[str, list[float]] = defaultdict(list)
-    token_rows = await structured_store.list_token_usage(since_iso=since.isoformat())
     for row in token_rows:
         latency = row.get("latency_ms")
         created_at = _parse_timestamp(row.get("created_at"))
@@ -236,7 +318,6 @@ async def dashboard_latency_stats(
             continue
         latency_by_day[_day_key(created_at)].append(float(latency))
 
-    source = "token_usage.latency_ms"
     if not latency_by_day:
         invocations = await structured_store.list_tool_invocations(since_iso=since.isoformat())
         for row in invocations:
@@ -262,7 +343,42 @@ async def dashboard_latency_stats(
 
     return {
         "days": days,
+        "group_by": group_by,
         "source": source,
+        "data": data,
+    }
+
+
+@router.get("/dashboard/recent-latency")
+async def dashboard_recent_latency(
+    request: Request,
+    limit: int = Query(default=24, ge=1, le=200),
+) -> dict[str, Any]:
+    require_api_token(request)
+
+    structured_store = request.app.state.structured_store
+    token_rows = await structured_store.list_token_usage()
+
+    data: list[dict[str, Any]] = []
+    for row in token_rows:
+        latency = row.get("latency_ms")
+        created_at = _parse_timestamp(row.get("created_at"))
+        if latency is None or created_at is None:
+            continue
+        data.append(
+            {
+                "session_id": row.get("session_id"),
+                "model": str(row.get("resolved_model") or "unknown").strip() or "unknown",
+                "latency_ms": float(latency),
+                "timestamp": created_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            }
+        )
+        if len(data) >= limit:
+            break
+
+    data.reverse()
+    return {
+        "limit": limit,
         "data": data,
     }
 
@@ -279,6 +395,20 @@ async def dashboard_recent_tasks(
     return {
         "limit": limit,
         "data": rows,
+    }
+
+
+@router.get("/dashboard/errors/recent")
+async def dashboard_recent_errors(
+    request: Request,
+    level: Literal["all", "error", "warning"] = Query(default="all"),
+    limit: int = Query(default=8, ge=1, le=100),
+) -> dict[str, Any]:
+    require_api_token(request)
+    return {
+        "level": level,
+        "limit": limit,
+        "data": get_recent_logs(level=level, limit=limit),
     }
 
 
