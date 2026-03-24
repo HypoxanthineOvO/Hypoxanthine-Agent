@@ -1,4 +1,8 @@
+/// <reference types="node" />
+
 import { mount } from "@vue/test-utils";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -21,6 +25,17 @@ vi.mock("vue-echarts", () => ({
 
 import DashboardView from "../DashboardView.vue";
 
+const dashboardSource = readFileSync(
+  resolve(process.cwd(), "src/views/DashboardView.vue"),
+  "utf8",
+);
+const dashboardRootBlock =
+  dashboardSource.match(/\.dashboard-view\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
+const dashboardGridItemBlock =
+  dashboardSource.match(/\.dashboard-grid\s*:deep\(\.n-grid-item\)\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
+const dashboardCardBlock =
+  dashboardSource.match(/\.dashboard-card\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
+
 async function flushUi(): Promise<void> {
   await Promise.resolve();
   await nextTick();
@@ -37,9 +52,23 @@ afterEach(() => {
 });
 
 describe("DashboardView", () => {
+  it("fills the full width of the content area", () => {
+    expect(dashboardRootBlock).toMatch(/width:\s*100%;/);
+  });
+
+  it("stretches top-level cards so each two-column row renders equal card heights", () => {
+    expect(dashboardSource).toContain('class="dashboard-grid"');
+    expect(dashboardSource).toContain('class="dashboard-card');
+    expect(dashboardGridItemBlock).toMatch(/display:\s*flex;/);
+    expect(dashboardCardBlock).toMatch(/height:\s*100%;/);
+    expect(dashboardCardBlock).toMatch(/display:\s*flex;/);
+    expect(dashboardCardBlock).toMatch(/flex-direction:\s*column;/);
+  });
+
   const mockDashboardFetch = (
     tokenRows: Array<Record<string, unknown>>,
-    latencyRows: Array<Record<string, unknown>>,
+    latencyModelRows: Array<Record<string, unknown>>,
+    recentLatencyRows: Array<Record<string, unknown>> = [],
     channels = {
       channels: {
         webui: {
@@ -56,6 +85,14 @@ describe("DashboardView", () => {
           messages_received: 42,
           messages_sent: 38,
         },
+        weixin: {
+          status: "connected",
+          bot_id: "wx-bot-1",
+          user_id: "target@im.wechat",
+          last_message_at: new Date().toISOString(),
+          messages_received: 12,
+          messages_sent: 9,
+        },
         email: {
           status: "enabled",
           accounts: ["hyx021203@shanghaitech.edu.cn"],
@@ -71,40 +108,85 @@ describe("DashboardView", () => {
       },
     },
   ): ReturnType<typeof vi.fn> => {
-    const fetchMock = vi.fn();
-    fetchMock
-      .mockResolvedValueOnce({
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/dashboard/status?")) {
+        return {
+          ok: true,
+          json: async () => ({
+            uptime_seconds: 12,
+            uptime_human: "0:00:12",
+            session_count: 3,
+            kill_switch: false,
+            bwrap_available: true,
+          }),
+        };
+      }
+      if (url.includes("/dashboard/token-stats?")) {
+        return {
+          ok: true,
+          json: async () => ({ data: tokenRows }),
+        };
+      }
+      if (url.includes("/dashboard/latency-stats?") && url.includes("group_by=model")) {
+        return {
+          ok: true,
+          json: async () => ({ data: latencyModelRows }),
+        };
+      }
+      if (url.includes("/dashboard/recent-latency?")) {
+        return {
+          ok: true,
+          json: async () => ({ data: recentLatencyRows }),
+        };
+      }
+      if (url.includes("/dashboard/recent-tasks?")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: [{ id: 1, created_at: "2026-03-06", tool_name: "run", status: "success", duration_ms: 10 }],
+          }),
+        };
+      }
+      if (url.includes("/dashboard/errors/recent?")) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: [
+              {
+                timestamp: "2026-03-06T10:20:30Z",
+                level: "error",
+                message: "LLM 调用超时",
+                detail: "timeout detail",
+                source: "hypo_agent.gateway.ws",
+              },
+            ],
+          }),
+        };
+      }
+      if (url.includes("/dashboard/skills?")) {
+        return {
+          ok: true,
+          json: async () => ({ data: [{ name: "tmux", status: "healthy", tools: ["run_command"] }] }),
+        };
+      }
+      if (url.includes("/channels/status?")) {
+        return {
+          ok: true,
+          json: async () => channels,
+        };
+      }
+      if (url.includes("/sessions?")) {
+        return {
+          ok: true,
+          json: async () => [],
+        };
+      }
+      return {
         ok: true,
-        json: async () => ({
-          uptime_seconds: 12,
-          uptime_human: "0:00:12",
-          session_count: 3,
-          kill_switch: false,
-          bwrap_available: true,
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ data: tokenRows }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ data: latencyRows }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          data: [{ id: 1, created_at: "2026-03-06", tool_name: "run", status: "success", duration_ms: 10 }],
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ data: [{ name: "tmux", status: "healthy", tools: ["run_command"] }] }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => channels,
-      });
+        json: async () => ({}),
+      };
+    });
     vi.stubGlobal("fetch", fetchMock);
     return fetchMock;
   };
@@ -136,11 +218,20 @@ describe("DashboardView", () => {
         ([url]) => String(url) === "http://localhost:8000/api/channels/status?token=test-token",
       ),
     ).toBe(true);
+    expect(
+      fetchMock.mock.calls.some(
+        ([url]) =>
+          String(url) ===
+          "http://localhost:8000/api/dashboard/recent-latency?limit=24&token=test-token",
+      ),
+    ).toBe(true);
     expect(wrapper.text()).toContain("0:00:12");
     expect(wrapper.text()).toContain("tmux");
+    expect(wrapper.text()).toContain("最近错误 / 告警");
+    expect(wrapper.text()).toContain("快捷操作");
   });
 
-  it("renders channel status cards with qq and email details", async () => {
+  it("renders channel status cards with qq, weixin and email details", async () => {
     mockDashboardFetch(
       [{ date: "2026-03-06", model: "Gemini3Pro", total_tokens: 100 }],
       [{ date: "2026-03-06", p50_ms: 50, p95_ms: 80, p99_ms: 120 }],
@@ -157,12 +248,23 @@ describe("DashboardView", () => {
     await flushUi();
     await flushUi();
 
-    expect(wrapper.text()).toContain("渠道状态");
+    expect(wrapper.text()).toContain("系统状态");
     expect(wrapper.text()).toContain("QQ");
     expect(wrapper.text()).toContain("3637647606");
     expect(wrapper.text()).toContain("收 42 / 发 38");
+    expect(wrapper.text()).toContain("微信");
+    expect(wrapper.text()).toContain("wx-bot-1");
+    expect(wrapper.text()).toContain("收 12 / 发 9");
     expect(wrapper.text()).toContain("hyx021203@shanghaitech.edu.cn");
     expect(wrapper.text()).toContain("active tasks");
+  });
+
+  it("renders WebUI, QQ and 微信 through the same shared channel card component", () => {
+    expect(dashboardSource).toContain('import ChannelStatusCard from "../components/dashboard/ChannelStatusCard.vue";');
+    expect(dashboardSource).not.toContain("WeixinStatusCard");
+    expect(dashboardSource).toContain(':title="channelCardMap.webui.name"');
+    expect(dashboardSource).toContain(':title="channelCardMap.qq.name"');
+    expect(dashboardSource).toContain(':title="channelCardMap.weixin.name"');
   });
 
   it("builds token chart with date xAxis and model-based series", async () => {
@@ -204,7 +306,7 @@ describe("DashboardView", () => {
     expect(seriesByName["model-c"]).toEqual([0, 4]);
   });
 
-  it("builds latency chart with date xAxis and P50/P95/P99 series", async () => {
+  it("renders the latency section as two full-width cards with card-owned headings", async () => {
     const tokenRows = [
       { date: "2026-03-06", model: "model-a", total_tokens: 100 },
       { date: "2026-03-06", model: "model-b", total_tokens: 80 },
@@ -228,31 +330,202 @@ describe("DashboardView", () => {
     await flushUi();
     await flushUi();
 
-    const option = (
-      wrapper.vm as unknown as { latencyChartOption: Record<string, unknown> }
-    ).latencyChartOption;
-    const xAxis = option.xAxis as { data: string[] };
-    const legend = option.legend as { data: string[]; top?: string | number };
-    const series = option.series as Array<{ name: string; data: number[] }>;
-    const seriesByName = Object.fromEntries(series.map((item) => [item.name, item.data]));
-    const uniqueModelCount = new Set(tokenRows.map((item) => item.model)).size;
+    expect(wrapper.text()).toContain("模型响应延迟统计");
+    expect(wrapper.text()).toContain("各模型调用耗时分布（ms）");
+    expect(wrapper.text()).toContain("最近调用延迟");
+    expect(wrapper.text()).toContain("最近调用的实际响应时间（ms）");
+    expect(wrapper.text()).not.toContain("Latency P50/P95/P99");
+  });
 
-    expect(xAxis.data).toEqual(["2026-03-05", "2026-03-06"]);
-    expect(xAxis.data.every((item) => /^\d{4}-\d{2}-\d{2}$/.test(item))).toBe(true);
+  it("builds latency comparison chart with model xAxis and percentile bar series", async () => {
+    mockDashboardFetch(
+      [{ date: "2026-03-06", model: "Gemini3Pro", total_tokens: 100 }],
+      [
+        { model: "Claude-3.5", p50_ms: 80, p95_ms: 150, p99_ms: 260 },
+        { model: "GPT-4o", p50_ms: 60, p95_ms: 110, p99_ms: 180 },
+      ],
+    );
+
+    const wrapper = mount(DashboardView, {
+      props: {
+        token: "test-token",
+        apiBase: "http://localhost:8000/api",
+      },
+    });
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    const option = (
+      wrapper.vm as unknown as { latencyDistributionOption: Record<string, unknown> }
+    ).latencyDistributionOption;
+    const xAxis = option.xAxis as { data: string[] };
+    const legend = option.legend as { data: string[] };
+    const series = option.series as Array<{ name: string; type: string; data: number[] }>;
+    const seriesByName = Object.fromEntries(series.map((item) => [item.name, item.data]));
+
+    expect(xAxis.data).toEqual(["Claude-3.5", "GPT-4o"]);
     expect(legend.data).toEqual(["P50", "P95", "P99"]);
-    expect(legend.top === "top" || legend.top === 0).toBe(true);
-    expect(series).toHaveLength(3);
-    expect(series).toHaveLength(uniqueModelCount);
-    expect(seriesByName.P50).toEqual([50, 60]);
-    expect(seriesByName.P95).toEqual([90, 120]);
-    expect(seriesByName.P99).toEqual([150, 200]);
+    expect(option.title).toBeUndefined();
+    expect(series.map((item) => item.type)).toEqual(["bar", "bar", "bar"]);
+    expect(seriesByName.P50).toEqual([80, 60]);
+    expect(seriesByName.P95).toEqual([150, 110]);
+    expect(seriesByName.P99).toEqual([260, 180]);
+  });
+
+  it("builds recent latency line chart with per-model series and formatted timestamps", async () => {
+    mockDashboardFetch(
+      [{ date: "2026-03-06", model: "Gemini3Pro", total_tokens: 100 }],
+      [{ model: "Gemini3Pro", p50_ms: 50, p95_ms: 80, p99_ms: 120 }],
+      [
+        { model: "Gemini3Pro", latency_ms: 88, timestamp: "2026-03-06T10:20:30+00:00" },
+        { model: "Claude-3.5", latency_ms: 132, timestamp: "2026-03-06T10:21:00+00:00" },
+        { model: "Gemini3Pro", latency_ms: 91, timestamp: "2026-03-06T10:21:30+00:00" },
+      ],
+    );
+
+    const wrapper = mount(DashboardView, {
+      props: {
+        token: "test-token",
+        apiBase: "http://localhost:8000/api",
+      },
+    });
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    const option = (
+      wrapper.vm as unknown as { recentLatencyOption: Record<string, unknown> }
+    ).recentLatencyOption;
+    const xAxis = option.xAxis as { data: string[] };
+    const legend = option.legend as { data: string[] };
+    const series = option.series as Array<{ name: string; type: string; data: Array<number | null> }>;
+    const seriesByName = Object.fromEntries(series.map((item) => [item.name, item.data]));
+
+    expect(xAxis.data).toHaveLength(3);
+    expect(legend.data).toEqual(["Claude-3.5", "Gemini3Pro"]);
+    expect(series.map((item) => item.type)).toEqual(["line", "line"]);
+    expect(seriesByName["Claude-3.5"]).toEqual([null, 132, null]);
+    expect(seriesByName.Gemini3Pro).toEqual([88, null, 91]);
+  });
+
+  it("shows backend-api placeholder when recent latency endpoint is unavailable", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/dashboard/recent-latency?")) {
+        return {
+          ok: false,
+          status: 404,
+          json: async () => ({ detail: "not found" }),
+        };
+      }
+      if (url.includes("/dashboard/status?")) {
+        return {
+          ok: true,
+          json: async () => ({
+            uptime_seconds: 12,
+            uptime_human: "0:00:12",
+            session_count: 3,
+            kill_switch: false,
+            bwrap_available: true,
+          }),
+        };
+      }
+      if (url.includes("/dashboard/token-stats?")) {
+        return {
+          ok: true,
+          json: async () => ({ data: [{ date: "2026-03-06", model: "Gemini3Pro", total_tokens: 100 }] }),
+        };
+      }
+      if (url.includes("/dashboard/latency-stats?") && url.includes("group_by=model")) {
+        return {
+          ok: true,
+          json: async () => ({ data: [{ model: "Gemini3Pro", p50_ms: 50, p95_ms: 80, p99_ms: 120 }] }),
+        };
+      }
+      if (url.includes("/dashboard/recent-tasks?")) {
+        return {
+          ok: true,
+          json: async () => ({ data: [] }),
+        };
+      }
+      if (url.includes("/dashboard/skills?")) {
+        return {
+          ok: true,
+          json: async () => ({ data: [] }),
+        };
+      }
+      if (url.includes("/channels/status?")) {
+        return {
+          ok: true,
+          json: async () => ({
+            channels: {
+              webui: { status: "connected", active_connections: 1, last_message_at: new Date().toISOString() },
+              qq: {
+                status: "connected",
+                bot_qq: "3637647606",
+                napcat_ws_url: "ws://127.0.0.1:3009/onebot/v11/ws",
+                connected_at: new Date().toISOString(),
+                last_message_at: new Date().toISOString(),
+                messages_received: 42,
+                messages_sent: 38,
+              },
+              weixin: {
+                status: "connected",
+                bot_id: "wx-bot-1",
+                user_id: "target@im.wechat",
+                last_message_at: new Date().toISOString(),
+                messages_received: 12,
+                messages_sent: 9,
+              },
+              email: {
+                status: "enabled",
+                accounts: ["hyx021203@shanghaitech.edu.cn"],
+                last_scan_at: new Date().toISOString(),
+                next_scan_at: new Date().toISOString(),
+                emails_processed: 15,
+              },
+              heartbeat: {
+                status: "running",
+                last_heartbeat_at: new Date().toISOString(),
+                active_tasks: 2,
+              },
+            },
+          }),
+        };
+      }
+      if (url.includes("/sessions?")) {
+        return {
+          ok: true,
+          json: async () => [],
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({}),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DashboardView, {
+      props: {
+        token: "test-token",
+        apiBase: "http://localhost:8000/api",
+      },
+    });
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    expect(wrapper.text()).toContain("需要后端提供原始调用记录 API");
   });
 
   it("applies dark chart theme and readable text colors in dark mode", async () => {
     document.documentElement.dataset.theme = "dark";
     mockDashboardFetch(
       [{ date: "2026-03-06", model: "Gemini3Pro", total_tokens: 100 }],
-      [{ date: "2026-03-06", p50_ms: 50, p95_ms: 80, p99_ms: 120 }],
+      [{ model: "Gemini3Pro", p50_ms: 50, p95_ms: 80, p99_ms: 120 }],
+      [{ model: "Gemini3Pro", latency_ms: 88, timestamp: "2026-03-06T10:20:30+00:00" }],
     );
 
     const wrapper = mount(DashboardView, {
@@ -267,15 +540,19 @@ describe("DashboardView", () => {
 
     const vm = wrapper.vm as unknown as {
       tokenChartOption: Record<string, unknown>;
-      latencyChartOption: Record<string, unknown>;
+      latencyDistributionOption: Record<string, unknown>;
+      recentLatencyOption: Record<string, unknown>;
     };
     const tokenOption = vm.tokenChartOption;
-    const latencyOption = vm.latencyChartOption;
+    const latencyDistributionOption = vm.latencyDistributionOption;
+    const recentLatencyOption = vm.recentLatencyOption;
     const chartNodes = wrapper.findAll(".chart-stub");
 
     expect(chartNodes[0]?.attributes("data-theme")).toBe("dark");
     expect(chartNodes[1]?.attributes("data-theme")).toBe("dark");
-    expect((tokenOption.textStyle as { color: string }).color).toBe("#e0e0e0");
-    expect((latencyOption.textStyle as { color: string }).color).toBe("#e0e0e0");
+    expect(chartNodes[2]?.attributes("data-theme")).toBe("dark");
+    expect((tokenOption.textStyle as { color: string }).color).toBe("#c6d1e6");
+    expect((latencyDistributionOption.textStyle as { color: string }).color).toBe("#c6d1e6");
+    expect((recentLatencyOption.textStyle as { color: string }).color).toBe("#c6d1e6");
   });
 });

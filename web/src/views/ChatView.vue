@@ -3,6 +3,7 @@ import { useNotification } from "naive-ui";
 import { computed, h, nextTick, onMounted, ref, watch } from "vue";
 
 import CompressedMessage from "../components/chat/CompressedMessage.vue";
+import ErrorStateCard from "../components/chat/ErrorStateCard.vue";
 import FileAttachment from "../components/chat/FileAttachment.vue";
 import MarkdownPreview from "../components/chat/MarkdownPreview.vue";
 import MediaMessage from "../components/chat/MediaMessage.vue";
@@ -65,6 +66,7 @@ const activeSessionId = ref(resolveInitialSessionId());
 const pendingAttachments = ref<Attachment[]>([]);
 const isComposerDragActive = ref(false);
 const isUploadingAttachments = ref(false);
+const retryingFailedMessage = ref(false);
 const MAX_ATTACHMENTS_PER_MESSAGE = 5;
 
 const normalizedApiBase = computed(() => {
@@ -90,6 +92,7 @@ const {
   reconnectDelayMs,
   reconnectNow,
   replaceMessages,
+  retryLastMessage,
   sendMessage,
   status,
 } = useChatSocket({
@@ -350,6 +353,9 @@ const hasFileAttachment = (message: Message): boolean =>
 const isToolCall = (message: Message): boolean =>
   message.event_type === "tool_call_result";
 
+const isErrorCard = (message: Message): boolean =>
+  message.metadata?.error_card === true;
+
 const isEphemeralToolResult = (message: Message): boolean =>
   message.event_type === "tool_call_result" &&
   message.metadata?.ephemeral === true;
@@ -429,6 +435,20 @@ const onSubmit = (): void => {
   void nextTick(() => {
     adjustComposerHeight();
   });
+};
+
+const retryFailedMessage = async (): Promise<void> => {
+  retryingFailedMessage.value = true;
+  const didRetry = retryLastMessage();
+  if (!didRetry) {
+    notification?.warning({
+      title: "无法重试",
+      content: "当前没有可重试的消息。",
+      duration: 2500,
+    });
+  }
+  await new Promise((resolve) => window.setTimeout(resolve, 300));
+  retryingFailedMessage.value = false;
 };
 
 const normalizeSelectedFiles = (files: FileList | File[] | null | undefined): File[] =>
@@ -659,196 +679,208 @@ useHotkey([
 </script>
 
 <template>
-  <section class="chat-shell">
-    <div class="chat-main">
-      <header class="chat-header">
-        <div class="title-wrap">
-          <p class="eyebrow">Hypo-Agent</p>
-          <h1>Personal Assistant Workspace</h1>
-          <p class="chat-subtitle">邮件、QQ、文件和提醒汇聚在同一个主会话里。</p>
+  <section class="chat-page">
+    <header class="chat-header">
+      <div class="title-wrap">
+        <p class="eyebrow">Hypo-Agent</p>
+        <h1>Personal Assistant Workspace</h1>
+        <p class="chat-subtitle">邮件、QQ、文件和提醒汇聚在同一个主会话里。</p>
+      </div>
+      <div class="status-wrap">
+        <ConnectionStatus :status="status" />
+        <button
+          type="button"
+          class="ghost-button"
+          data-testid="connect-button"
+          @click="connect"
+        >
+          Connect
+        </button>
+        <button type="button" class="ghost-button" @click="disconnect">
+          Disconnect
+        </button>
+      </div>
+    </header>
+
+    <ReconnectBanner
+      :visible="showReconnectBanner"
+      :retry-after-ms="reconnectDelayMs"
+      @retry="reconnectNow"
+    />
+
+    <main ref="messagesRef" class="message-list" aria-live="polite">
+      <section v-if="welcomeVisible" class="welcome-state">
+        <div class="welcome-copy">
+          <p class="eyebrow">Welcome</p>
+          <h2>Hi，我是 Hypo-Agent</h2>
+          <p>
+            你的个人智能助手。你可以直接让我查邮件、同步 QQ、读取文件、检查系统状态，
+            或者像平常聊天一样把任务交给我。
+          </p>
         </div>
-        <div class="status-wrap">
-          <ConnectionStatus :status="status" />
+
+        <div class="quick-prompts">
+          <button
+            v-for="(prompt, index) in quickPrompts"
+            :key="prompt"
+            type="button"
+            class="quick-prompt"
+            :data-testid="`quick-prompt-${index}`"
+            @click="applyQuickPrompt(prompt)"
+          >
+            {{ prompt }}
+          </button>
+        </div>
+
+        <div class="capability-list">
+          <span
+            v-for="item in capabilitySummary"
+            :key="item"
+            class="capability-chip"
+          >
+            {{ item }}
+          </span>
+        </div>
+      </section>
+
+      <template v-else>
+        <template v-for="item in timelineItems" :key="item.key">
+          <div
+            v-if="item.kind === 'separator'"
+            class="message-time-separator"
+            data-testid="message-time-separator"
+          >
+            <span>{{ item.label }}</span>
+          </div>
+          <MessageBubble
+            v-else
+            :message="item.message"
+            :asset-url-resolver="resolveAssetUrl"
+          >
+          <CompressedMessage
+            v-if="isCompressedToolResult(item.message)"
+            :summary="String(item.message.result ?? '')"
+            :compressed-meta="item.message.compressed_meta"
+            :api-base="normalizedApiBase"
+            :token="token"
+            :tool-name="item.message.tool_name"
+            :file-path="resolveCompressedFilePath(item.message)"
+          />
+          <ToolCallMessage
+            v-else-if="isToolCall(item.message)"
+            :tool-name="item.message.tool_name ?? ''"
+            :status="item.message.status"
+            :params="item.message.arguments"
+            :result="item.message.result"
+          />
+          <ErrorStateCard
+            v-else-if="isErrorCard(item.message)"
+            :code="String(item.message.metadata?.error_code ?? 'INTERNAL_ERROR')"
+            :message="item.message.text ?? '调用失败'"
+            :detail="String(item.message.metadata?.error_detail ?? item.message.text ?? '')"
+            :retryable="Boolean(item.message.metadata?.retryable)"
+            :loading="retryingFailedMessage"
+            @retry="void retryFailedMessage()"
+          />
+          <MarkdownPreview
+            v-else-if="hasMarkdownPreview(item.message)"
+            :content="item.message.text ?? ''"
+          />
+          <MediaMessage
+            v-else-if="hasMedia(item.message)"
+            :src="mediaSource(item.message)"
+            :media-type="mediaType(item.message)"
+          />
+          <FileAttachment
+            v-else-if="hasCodeFilePreview(item.message)"
+            :path="item.message.file ?? ''"
+            :content="item.message.text ?? ''"
+          />
+          <FileAttachment
+            v-else-if="hasFileAttachment(item.message)"
+            :path="resolveAssetUrl(item.message.file)"
+          />
+          <TextMessage
+            v-else-if="(item.message.text ?? '').trim().length > 0 && item.message.sender === 'user'"
+            :text="item.message.text ?? ''"
+          />
+          <MarkdownPreview
+            v-else-if="(item.message.text ?? '').trim().length > 0"
+            :content="item.message.text ?? ''"
+            :show-source-toggle="item.message.sender === 'assistant' && item.message.message_tag !== 'narration'"
+          />
+          </MessageBubble>
+        </template>
+      </template>
+    </main>
+
+    <form
+      class="input-area"
+      :data-drag-active="isComposerDragActive"
+      :data-expanded="composerExpanded"
+      @dragenter.prevent="isComposerDragActive = true"
+      @dragleave="onComposerDragLeave"
+      @dragover="onComposerDragOver"
+      @drop="onComposerDrop"
+      @submit.prevent="onSubmit"
+    >
+      <input
+        ref="fileInputRef"
+        data-testid="attachment-input"
+        type="file"
+        multiple
+        class="composer-file-input"
+        @change="onFileInputChange"
+      />
+      <textarea
+        ref="composerRef"
+        v-model="draft"
+        name="message"
+        autocomplete="off"
+        placeholder="输入消息（Enter 发送）"
+        class="composer-input"
+        @paste="onComposerPaste"
+      />
+      <div v-if="pendingAttachments.length" class="composer-attachments">
+        <article
+          v-for="(attachment, index) in pendingAttachments"
+          :key="`${attachment.url}-${index}`"
+          class="composer-attachment"
+        >
+          <img
+            v-if="attachment.type === 'image'"
+            :src="attachmentPreviewUrl(attachment)"
+            :alt="attachment.filename ?? 'image preview'"
+            class="composer-attachment-thumb"
+          />
+          <div class="composer-attachment-meta">
+            <strong>{{ attachmentLabel(attachment) }}</strong>
+            <span>{{ formatAttachmentSize(attachment.size_bytes) }}</span>
+          </div>
           <button
             type="button"
-            class="ghost-button"
-            data-testid="connect-button"
-            @click="connect"
+            class="attachment-remove"
+            @click="removePendingAttachment(index)"
           >
-            Connect
+            ×
           </button>
-          <button type="button" class="ghost-button" @click="disconnect">
-            Disconnect
-          </button>
-        </div>
-      </header>
-
-      <ReconnectBanner
-        :visible="showReconnectBanner"
-        :retry-after-ms="reconnectDelayMs"
-        @retry="reconnectNow"
-      />
-
-      <main ref="messagesRef" class="messages" aria-live="polite">
-        <section v-if="welcomeVisible" class="welcome-state">
-          <div class="welcome-copy">
-            <p class="eyebrow">Welcome</p>
-            <h2>Hi，我是 Hypo-Agent</h2>
-            <p>
-              你的个人智能助手。你可以直接让我查邮件、同步 QQ、读取文件、检查系统状态，
-              或者像平常聊天一样把任务交给我。
-            </p>
-          </div>
-
-          <div class="quick-prompts">
-            <button
-              v-for="(prompt, index) in quickPrompts"
-              :key="prompt"
-              type="button"
-              class="quick-prompt"
-              :data-testid="`quick-prompt-${index}`"
-              @click="applyQuickPrompt(prompt)"
-            >
-              {{ prompt }}
-            </button>
-          </div>
-
-          <div class="capability-list">
-            <span
-              v-for="item in capabilitySummary"
-              :key="item"
-              class="capability-chip"
-            >
-              {{ item }}
-            </span>
-          </div>
-        </section>
-
-        <template v-else>
-          <template v-for="item in timelineItems" :key="item.key">
-            <div
-              v-if="item.kind === 'separator'"
-              class="message-time-separator"
-              data-testid="message-time-separator"
-            >
-              <span>{{ item.label }}</span>
-            </div>
-            <MessageBubble
-              v-else
-              :message="item.message"
-              :asset-url-resolver="resolveAssetUrl"
-            >
-            <CompressedMessage
-              v-if="isCompressedToolResult(item.message)"
-              :summary="String(item.message.result ?? '')"
-              :compressed-meta="item.message.compressed_meta"
-              :api-base="normalizedApiBase"
-              :token="token"
-              :tool-name="item.message.tool_name"
-              :file-path="resolveCompressedFilePath(item.message)"
-            />
-            <ToolCallMessage
-              v-else-if="isToolCall(item.message)"
-              :tool-name="item.message.tool_name ?? ''"
-              :status="item.message.status"
-              :params="item.message.arguments"
-              :result="item.message.result"
-            />
-            <MarkdownPreview
-              v-else-if="hasMarkdownPreview(item.message)"
-              :content="item.message.text ?? ''"
-            />
-            <MediaMessage
-              v-else-if="hasMedia(item.message)"
-              :src="mediaSource(item.message)"
-              :media-type="mediaType(item.message)"
-            />
-            <FileAttachment
-              v-else-if="hasCodeFilePreview(item.message)"
-              :path="item.message.file ?? ''"
-              :content="item.message.text ?? ''"
-            />
-            <FileAttachment
-              v-else-if="hasFileAttachment(item.message)"
-              :path="resolveAssetUrl(item.message.file)"
-            />
-            <TextMessage
-              v-else-if="(item.message.text ?? '').trim().length > 0"
-              :text="item.message.text ?? ''"
-            />
-            </MessageBubble>
-          </template>
-        </template>
-      </main>
-
-      <form
-        class="composer"
-        :data-drag-active="isComposerDragActive"
-        :data-expanded="composerExpanded"
-        @dragenter.prevent="isComposerDragActive = true"
-        @dragleave="onComposerDragLeave"
-        @dragover="onComposerDragOver"
-        @drop="onComposerDrop"
-        @submit.prevent="onSubmit"
-      >
-        <input
-          ref="fileInputRef"
-          data-testid="attachment-input"
-          type="file"
-          multiple
-          class="composer-file-input"
-          @change="onFileInputChange"
-        />
-        <textarea
-          ref="composerRef"
-          v-model="draft"
-          name="message"
-          autocomplete="off"
-          placeholder="输入消息（Enter 发送）"
-          class="composer-input"
-          @paste="onComposerPaste"
-        />
-        <div v-if="pendingAttachments.length" class="composer-attachments">
-          <article
-            v-for="(attachment, index) in pendingAttachments"
-            :key="`${attachment.url}-${index}`"
-            class="composer-attachment"
-          >
-            <img
-              v-if="attachment.type === 'image'"
-              :src="attachmentPreviewUrl(attachment)"
-              :alt="attachment.filename ?? 'image preview'"
-              class="composer-attachment-thumb"
-            />
-            <div class="composer-attachment-meta">
-              <strong>{{ attachmentLabel(attachment) }}</strong>
-              <span>{{ formatAttachmentSize(attachment.size_bytes) }}</span>
-            </div>
-            <button
-              type="button"
-              class="attachment-remove"
-              @click="removePendingAttachment(index)"
-            >
-              ×
-            </button>
-          </article>
-        </div>
-        <div class="composer-actions">
-          <button type="button" class="ghost-button" @click="toggleComposerExpanded">
-            {{ composerExpanded ? "收起输入框" : "展开输入框" }}
-          </button>
-          <button type="button" class="ghost-button" @click="openFilePicker">
-            📎
-          </button>
-          <button type="submit" :disabled="!canSend">Send</button>
-        </div>
-      </form>
-    </div>
+        </article>
+      </div>
+      <div class="composer-actions">
+        <button type="button" class="ghost-button" @click="toggleComposerExpanded">
+          {{ composerExpanded ? "收起输入框" : "展开输入框" }}
+        </button>
+        <button type="button" class="ghost-button" @click="openFilePicker">
+          📎
+        </button>
+        <button type="submit" :disabled="!canSend">Send</button>
+      </div>
+    </form>
   </section>
 </template>
 
 <style scoped>
-.chat-shell {
+.chat-page {
   backdrop-filter: blur(6px);
   background:
     radial-gradient(120% 120% at 0% 0%, color-mix(in srgb, var(--brand) 22%, transparent), transparent 52%),
@@ -857,25 +889,22 @@ useHotkey([
   border: 1px solid var(--panel-edge);
   border-radius: 1.35rem;
   box-shadow: 0 24px 60px color-mix(in srgb, black 50%, transparent);
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 1rem;
   height: 100%;
   margin: 0 auto;
-  min-height: 0;
   max-width: 1120px;
-  padding: 1.2rem;
-}
-
-.chat-main {
-  display: grid;
-  gap: 1rem;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
   min-height: 0;
+  overflow: hidden;
+  padding: 1.2rem;
+  width: 100%;
 }
 
 .chat-header {
   align-items: center;
   display: flex;
+  flex-shrink: 0;
   gap: 1rem;
   justify-content: space-between;
 }
@@ -934,11 +963,12 @@ useHotkey([
   padding: 0.15rem 0.45rem;
 }
 
-.messages {
+.message-list {
   background: color-mix(in srgb, var(--surface) 90%, transparent);
   border: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
   border-radius: 1rem;
   display: flex;
+  flex: 1;
   flex-direction: column;
   gap: 0.9rem;
   min-height: 0;
@@ -1022,18 +1052,19 @@ useHotkey([
   padding: 0.42rem 0.72rem;
 }
 
-.composer {
+.input-area {
   backdrop-filter: blur(8px);
   background: color-mix(in srgb, var(--panel) 90%, transparent);
   border: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
   border-radius: 1rem;
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
   gap: 0.7rem;
   padding: 0.85rem;
 }
 
-.composer[data-drag-active="true"] {
+.input-area[data-drag-active="true"] {
   border-color: color-mix(in srgb, var(--brand) 72%, var(--panel-edge));
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand) 36%, transparent);
 }
@@ -1042,7 +1073,7 @@ useHotkey([
   display: none;
 }
 
-.composer[data-expanded="true"] {
+.input-area[data-expanded="true"] {
   min-height: 42vh;
 }
 
@@ -1059,7 +1090,7 @@ useHotkey([
   width: 100%;
 }
 
-.composer[data-expanded="true"] .composer-input {
+.input-area[data-expanded="true"] .composer-input {
   flex: 1;
   max-height: 60vh;
 }
@@ -1154,7 +1185,7 @@ useHotkey([
 }
 
 @media (max-width: 1023px) {
-  .chat-shell {
+  .chat-page {
     border-radius: 0.9rem;
     padding: 0.9rem;
   }
@@ -1170,13 +1201,13 @@ useHotkey([
 }
 
 @media (max-width: 767px) {
-  .chat-shell {
-    border-radius: 0;
+  .chat-page {
+    border-radius: 1rem;
     box-shadow: none;
     padding: 0.75rem;
   }
 
-  .messages {
+  .message-list {
     padding: 0.8rem;
   }
 
@@ -1184,7 +1215,7 @@ useHotkey([
     grid-template-columns: 1fr;
   }
 
-  .composer {
+  .input-area {
     padding: 0.7rem;
   }
 

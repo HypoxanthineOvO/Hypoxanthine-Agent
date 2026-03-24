@@ -1,8 +1,18 @@
+/// <reference types="node" />
+
 import { mount } from "@vue/test-utils";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import MemoryView from "../MemoryView.vue";
+
+const memorySource = readFileSync(
+  resolve(process.cwd(), "src/views/MemoryView.vue"),
+  "utf8",
+);
+const memoryRootBlock = memorySource.match(/\.memory-view\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
 
 async function flushUi(): Promise<void> {
   await Promise.resolve();
@@ -18,6 +28,10 @@ afterEach(() => {
 });
 
 describe("MemoryView", () => {
+  it("fills the full width of the content area", () => {
+    expect(memoryRootBlock).toMatch(/width:\s*100%;/);
+  });
+
   it("loads l1 l2 l3 data with tokenized requests", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);

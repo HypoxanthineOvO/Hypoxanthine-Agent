@@ -1,6 +1,16 @@
 <script setup lang="ts">
-import { NButton, NCard, NEmpty, NGrid, NGridItem, NTag } from "naive-ui";
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import {
+  NCard,
+  NDrawer,
+  NDrawerContent,
+  NEmpty,
+  NGrid,
+  NGridItem,
+  NSkeleton,
+  NTag,
+  useMessage,
+} from "naive-ui";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import VChart from "vue-echarts";
 import { use } from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
@@ -8,17 +18,16 @@ import { BarChart, LineChart } from "echarts/charts";
 import {
   GridComponent,
   LegendComponent,
-  TitleComponent,
   TooltipComponent,
 } from "echarts/components";
 
-import { apiGetJson } from "../utils/apiClient";
+import { apiGetJson, ApiClientError } from "../utils/apiClient";
+import ChannelStatusCard from "../components/dashboard/ChannelStatusCard.vue";
 
 use([
   CanvasRenderer,
   LineChart,
   BarChart,
-  TitleComponent,
   TooltipComponent,
   LegendComponent,
   GridComponent,
@@ -36,6 +45,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   'open-session': [sessionId: string]
+  'navigate': [view: "chat" | "dashboard" | "config" | "memory", sessionId?: string]
 }>();
 
 interface DashboardStatus {
@@ -52,17 +62,18 @@ interface TokenStatsRow {
   total_tokens: number;
 }
 
-interface LatencyStatsRow {
-  date: string;
+interface ModelLatencyStatsRow {
+  model: string;
   p50_ms: number;
   p95_ms: number;
   p99_ms: number;
 }
 
-interface RecentSessionRow {
-  session_id: string;
-  message_count: number;
-  updated_at: string;
+interface RecentLatencyRow {
+  model: string;
+  latency_ms: number;
+  timestamp: string;
+  session_id?: string;
 }
 
 interface RecentTaskRow {
@@ -79,6 +90,14 @@ interface SkillRow {
   tools: string[];
 }
 
+interface RecentIssueRow {
+  timestamp: string;
+  level: "error" | "warning";
+  message: string;
+  detail: string;
+  source: string;
+}
+
 interface WebUiChannelStatus {
   status: string;
   active_connections: number;
@@ -90,6 +109,15 @@ interface QQChannelStatus {
   bot_qq: string;
   napcat_ws_url: string;
   connected_at: string | null;
+  last_message_at: string | null;
+  messages_received: number;
+  messages_sent: number;
+}
+
+interface WeixinChannelStatus {
+  status: string;
+  bot_id: string;
+  user_id: string;
   last_message_at: string | null;
   messages_received: number;
   messages_sent: number;
@@ -113,6 +141,7 @@ interface ChannelsStatusResponse {
   channels: {
     webui: WebUiChannelStatus;
     qq: QQChannelStatus;
+    weixin: WeixinChannelStatus;
     email: EmailChannelStatus;
     heartbeat: HeartbeatChannelStatus;
   };
@@ -126,6 +155,14 @@ interface ChannelCard {
   statusLabel: string;
   tagType: "success" | "warning" | "error" | "default";
   details: string[];
+}
+
+interface ChannelCardMap {
+  webui: ChannelCard;
+  qq: ChannelCard;
+  weixin: ChannelCard;
+  email: ChannelCard;
+  heartbeat: ChannelCard;
 }
 
 const normalizedApiBase = computed(() => {
@@ -145,14 +182,30 @@ const withToken = (path: string): string => {
 const loading = ref(false);
 const status = ref<DashboardStatus | null>(null);
 const tokenStats = ref<TokenStatsRow[]>([]);
-const latencyStats = ref<LatencyStatsRow[]>([]);
+const latencyModelStats = ref<ModelLatencyStatsRow[]>([]);
+const recentLatency = ref<RecentLatencyRow[]>([]);
+const recentLatencyApiAvailable = ref(true);
 const recentTasks = ref<RecentTaskRow[]>([]);
-const recentSessions = ref<RecentSessionRow[]>([]);
+const recentIssues = ref<RecentIssueRow[]>([]);
 const skills = ref<SkillRow[]>([]);
 const channels = ref<ChannelsStatusResponse["channels"] | null>(null);
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let channelRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let themeObserver: MutationObserver | null = null;
+const statsCardRef = ref<HTMLElement | null>(null);
+const issueFilter = ref<"all" | "error" | "warning">("all");
+const selectedIssue = ref<RecentIssueRow | null>(null);
+const actionMessage = (() => {
+  try {
+    return useMessage();
+  } catch {
+    return {
+      info: (_text: string) => undefined,
+      success: (_text: string) => undefined,
+      warning: (_text: string) => undefined,
+    };
+  }
+})();
 
 const themeMode = ref<"light" | "dark">(
   document.documentElement.dataset.theme === "dark" ? "dark" : "light",
@@ -164,11 +217,19 @@ const syncThemeMode = (): void => {
 
 const isDarkMode = computed(() => themeMode.value === "dark");
 const chartTheme = computed(() => (isDarkMode.value ? "dark" : undefined));
-const chartTextColor = computed(() => (isDarkMode.value ? "#e0e0e0" : "#4b5563"));
-const chartAxisColor = computed(() => (isDarkMode.value ? "#64748b" : "#94a3b8"));
-const chartSplitLineColor = computed(() =>
-  isDarkMode.value ? "rgba(148, 163, 184, 0.22)" : "rgba(148, 163, 184, 0.35)",
-);
+const cssVar = (name: string, fallback: string): string =>
+  getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+const chartTextColor = computed(() => cssVar("--text-soft", isDarkMode.value ? "#c6d1e6" : "#54627a"));
+const chartAxisColor = computed(() => cssVar("--muted", isDarkMode.value ? "#9eacc7" : "#687892"));
+const chartSplitLineColor = computed(() => cssVar("--chart-grid", "rgba(148, 163, 184, 0.3)"));
+const chartTooltipBackground = computed(() => cssVar("--tooltip-bg", isDarkMode.value ? "rgba(24,29,40,0.96)" : "rgba(255,255,255,0.96)"));
+const chartTooltipText = computed(() => cssVar("--tooltip-text", isDarkMode.value ? "#eef3ff" : "#162033"));
+const latencyPalette = computed(() => [
+  cssVar("--chart-secondary", "#18a058"),
+  cssVar("--chart-primary", "#2080f0"),
+  cssVar("--chart-tertiary", "#f0a020"),
+  cssVar("--chart-quaternary", "#7c3aed"),
+]);
 
 const normalizeDateKey = (raw: string): string => {
   const value = String(raw ?? "").trim();
@@ -199,6 +260,54 @@ const formatRelativeTime = (raw: string | null | undefined): string => {
   }
   const days = Math.round(absDiff / 86_400_000);
   return diff >= 0 ? `${days} 天后` : `${days} 天前`;
+};
+
+const formatShortTime = (raw: string): string => {
+  const timestamp = new Date(raw);
+  if (Number.isNaN(timestamp.getTime())) {
+    return raw;
+  }
+  const month = String(timestamp.getMonth() + 1).padStart(2, "0");
+  const day = String(timestamp.getDate()).padStart(2, "0");
+  const hours = String(timestamp.getHours()).padStart(2, "0");
+  const minutes = String(timestamp.getMinutes()).padStart(2, "0");
+  return `${month}-${day} ${hours}:${minutes}`;
+};
+
+const formatFullTime = (raw: string): string => {
+  const timestamp = new Date(raw);
+  if (Number.isNaN(timestamp.getTime())) {
+    return raw;
+  }
+  const month = String(timestamp.getMonth() + 1).padStart(2, "0");
+  const day = String(timestamp.getDate()).padStart(2, "0");
+  const hours = String(timestamp.getHours()).padStart(2, "0");
+  const minutes = String(timestamp.getMinutes()).padStart(2, "0");
+  const seconds = String(timestamp.getSeconds()).padStart(2, "0");
+  return `${month}-${day} ${hours}:${minutes}:${seconds}`;
+};
+
+const issueFilterOptions = [
+  { label: "全部", value: "all" },
+  { label: "仅错误", value: "error" },
+  { label: "仅告警", value: "warning" },
+] as const;
+
+const issueLevelLabel = (level: RecentIssueRow["level"]): string =>
+  level === "error" ? "错误" : "告警";
+
+const issueLevelIcon = (level: RecentIssueRow["level"]): string =>
+  level === "error" ? "🔴" : "🟡";
+
+const formatIssueSummary = (message: string): string =>
+  message.length <= 80 ? message : `${message.slice(0, 79).trimEnd()}…`;
+
+const openIssueDetail = (item: RecentIssueRow): void => {
+  selectedIssue.value = item;
+};
+
+const closeIssueDetail = (): void => {
+  selectedIssue.value = null;
 };
 
 const channelTagType = (
@@ -239,65 +348,72 @@ const channelStatusLabel = (status: string): string => {
   }
 };
 
-const channelCards = computed<ChannelCard[]>(() => {
+const createLoadingChannelCard = (key: string, icon: string, name: string): ChannelCard => ({
+  key,
+  icon,
+  name,
+  status: "",
+  statusLabel: "加载中",
+  tagType: "default",
+  details: ["正在读取通道状态"],
+});
+
+const createChannelCard = (
+  key: string,
+  icon: string,
+  name: string,
+  status: string,
+  details: string[],
+): ChannelCard => ({
+  key,
+  icon,
+  name,
+  status,
+  statusLabel: channelStatusLabel(status),
+  tagType: channelTagType(status),
+  details,
+});
+
+const channelCardMap = computed<ChannelCardMap>(() => {
   const payload = channels.value;
   if (!payload) {
-    return [];
+    return {
+      webui: createLoadingChannelCard("webui", "🖥️", "WebUI"),
+      qq: createLoadingChannelCard("qq", "🐧", "QQ"),
+      weixin: createLoadingChannelCard("weixin", "💬", "微信"),
+      email: createLoadingChannelCard("email", "📧", "邮箱"),
+      heartbeat: createLoadingChannelCard("heartbeat", "💓", "心跳"),
+    };
   }
-  return [
-    {
-      key: "webui",
-      icon: "🖥️",
-      name: "WebUI",
-      status: payload.webui.status,
-      statusLabel: channelStatusLabel(payload.webui.status),
-      tagType: channelTagType(payload.webui.status),
-      details: [
-        `活跃连接 ${payload.webui.active_connections}`,
-        `最后消息 ${formatRelativeTime(payload.webui.last_message_at)}`,
-      ],
-    },
-    {
-      key: "qq",
-      icon: "🐧",
-      name: "QQ",
-      status: payload.qq.status,
-      statusLabel: channelStatusLabel(payload.qq.status),
-      tagType: channelTagType(payload.qq.status),
-      details: [
-        `Bot QQ ${payload.qq.bot_qq || "未配置"}`,
-        payload.qq.napcat_ws_url || "未配置 WS URL",
-        `收 ${payload.qq.messages_received} / 发 ${payload.qq.messages_sent}`,
-        `最后消息 ${formatRelativeTime(payload.qq.last_message_at)}`,
-      ],
-    },
-    {
-      key: "email",
-      icon: "📧",
-      name: "邮箱",
-      status: payload.email.status,
-      statusLabel: channelStatusLabel(payload.email.status),
-      tagType: channelTagType(payload.email.status),
-      details: [
-        payload.email.accounts.join(", ") || "未配置邮箱账号",
-        `上次扫描 ${formatRelativeTime(payload.email.last_scan_at)}`,
-        `下次扫描 ${formatRelativeTime(payload.email.next_scan_at)}`,
-        `累计处理 ${payload.email.emails_processed} 封`,
-      ],
-    },
-    {
-      key: "heartbeat",
-      icon: "💓",
-      name: "心跳",
-      status: payload.heartbeat.status,
-      statusLabel: channelStatusLabel(payload.heartbeat.status),
-      tagType: channelTagType(payload.heartbeat.status),
-      details: [
-        `最后心跳 ${formatRelativeTime(payload.heartbeat.last_heartbeat_at)}`,
-        `active tasks ${payload.heartbeat.active_tasks}`,
-      ],
-    },
-  ];
+
+  return {
+    webui: createChannelCard("webui", "🖥️", "WebUI", payload.webui.status, [
+      `活跃连接 ${payload.webui.active_connections}`,
+      `最后消息 ${formatRelativeTime(payload.webui.last_message_at)}`,
+    ]),
+    qq: createChannelCard("qq", "🐧", "QQ", payload.qq.status, [
+      `Bot QQ ${payload.qq.bot_qq || "未配置"}`,
+      payload.qq.napcat_ws_url || "未配置 WS URL",
+      `收 ${payload.qq.messages_received} / 发 ${payload.qq.messages_sent}`,
+      `最后消息 ${formatRelativeTime(payload.qq.last_message_at)}`,
+    ]),
+    weixin: createChannelCard("weixin", "💬", "微信", payload.weixin.status, [
+      `Bot ID ${payload.weixin.bot_id || "未登录"}`,
+      `目标用户 ${payload.weixin.user_id || "未绑定"}`,
+      `收 ${payload.weixin.messages_received} / 发 ${payload.weixin.messages_sent}`,
+      `最后消息 ${formatRelativeTime(payload.weixin.last_message_at)}`,
+    ]),
+    email: createChannelCard("email", "📧", "邮箱", payload.email.status, [
+      payload.email.accounts.join(", ") || "未配置邮箱账号",
+      `上次扫描 ${formatRelativeTime(payload.email.last_scan_at)}`,
+      `下次扫描 ${formatRelativeTime(payload.email.next_scan_at)}`,
+      `累计处理 ${payload.email.emails_processed} 封`,
+    ]),
+    heartbeat: createChannelCard("heartbeat", "💓", "心跳", payload.heartbeat.status, [
+      `最后心跳 ${formatRelativeTime(payload.heartbeat.last_heartbeat_at)}`,
+      `active tasks ${payload.heartbeat.active_tasks}`,
+    ]),
+  };
 });
 
 const tokenChartOption = computed(() => {
@@ -323,12 +439,20 @@ const tokenChartOption = computed(() => {
       type: "bar",
       data: values,
       stack: "total",
+      itemStyle: {
+        color: latencyPalette.value[models.indexOf(model) % latencyPalette.value.length],
+      },
     };
   });
   return {
     backgroundColor: "transparent",
     textStyle: { color: chartTextColor.value },
-    tooltip: { trigger: "axis" },
+    tooltip: {
+      trigger: "axis",
+      backgroundColor: chartTooltipBackground.value,
+      borderColor: chartSplitLineColor.value,
+      textStyle: { color: chartTooltipText.value },
+    },
     legend: {
       data: models,
       type: "scroll",
@@ -354,38 +478,31 @@ const tokenChartOption = computed(() => {
   };
 });
 
-const latencyChartOption = computed(() => {
-  const normalizedRows = latencyStats.value.map((item) => ({
-    ...item,
-    date: normalizeDateKey(item.date),
-  }));
-  const dates = [...new Set(normalizedRows.map((item) => item.date))].sort((a, b) =>
-    a.localeCompare(b),
-  );
-  const rowByDate = new Map<string, LatencyStatsRow>();
-  for (const row of normalizedRows) {
-    rowByDate.set(row.date, row);
-  }
+const latencyDistributionOption = computed(() => {
+  const rows = latencyModelStats.value
+    .filter((item) => typeof item?.model === "string" && item.model.trim().length > 0)
+    .sort((left, right) => left.model.localeCompare(right.model));
+  const models = rows.map((item) => item.model);
   return {
     backgroundColor: "transparent",
     textStyle: { color: chartTextColor.value },
-    title: {
-      text: "模型响应延迟",
-      left: "center",
-      top: 4,
-      textStyle: { color: chartTextColor.value, fontSize: 13 },
+    tooltip: {
+      trigger: "axis",
+      backgroundColor: chartTooltipBackground.value,
+      borderColor: chartSplitLineColor.value,
+      textStyle: { color: chartTooltipText.value },
+      valueFormatter: (value: number | string) => `${Math.round(Number(value))} ms`,
     },
-    tooltip: { trigger: "axis" },
     legend: {
       data: ["P50", "P95", "P99"],
       top: "top",
       left: "center",
       textStyle: { color: chartTextColor.value },
     },
-    grid: { left: 16, right: 16, top: 52, bottom: 20, containLabel: true },
+    grid: { left: 16, right: 16, top: 48, bottom: 20, containLabel: true },
     xAxis: {
       type: "category",
-      data: dates,
+      data: models,
       axisLabel: { color: chartTextColor.value },
       axisLine: { lineStyle: { color: chartAxisColor.value } },
     },
@@ -399,26 +516,130 @@ const latencyChartOption = computed(() => {
     series: [
       {
         name: "P50",
-        type: "line",
-        smooth: true,
-        data: dates.map((date) => rowByDate.get(date)?.p50_ms ?? 0),
+        type: "bar",
+        barMaxWidth: 24,
+        itemStyle: { color: latencyPalette.value[0] },
+        data: rows.map((item) => item.p50_ms),
       },
       {
         name: "P95",
-        type: "line",
-        smooth: true,
-        data: dates.map((date) => rowByDate.get(date)?.p95_ms ?? 0),
+        type: "bar",
+        barMaxWidth: 24,
+        itemStyle: { color: latencyPalette.value[1] },
+        data: rows.map((item) => item.p95_ms),
       },
       {
         name: "P99",
-        type: "line",
-        smooth: true,
-        data: dates.map((date) => rowByDate.get(date)?.p99_ms ?? 0),
+        type: "bar",
+        barMaxWidth: 24,
+        itemStyle: { color: latencyPalette.value[2] },
+        data: rows.map((item) => item.p99_ms),
       },
     ],
   };
 });
 
+const recentLatencyOption = computed(() => {
+  const rows = recentLatency.value
+    .filter(
+      (item) =>
+        typeof item?.model === "string" &&
+        item.model.trim().length > 0 &&
+        typeof item.timestamp === "string" &&
+        item.timestamp.trim().length > 0,
+    )
+    .sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+  const xAxisLabels = rows.map((item) => formatShortTime(item.timestamp));
+  const models = [...new Set(rows.map((item) => item.model))].sort((a, b) => a.localeCompare(b));
+
+  return {
+    backgroundColor: "transparent",
+    textStyle: { color: chartTextColor.value },
+    tooltip: {
+      trigger: "axis",
+      backgroundColor: chartTooltipBackground.value,
+      borderColor: chartSplitLineColor.value,
+      textStyle: { color: chartTooltipText.value },
+      formatter: (params: Array<{
+        data: number | null;
+        dataIndex: number;
+        marker: string;
+        seriesName: string;
+      }>) => {
+        const items = Array.isArray(params) ? params : [params];
+        const visibleItems = items.filter((item) => item.data !== null);
+        if (visibleItems.length === 0) {
+          return "";
+        }
+        const row = rows[visibleItems[0]?.dataIndex ?? 0];
+        const lines = visibleItems.map(
+          (item) => `${item.marker}${item.seriesName}: ${Math.round(Number(item.data))} ms`,
+        );
+        return [formatFullTime(row?.timestamp ?? ""), ...lines].join("<br/>");
+      },
+    },
+    legend: {
+      data: models,
+      top: "top",
+      left: "center",
+      textStyle: { color: chartTextColor.value },
+    },
+    grid: { left: 16, right: 16, top: 48, bottom: 20, containLabel: true },
+    xAxis: {
+      type: "category",
+      data: xAxisLabels,
+      axisLabel: { color: chartTextColor.value },
+      axisLine: { lineStyle: { color: chartAxisColor.value } },
+    },
+    yAxis: {
+      type: "value",
+      name: "ms",
+      axisLabel: { color: chartTextColor.value },
+      axisLine: { lineStyle: { color: chartAxisColor.value } },
+      splitLine: { lineStyle: { color: chartSplitLineColor.value } },
+    },
+    series: models.map((model, index) => ({
+      name: model,
+      type: "line",
+      smooth: true,
+      showSymbol: true,
+      symbolSize: 7,
+      itemStyle: { color: latencyPalette.value[index % latencyPalette.value.length] },
+      lineStyle: { width: 3 },
+      data: rows.map((item) => (item.model === model ? item.latency_ms : null)),
+    })),
+  };
+});
+
+const loadRecentLatency = async (): Promise<void> => {
+  try {
+    const recentLatencyResp = await apiGetJson<{ data: RecentLatencyRow[] }>(
+      withToken("dashboard/recent-latency?limit=24"),
+    );
+    recentLatencyApiAvailable.value = true;
+    recentLatency.value = recentLatencyResp.data ?? [];
+  } catch (error) {
+    // TODO: remove this fallback once every backend deployment exposes /dashboard/recent-latency.
+    if (error instanceof ApiClientError && error.status === 404) {
+      recentLatencyApiAvailable.value = false;
+      recentLatency.value = [];
+      return;
+    }
+    recentLatencyApiAvailable.value = true;
+    recentLatency.value = [];
+  }
+};
+
+const loadRecentIssues = async (): Promise<void> => {
+  try {
+    const response = await apiGetJson<{ data: RecentIssueRow[] }>(
+      withToken(`dashboard/errors/recent?limit=8&level=${issueFilter.value}`),
+    );
+    recentIssues.value = response.data ?? [];
+  } catch {
+    recentIssues.value = [];
+  }
+};
 
 const loadDashboard = async (): Promise<void> => {
   loading.value = true;
@@ -426,15 +647,18 @@ const loadDashboard = async (): Promise<void> => {
     const [statusResp, tokenResp, latencyResp, tasksResp, skillsResp] = await Promise.all([
       apiGetJson<DashboardStatus>(withToken("dashboard/status")),
       apiGetJson<{ data: TokenStatsRow[] }>(withToken("dashboard/token-stats?days=7")),
-      apiGetJson<{ data: LatencyStatsRow[] }>(withToken("dashboard/latency-stats?days=7")),
+      apiGetJson<{ data: ModelLatencyStatsRow[] }>(
+        withToken("dashboard/latency-stats?days=7&group_by=model"),
+      ),
       apiGetJson<{ data: RecentTaskRow[] }>(withToken("dashboard/recent-tasks?limit=20")),
       apiGetJson<{ data: SkillRow[] }>(withToken("dashboard/skills")),
     ]);
     status.value = statusResp;
     tokenStats.value = tokenResp.data ?? [];
-    latencyStats.value = latencyResp.data ?? [];
+    latencyModelStats.value = latencyResp.data ?? [];
     recentTasks.value = tasksResp.data ?? [];
     skills.value = skillsResp.data ?? [];
+    await Promise.all([loadRecentLatency(), loadRecentIssues()]);
   } finally {
     loading.value = false;
   }
@@ -445,16 +669,41 @@ const loadChannels = async (): Promise<void> => {
   channels.value = response.channels;
 };
 
-const loadRecentSessions = async (): Promise<void> => {
-  try {
-    const data = await apiGetJson<RecentSessionRow[]>(withToken("sessions"));
-    recentSessions.value = [...data]
-      .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
-      .slice(0, 8);
-  } catch {
-    recentSessions.value = [];
-  }
+const createSessionId = (): string => `session-${Date.now()}`;
+
+const scrollToStats = (): void => {
+  statsCardRef.value?.scrollIntoView({ behavior: "smooth", block: "start" });
 };
+
+const handleQuickAction = async (action: string): Promise<void> => {
+  if (action === "reload-config") {
+    emit("navigate", "config");
+    actionMessage.info("当前未提供快速重载 API，已跳转到 Config。");
+    return;
+  }
+  if (action === "new-chat") {
+    emit("open-session", createSessionId());
+    return;
+  }
+  if (action === "view-stats") {
+    scrollToStats();
+    return;
+  }
+  if (action === "settings") {
+    emit("navigate", "config");
+    return;
+  }
+  actionMessage.info("功能开发中");
+};
+
+const quickActions = computed(() => [
+  { key: "reload-config", icon: "🔄", label: "重载配置", description: "前往 Config 页面进行检查与保存" },
+  { key: "new-chat", icon: "💬", label: "新建对话", description: "创建一个新的会话上下文" },
+  { key: "view-stats", icon: "📊", label: "查看统计", description: "滚动到 Dashboard 统计区域" },
+  { key: "clear-cache", icon: "🧹", label: "清理缓存", description: "缓存清理入口预留中" },
+  { key: "settings", icon: "⚙️", label: "系统设置", description: "进入配置页查看系统设置" },
+  { key: "view-logs", icon: "📝", label: "查看日志", description: "日志详情入口预留中" },
+]);
 
 onMounted(() => {
   syncThemeMode();
@@ -467,14 +716,16 @@ onMounted(() => {
   });
   void loadDashboard();
   void loadChannels();
-  void loadRecentSessions();
   refreshTimer = setInterval(() => {
     void loadDashboard();
-    void loadRecentSessions();
   }, 5000);
   channelRefreshTimer = setInterval(() => {
     void loadChannels();
   }, 30000);
+});
+
+watch(issueFilter, () => {
+  void loadRecentIssues();
 });
 
 onUnmounted(() => {
@@ -492,67 +743,97 @@ onUnmounted(() => {
 
 <template>
   <section class="dashboard-view">
-    <n-grid :x-gap="12" :y-gap="12" cols="1 s:1 m:2 l:2" responsive="screen">
-      <n-grid-item span="2 m:2 l:2">
-        <n-card :bordered="false">
-          <template #header>
-            <div class="card-header-row">
-              <span>渠道状态</span>
-              <n-button size="small" tertiary @click="void loadChannels()">刷新渠道状态</n-button>
+    <n-grid
+      class="dashboard-grid"
+      :x-gap="12"
+      :y-gap="12"
+      cols="1 s:1 m:2 l:2"
+      responsive="screen"
+    >
+      <n-grid-item>
+        <ChannelStatusCard
+          :title="channelCardMap.webui.name"
+          :icon="channelCardMap.webui.icon"
+          :status-label="channelCardMap.webui.statusLabel"
+          :tag-type="channelCardMap.webui.tagType"
+          :details="channelCardMap.webui.details"
+        />
+      </n-grid-item>
+
+      <n-grid-item>
+        <div ref="statsCardRef" class="card-anchor">
+          <n-card title="系统状态" :bordered="false" class="dashboard-card">
+            <div v-if="loading && !status" class="status-skeleton">
+              <n-skeleton v-for="index in 4" :key="`status-skeleton-${index}`" height="84px" round />
             </div>
-          </template>
-          <div class="channel-grid">
-            <n-card
-              v-for="channel in channelCards"
-              :key="channel.key"
-              size="small"
-              embedded
-              class="channel-card"
-            >
-              <div class="channel-card-header">
-                <div class="channel-title-wrap">
-                  <span class="channel-icon">{{ channel.icon }}</span>
-                  <div>
-                    <p class="channel-name">{{ channel.name }}</p>
-                    <p class="channel-status-text">{{ channel.statusLabel }}</p>
-                  </div>
-                </div>
-                <n-tag :type="channel.tagType">{{ channel.statusLabel }}</n-tag>
+            <div v-else-if="status" class="status-grid">
+              <div class="status-item">
+                <p class="status-label">Uptime</p>
+                <p class="status-value">{{ status.uptime_human }}</p>
               </div>
-              <ul class="channel-details">
-                <li v-for="detail in channel.details" :key="detail">{{ detail }}</li>
-              </ul>
-            </n-card>
-          </div>
-        </n-card>
+              <div class="status-item">
+                <p class="status-label">Sessions</p>
+                <p class="status-value">{{ status.session_count }}</p>
+              </div>
+              <div class="status-item">
+                <p class="status-label">Kill Switch</p>
+                <p class="status-value">{{ status.kill_switch ? "ON" : "OFF" }}</p>
+              </div>
+              <div class="status-item">
+                <p class="status-label">bwrap</p>
+                <p class="status-value">{{ status.bwrap_available ? "Available" : "Missing" }}</p>
+              </div>
+            </div>
+          </n-card>
+        </div>
       </n-grid-item>
 
       <n-grid-item>
-        <n-card title="系统状态" :bordered="false">
-          <div v-if="status" class="status-grid">
-            <div class="status-item">
-              <p class="status-label">Uptime</p>
-              <p class="status-value">{{ status.uptime_human }}</p>
-            </div>
-            <div class="status-item">
-              <p class="status-label">Sessions</p>
-              <p class="status-value">{{ status.session_count }}</p>
-            </div>
-            <div class="status-item">
-              <p class="status-label">Kill Switch</p>
-              <p class="status-value">{{ status.kill_switch ? "ON" : "OFF" }}</p>
-            </div>
-            <div class="status-item">
-              <p class="status-label">bwrap</p>
-              <p class="status-value">{{ status.bwrap_available ? "Available" : "Missing" }}</p>
-            </div>
-          </div>
-        </n-card>
+        <ChannelStatusCard
+          :title="channelCardMap.qq.name"
+          :icon="channelCardMap.qq.icon"
+          :status-label="channelCardMap.qq.statusLabel"
+          :tag-type="channelCardMap.qq.tagType"
+          :details="channelCardMap.qq.details"
+        />
       </n-grid-item>
 
       <n-grid-item>
-        <n-card title="Skills 状态" :bordered="false">
-          <ul class="skills-list">
+        <ChannelStatusCard
+          :title="channelCardMap.weixin.name"
+          :icon="channelCardMap.weixin.icon"
+          :status-label="channelCardMap.weixin.statusLabel"
+          :tag-type="channelCardMap.weixin.tagType"
+          :details="channelCardMap.weixin.details"
+        />
+      </n-grid-item>
+
+      <n-grid-item>
+        <ChannelStatusCard
+          :title="channelCardMap.email.name"
+          :icon="channelCardMap.email.icon"
+          :status-label="channelCardMap.email.statusLabel"
+          :tag-type="channelCardMap.email.tagType"
+          :details="channelCardMap.email.details"
+        />
+      </n-grid-item>
+
+      <n-grid-item>
+        <ChannelStatusCard
+          :title="channelCardMap.heartbeat.name"
+          :icon="channelCardMap.heartbeat.icon"
+          :status-label="channelCardMap.heartbeat.statusLabel"
+          :tag-type="channelCardMap.heartbeat.tagType"
+          :details="channelCardMap.heartbeat.details"
+        />
+      </n-grid-item>
+
+      <n-grid-item>
+        <n-card title="Skills 状态" :bordered="false" class="dashboard-card">
+          <div v-if="loading && skills.length === 0" class="skills-skeleton">
+            <n-skeleton v-for="index in 5" :key="`skill-skeleton-${index}`" text :repeat="1" />
+          </div>
+          <ul v-else class="skills-list">
             <li
               v-for="skill in skills"
               :key="skill.name"
@@ -568,42 +849,148 @@ onUnmounted(() => {
       </n-grid-item>
 
       <n-grid-item>
-        <n-card title="Token 消耗（按模型）" :bordered="false">
+        <n-card title="Token 消耗（按模型）" :bordered="false" class="dashboard-card">
           <v-chart autoresize :option="tokenChartOption" :theme="chartTheme" class="chart" />
         </n-card>
       </n-grid-item>
 
-      <n-grid-item>
-        <n-card title="Latency P50/P95/P99" :bordered="false">
-          <div v-if="latencyStats.length === 0" style="height: 280px; display: flex; align-items: center; justify-content: center">
-            <n-empty description="暂无延迟数据" />
+      <n-grid-item span="2 m:2 l:2">
+        <n-card :bordered="false" class="dashboard-card analytics-card">
+          <template #header>
+            <div class="chart-card-header">
+              <h3 class="chart-card-title">模型响应延迟统计</h3>
+              <p class="chart-card-description">
+                各模型调用耗时分布（ms），P50=一半请求低于此值，P95/P99=极端情况
+              </p>
+            </div>
+          </template>
+          <div v-if="latencyModelStats.length === 0" class="chart-empty">
+            <n-empty description="暂无模型延迟统计数据" />
           </div>
-          <v-chart v-else autoresize :option="latencyChartOption" :theme="chartTheme" class="chart" />
+          <v-chart
+            v-else
+            autoresize
+            :option="latencyDistributionOption"
+            :theme="chartTheme"
+            class="chart chart-lg"
+          />
         </n-card>
       </n-grid-item>
 
       <n-grid-item span="2 m:2 l:2">
-        <n-card title="最近对话" :bordered="false">
-          <div v-if="recentSessions.length === 0" class="empty-sessions">
-            <n-empty description="暂无对话记录" />
+        <n-card :bordered="false" class="dashboard-card analytics-card">
+          <template #header>
+            <div class="chart-card-header">
+              <h3 class="chart-card-title">最近调用延迟</h3>
+              <p class="chart-card-description">最近调用的实际响应时间（ms），越低越快</p>
+            </div>
+          </template>
+          <div v-if="!recentLatencyApiAvailable" class="chart-empty">
+            <n-empty description="需要后端提供原始调用记录 API" />
           </div>
-          <ul v-else class="session-list">
-            <li
-              v-for="session in recentSessions"
-              :key="session.session_id"
-              class="session-item"
-              @click="emit('open-session', session.session_id)"
-            >
-              <div class="session-info">
-                <span class="session-id">{{ session.session_id.slice(0, 50) }}</span>
-                <span class="session-time">{{ formatRelativeTime(session.updated_at) }}</span>
+          <div v-else-if="recentLatency.length === 0" class="chart-empty">
+            <n-empty description="暂无最近调用延迟数据" />
+          </div>
+          <v-chart
+            v-else
+            autoresize
+            :option="recentLatencyOption"
+            :theme="chartTheme"
+            class="chart chart-lg"
+          />
+        </n-card>
+      </n-grid-item>
+
+      <n-grid-item span="2 m:2 l:2">
+        <n-card :bordered="false" class="dashboard-card issue-card">
+          <template #header>
+            <div class="card-header-row">
+              <div>
+                <h3 class="chart-card-title">最近错误 / 告警</h3>
+                <p class="chart-card-description">最近 8 条系统错误与告警，可快速展开查看详情。</p>
               </div>
-              <span class="session-count">{{ session.message_count }} 条</span>
+              <div class="issue-filter-group">
+                <button
+                  v-for="option in issueFilterOptions"
+                  :key="option.value"
+                  type="button"
+                  class="issue-filter-button"
+                  :data-active="option.value === issueFilter"
+                  @click="issueFilter = option.value"
+                >
+                  {{ option.label }}
+                </button>
+              </div>
+            </div>
+          </template>
+          <div v-if="loading && recentIssues.length === 0" class="issues-skeleton">
+            <n-skeleton v-for="index in 5" :key="`issue-skeleton-${index}`" height="56px" round />
+          </div>
+          <div v-else-if="recentIssues.length === 0" class="empty-sessions">
+            <n-empty description="✅ 系统运行正常，暂无错误或告警" />
+          </div>
+          <ul v-else class="issue-list">
+            <li
+              v-for="issue in recentIssues"
+              :key="`${issue.timestamp}-${issue.level}-${issue.message}`"
+              class="issue-item"
+              @click="openIssueDetail(issue)"
+            >
+              <div class="issue-info">
+                <div class="issue-head">
+                  <span class="issue-level">{{ issueLevelIcon(issue.level) }} {{ issueLevelLabel(issue.level) }}</span>
+                  <span class="issue-time">{{ formatRelativeTime(issue.timestamp) }}</span>
+                </div>
+                <span class="issue-summary">{{ formatIssueSummary(issue.message) }}</span>
+              </div>
+              <span class="issue-source">{{ issue.source || "system" }}</span>
             </li>
           </ul>
         </n-card>
       </n-grid-item>
+
+      <n-grid-item span="2 m:2 l:2">
+        <n-card :bordered="false" class="dashboard-card quick-action-card">
+          <template #header>
+            <div class="chart-card-header">
+              <h3 class="chart-card-title">快捷操作</h3>
+              <p class="chart-card-description">常用操作入口，未接通后端的功能会给出开发中提示。</p>
+            </div>
+          </template>
+          <div class="quick-action-grid">
+            <button
+              v-for="action in quickActions"
+              :key="action.key"
+              type="button"
+              class="quick-action-button"
+              @click="void handleQuickAction(action.key)"
+            >
+              <span class="quick-action-icon">{{ action.icon }}</span>
+              <span class="quick-action-copy">
+                <strong>{{ action.label }}</strong>
+                <small>{{ action.description }}</small>
+              </span>
+            </button>
+          </div>
+        </n-card>
+      </n-grid-item>
     </n-grid>
+
+    <n-drawer :show="selectedIssue !== null" width="min(560px, 92vw)" @update:show="(show) => !show && closeIssueDetail()">
+      <n-drawer-content title="错误 / 告警详情" closable>
+        <div v-if="selectedIssue" class="issue-drawer">
+          <div class="issue-drawer-meta">
+            <n-tag :type="selectedIssue.level === 'error' ? 'error' : 'warning'">
+              {{ issueLevelIcon(selectedIssue.level) }} {{ issueLevelLabel(selectedIssue.level) }}
+            </n-tag>
+            <span>{{ formatFullTime(selectedIssue.timestamp) }}</span>
+            <span>{{ selectedIssue.source || "system" }}</span>
+          </div>
+          <h3 class="issue-drawer-title">{{ selectedIssue.message }}</h3>
+          <pre class="issue-drawer-detail">{{ selectedIssue.detail || selectedIssue.message }}</pre>
+        </div>
+      </n-drawer-content>
+    </n-drawer>
   </section>
 </template>
 
@@ -612,68 +999,83 @@ onUnmounted(() => {
   height: 100%;
   min-height: 0;
   overflow: auto;
+  width: 100%;
+}
+
+.dashboard-grid :deep(.n-grid-item) {
+  display: flex;
+}
+
+.dashboard-grid :deep(.n-grid-item > *) {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.dashboard-card {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.dashboard-card :deep(.n-card__content) {
+  flex: 1;
+}
+
+.card-anchor {
+  display: flex;
+  width: 100%;
 }
 
 .card-header-row {
   align-items: center;
   display: flex;
+  gap: 1rem;
   justify-content: space-between;
   width: 100%;
 }
 
-.channel-grid {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+.issue-filter-group {
+  background: color-mix(in srgb, var(--surface-soft) 92%, transparent);
+  border: 1px solid color-mix(in srgb, var(--panel-edge) 88%, transparent);
+  border-radius: 999px;
+  display: inline-flex;
+  gap: 0.25rem;
+  padding: 0.25rem;
 }
 
-.channel-card {
-  min-height: 168px;
-}
-
-.channel-card-header {
-  align-items: flex-start;
-  display: flex;
-  gap: 12px;
-  justify-content: space-between;
-}
-
-.channel-title-wrap {
-  align-items: flex-start;
-  display: flex;
-  gap: 10px;
-}
-
-.channel-icon {
-  font-size: 20px;
-  line-height: 1;
-}
-
-.channel-name {
-  font-size: 15px;
+.issue-filter-button {
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.78rem;
   font-weight: 700;
-  margin: 0;
+  padding: 0.35rem 0.65rem;
 }
 
-.channel-status-text {
-  color: var(--muted);
-  font-size: 12px;
-  margin: 4px 0 0;
+.issue-filter-button[data-active="true"] {
+  background: color-mix(in srgb, var(--brand) 16%, transparent);
+  color: var(--text);
 }
 
-.channel-details {
-  color: var(--muted);
-  display: grid;
-  gap: 8px;
-  list-style: none;
-  margin: 14px 0 0;
-  padding: 0;
+.analytics-card {
+  background:
+    linear-gradient(150deg, color-mix(in srgb, var(--brand) 6%, transparent), transparent 68%),
+    color-mix(in srgb, var(--surface) 95%, transparent);
+  border: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
 }
 
 .status-grid {
   display: grid;
   gap: 10px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.status-skeleton,
+.issues-skeleton {
+  display: grid;
+  gap: 0.75rem;
 }
 
 .status-item {
@@ -703,6 +1105,11 @@ onUnmounted(() => {
   padding: 0;
 }
 
+.skills-skeleton {
+  display: grid;
+  gap: 0.7rem;
+}
+
 .skill-row {
   align-items: center;
   display: flex;
@@ -714,6 +1121,34 @@ onUnmounted(() => {
   width: 100%;
 }
 
+.chart-lg {
+  height: 320px;
+}
+
+.chart-card-header {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.chart-card-title {
+  font-size: 1rem;
+  margin: 0;
+}
+
+.chart-card-description {
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.chart-empty {
+  align-items: center;
+  display: flex;
+  height: 320px;
+  justify-content: center;
+}
+
 .empty-sessions {
   align-items: center;
   display: flex;
@@ -721,7 +1156,7 @@ onUnmounted(() => {
   justify-content: center;
 }
 
-.session-list {
+.issue-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -730,57 +1165,165 @@ onUnmounted(() => {
   padding: 0;
 }
 
-.session-item {
+.issue-card,
+.quick-action-card {
+  min-height: 320px;
+}
+
+.issue-item {
   align-items: center;
-  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  background: color-mix(in srgb, var(--surface-soft) 90%, transparent);
   border: 1px solid var(--panel-edge);
-  border-radius: 8px;
+  border-radius: 12px;
   cursor: pointer;
   display: flex;
   justify-content: space-between;
-  padding: 12px 16px;
+  gap: 1rem;
+  padding: 12px 14px;
   transition: all 0.2s ease;
 }
 
-.session-item:hover {
-  background: var(--surface-hover);
-  border-color: var(--primary-color);
+.issue-item:hover {
+  background: color-mix(in srgb, var(--surface) 100%, transparent);
+  border-color: color-mix(in srgb, var(--brand) 40%, var(--panel-edge));
   transform: translateY(-1px);
 }
 
-.session-info {
+.issue-info {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
 }
 
-.session-id {
-  color: var(--text-color);
-  font-family: monospace;
-  font-size: 14px;
-  font-weight: 500;
+.issue-head {
+  align-items: center;
+  display: flex;
+  gap: 0.65rem;
+  justify-content: space-between;
 }
 
-.session-time {
+.issue-level,
+.issue-time {
   color: var(--muted);
   font-size: 12px;
 }
 
-.session-count {
-  background: var(--surface-active);
+.issue-summary {
+  color: var(--text);
+  font-size: 0.92rem;
+  line-height: 1.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.issue-source {
+  color: var(--muted);
+  flex-shrink: 0;
+  font-family: "IBM Plex Mono", "Fira Code", monospace;
+  font-size: 0.78rem;
+}
+
+.quick-action-grid {
+  display: grid;
+  gap: 0.85rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.quick-action-button {
+  align-items: flex-start;
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--brand) 8%, transparent), transparent 75%),
+    color-mix(in srgb, var(--surface-soft) 92%, transparent);
+  border: 1px solid color-mix(in srgb, var(--panel-edge) 92%, transparent);
+  border-radius: 14px;
+  color: var(--text);
+  cursor: pointer;
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: auto 1fr;
+  padding: 1rem;
+  text-align: left;
+}
+
+.quick-action-button:hover {
+  border-color: color-mix(in srgb, var(--brand) 45%, var(--panel-edge));
+  box-shadow: var(--card-shadow);
+  transform: translateY(-1px);
+}
+
+.quick-action-icon {
+  align-items: center;
+  background: color-mix(in srgb, var(--brand) 12%, transparent);
   border-radius: 12px;
-  color: var(--text-color);
-  font-size: 13px;
-  padding: 4px 12px;
+  display: inline-flex;
+  font-size: 1.2rem;
+  height: 2.7rem;
+  justify-content: center;
+  width: 2.7rem;
+}
+
+.quick-action-copy {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.quick-action-copy strong {
+  font-size: 0.93rem;
+}
+
+.quick-action-copy small {
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.issue-drawer {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.issue-drawer-meta {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.issue-drawer-title {
+  font-size: 1.05rem;
+  margin: 0;
+}
+
+.issue-drawer-detail {
+  background: color-mix(in srgb, var(--surface-soft) 92%, transparent);
+  border: 1px solid color-mix(in srgb, var(--panel-edge) 88%, transparent);
+  border-radius: 12px;
+  margin: 0;
+  max-height: 60vh;
+  overflow: auto;
+  padding: 1rem;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 @media (max-width: 767px) {
+  .card-header-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .status-grid {
     grid-template-columns: 1fr;
   }
 
-  .channel-grid {
+  .quick-action-grid {
     grid-template-columns: 1fr;
+  }
+
+  .issue-item {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 </style>

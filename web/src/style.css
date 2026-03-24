@@ -1,15 +1,30 @@
 :root {
-  --bg: #eef3fb;
+  --bg: #f5f7fb;
   --surface: #ffffff;
-  --panel: #f7f9ff;
-  --panel-edge: #cfd9ea;
-  --text: #1b2538;
-  --muted: #607090;
-  --brand: #2bb586;
-  --brand-2: #f2a23f;
-  --ok: #1fa663;
-  --warn: #cc8a17;
-  --error: #cf3d3d;
+  --surface-soft: #f8fafc;
+  --surface-muted: #eef2f8;
+  --panel: #fbfcfe;
+  --panel-edge: #d7e0ec;
+  --panel-edge-strong: #bfcbda;
+  --text: #162033;
+  --text-soft: #54627a;
+  --muted: #687892;
+  --brand: #2080f0;
+  --brand-strong: #155ec2;
+  --brand-2: #5aa6ff;
+  --ok: #18a058;
+  --warn: #f0a020;
+  --error: #d03050;
+  --info: #2080f0;
+  --card-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+  --card-shadow-strong: 0 24px 56px rgba(15, 23, 42, 0.12);
+  --chart-primary: #2080f0;
+  --chart-secondary: #18a058;
+  --chart-tertiary: #f0a020;
+  --chart-quaternary: #7c3aed;
+  --chart-grid: rgba(148, 163, 184, 0.3);
+  --tooltip-bg: rgba(255, 255, 255, 0.96);
+  --tooltip-text: #162033;
 
   color: var(--text);
   font-family:
@@ -25,17 +40,32 @@
 }
 
 :root[data-theme="dark"] {
-  --bg: #070a14;
-  --surface: #10172d;
-  --panel: #0d1428;
-  --panel-edge: #2a3556;
-  --text: #e7ecfa;
-  --muted: #96a4cd;
-  --brand: #4ddcb1;
-  --brand-2: #f5b95e;
-  --ok: #5be081;
-  --warn: #ffcb6b;
-  --error: #ff6c6c;
+  --bg: #11131a;
+  --surface: #1a1f2b;
+  --surface-soft: #212736;
+  --surface-muted: #242c3d;
+  --panel: #181d28;
+  --panel-edge: #2f394d;
+  --panel-edge-strong: #41506c;
+  --text: #eef3ff;
+  --text-soft: #c6d1e6;
+  --muted: #9eacc7;
+  --brand: #5aa6ff;
+  --brand-strong: #8bbcff;
+  --brand-2: #2d8cff;
+  --ok: #5bd08d;
+  --warn: #ffb84d;
+  --error: #ff6b81;
+  --info: #6ea8ff;
+  --card-shadow: 0 0 0 1px rgba(148, 163, 184, 0.14), 0 16px 30px rgba(2, 6, 23, 0.22);
+  --card-shadow-strong: 0 0 0 1px rgba(148, 163, 184, 0.16), 0 28px 60px rgba(2, 6, 23, 0.34);
+  --chart-primary: #6ea8ff;
+  --chart-secondary: #5bd08d;
+  --chart-tertiary: #ffb84d;
+  --chart-quaternary: #a78bfa;
+  --chart-grid: rgba(148, 163, 184, 0.2);
+  --tooltip-bg: rgba(24, 29, 40, 0.96);
+  --tooltip-text: #eef3ff;
 }
 
 *,
@@ -50,6 +80,7 @@ body {
 }
 
 #app {
+  height: 100%;
   min-height: 100vh;
 }
 
@@ -68,6 +99,40 @@ body {
     linear-gradient(160deg, color-mix(in srgb, var(--bg) 92%, black 8%), var(--bg));
   color: var(--text);
   margin: 0;
+  overflow: hidden;
+}
+
+.n-card {
+  box-shadow: var(--card-shadow);
+}
+
+button,
+a,
+.n-button,
+.n-card,
+.n-menu-item-content {
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    color 0.2s ease,
+    box-shadow 0.2s ease,
+    transform 0.2s ease;
+}
+
+button:active,
+.n-button:active {
+  transform: scale(0.98);
+}
+
+.bubble,
+.message-bubble,
+.bubble-content,
+.markdown-preview,
+.text-message,
+.markdown-body,
+.markdown-body > * {
+  max-width: 100%;
+  min-width: 0;
 }
 
 .markdown-body table,
@@ -94,7 +159,7 @@ body {
 
 .markdown-body .code-header {
   align-items: center;
-  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  background: color-mix(in srgb, var(--surface-soft) 76%, transparent);
   border-bottom: 1px solid var(--panel-edge);
   display: flex;
   font-size: 0.72rem;
@@ -116,4 +181,74 @@ body {
   cursor: pointer;
   font-size: 0.7rem;
   padding: 0.1rem 0.4rem;
+}
+
+.markdown-body pre {
+  background: color-mix(in srgb, var(--surface-soft) 88%, transparent);
+  border: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
+  border-radius: 0.8rem;
+  margin: 0.55rem 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: pre;
+  word-break: normal;
+}
+
+.markdown-body pre code {
+  display: grid;
+  min-width: max-content;
+}
+
+.markdown-body .code-block-wrapper {
+  max-width: 100%;
+}
+
+.markdown-body .code-line {
+  display: grid;
+  gap: 0;
+  grid-template-columns: 3rem minmax(max-content, 1fr);
+  min-width: max-content;
+}
+
+.markdown-body .line-number {
+  background: color-mix(in srgb, var(--surface-muted) 94%, transparent);
+  border-right: 1px solid color-mix(in srgb, var(--panel-edge) 85%, transparent);
+  color: color-mix(in srgb, var(--muted) 85%, transparent);
+  left: 0;
+  padding: 0.06rem 0.7rem 0.06rem 0.55rem;
+  position: sticky;
+  text-align: right;
+  user-select: none;
+}
+
+.markdown-body .line-text {
+  display: inline-block;
+  min-width: max-content;
+  padding: 0.06rem 0.85rem;
+  white-space: pre;
+}
+
+.markdown-body img,
+.bubble img {
+  height: auto;
+  max-width: 100%;
+}
+
+.markdown-body p,
+.markdown-body li,
+.markdown-body blockquote,
+.markdown-body a {
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    scroll-behavior: auto !important;
+    transition: none !important;
+  }
 }

@@ -15,23 +15,34 @@ function escapeHtml(raw: string): string {
     .replaceAll("'", "&#39;");
 }
 
+function renderCodeWithLineNumbers(codeHtml: string): string {
+  const lines = codeHtml.split("\n");
+  const normalizedLines = lines.length > 0 ? lines : [""];
+  return normalizedLines
+    .map((line, index) => {
+      const content = line.length > 0 ? line : "&nbsp;";
+      return `<span class="code-line"><span class="line-number">${index + 1}</span><span class="line-text">${content}</span></span>`;
+    })
+    .join("");
+}
+
 const markdown: MarkdownIt = new MarkdownIt({
   breaks: true,
   highlight(code: string, language: string): string {
     const normalizedLang = typeof language === "string" ? language.trim() : "";
     const dataCode = escapeHtml(code);
     const languageLabel = normalizedLang || "text";
-    const header = `<div class="code-header"><span class="code-lang">${escapeHtml(languageLabel)}</span><button class="copy-btn" type="button" data-code="${dataCode}">📋 Copy</button></div>`;
+    const header = `<div class="code-header"><span class="code-lang">${escapeHtml(languageLabel)}</span><button class="copy-btn" type="button" data-code="${dataCode}">复制</button></div>`;
     if (normalizedLang && hljs.getLanguage(normalizedLang)) {
       const highlighted = hljs.highlight(code, {
         language: normalizedLang,
         ignoreIllegals: true,
       }).value;
-      return `<pre class="hljs code-block-wrapper">${header}<code class="language-${normalizedLang}">${highlighted}</code></pre>`;
+      return `<pre class="hljs code-block-wrapper">${header}<code class="language-${normalizedLang}">${renderCodeWithLineNumbers(highlighted)}</code></pre>`;
     }
 
     const languageClass = normalizedLang ? ` class="language-${normalizedLang}"` : "";
-    return `<pre class="hljs code-block-wrapper">${header}<code${languageClass}>${dataCode}</code></pre>`;
+    return `<pre class="hljs code-block-wrapper">${header}<code${languageClass}>${renderCodeWithLineNumbers(dataCode)}</code></pre>`;
   },
   html: false,
   linkify: true,

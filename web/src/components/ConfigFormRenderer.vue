@@ -7,6 +7,7 @@ import {
   NCollapseItem,
   NInput,
   NInputNumber,
+  NSelect,
   NSwitch,
   NTag,
 } from "naive-ui";
@@ -54,6 +55,18 @@ const TASK_SECTIONS: Record<
     description: "控制本地邮件索引缓存的容量、保留时间和启动预热范围。",
   },
 };
+
+const MODEL_OPTIONS_BY_PROVIDER: Record<string, string[]> = {
+  OpenAI: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo", "o1", "o1-mini", "o3-mini"],
+  Anthropic: ["claude-3.5-sonnet", "claude-3.5-haiku", "claude-3-opus"],
+  Google: ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"],
+  DeepSeek: ["deepseek-chat", "deepseek-reasoner"],
+};
+
+const PROVIDER_OPTIONS = Object.keys(MODEL_OPTIONS_BY_PROVIDER).map((provider) => ({
+  label: provider,
+  value: provider,
+}));
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -112,6 +125,9 @@ const skillsEntries = computed(() => {
 
 const isPersonaRoot = computed(() => props.fileName === "persona.yaml" && props.path === "");
 const visibleEntries = computed(() => Object.entries(rootObject.value));
+const skillGlobalEntries = computed(() =>
+  visibleEntries.value.filter(([key]) => key !== "skills"),
+);
 
 const scalarArrayPaths = computed(() =>
   new Set(
@@ -125,6 +141,27 @@ const updateObjectField = (key: string, value: unknown): void => {
   emit("update:modelValue", {
     ...rootObject.value,
     [key]: value,
+  });
+};
+
+const providerOptions = (): Array<{ label: string; value: string }> => PROVIDER_OPTIONS;
+
+const providerValue = (): string => String(rootObject.value.provider ?? "").trim();
+
+const providerHasPresetModels = (): boolean =>
+  providerValue().length > 0 && providerValue() in MODEL_OPTIONS_BY_PROVIDER;
+
+const modelOptions = (): Array<{ label: string; value: string }> =>
+  (MODEL_OPTIONS_BY_PROVIDER[providerValue()] ?? []).map((modelName) => ({
+    label: modelName,
+    value: modelName,
+  }));
+
+const updateProviderAndResetModel = (nextProvider: string): void => {
+  emit("update:modelValue", {
+    ...rootObject.value,
+    provider: nextProvider,
+    litellm_model: "",
   });
 };
 
@@ -296,66 +333,99 @@ const updateSkillField = (skillName: string, field: string, value: unknown): voi
     },
   });
 };
+
+const skillAdvancedEntries = (skillConfig: unknown): Array<[string, unknown]> =>
+  isRecord(skillConfig)
+    ? Object.entries(skillConfig).filter(([key]) => key !== "enabled")
+    : [];
+
+const skillEnabled = (skillConfig: unknown): boolean =>
+  isRecord(skillConfig) ? Boolean(skillConfig.enabled) : false;
+
+const skillSummary = (skillConfig: unknown): string => {
+  const advancedCount = skillAdvancedEntries(skillConfig).length;
+  if (advancedCount === 0) {
+    return skillEnabled(skillConfig) ? "已启用，无额外参数" : "已禁用，无额外参数";
+  }
+  return skillEnabled(skillConfig)
+    ? `已启用，含 ${advancedCount} 项高级设置`
+    : `已禁用，含 ${advancedCount} 项高级设置`;
+};
 </script>
 
 <template>
   <div v-if="isSkillsRoot" class="skills-layout">
-    <div
-      v-for="[key, value] in visibleEntries"
-      :key="key"
-      class="skill-root-item"
+    <n-card
+      v-if="skillGlobalEntries.length > 0"
+      title="全局设置"
+      :bordered="false"
+      class="skill-global-card"
     >
-      <div v-if="key !== 'skills'" class="skill-global-config">
-        <div v-if="typeof value === 'boolean'" class="field-row">
-          <label class="field-label">{{ key }}</label>
-          <n-switch
-            :value="value"
-            :data-testid="testIdFor(pathFor(key))"
-            @update:value="(next) => updateObjectField(key, next)"
-          />
-        </div>
-        <div v-else-if="typeof value === 'number'" class="field-row">
-          <label class="field-label">{{ key }}</label>
-          <n-input-number
-            :value="value"
-            :data-testid="testIdFor(pathFor(key))"
-            @update:value="(next) => updateObjectField(key, next ?? 0)"
-          />
-        </div>
-        <div v-else-if="typeof value === 'string'" class="field-row">
-          <label class="field-label">{{ key }}</label>
-          <n-input
-            :value="value"
-            :data-testid="testIdFor(pathFor(key))"
-            @update:value="(next) => updateObjectField(key, next)"
-          />
+      <div class="skill-global-grid">
+        <div
+          v-for="[key, value] in skillGlobalEntries"
+          :key="key"
+          class="skill-global-config"
+        >
+          <div v-if="typeof value === 'boolean'" class="field-row">
+            <label class="field-label">{{ key }}</label>
+            <n-switch
+              :value="value"
+              :data-testid="testIdFor(pathFor(key))"
+              @update:value="(next) => updateObjectField(key, next)"
+            />
+          </div>
+          <div v-else-if="typeof value === 'number'" class="field-row">
+            <label class="field-label">{{ key }}</label>
+            <n-input-number
+              :value="value"
+              :data-testid="testIdFor(pathFor(key))"
+              @update:value="(next) => updateObjectField(key, next ?? 0)"
+            />
+          </div>
+          <div v-else-if="typeof value === 'string'" class="field-row">
+            <label class="field-label">{{ key }}</label>
+            <n-input
+              :value="value"
+              :data-testid="testIdFor(pathFor(key))"
+              @update:value="(next) => updateObjectField(key, next)"
+            />
+          </div>
         </div>
       </div>
+    </n-card>
 
-      <n-card v-else title="技能列表" :bordered="false" class="skills-card">
+    <div class="skills-grid">
+      <n-card
+        v-for="[skillName, skillConfig] in skillsEntries"
+        :key="skillName"
+        :bordered="false"
+        class="skill-card"
+        :data-testid="`skill-card-${skillName}`"
+      >
+        <template #header>
+          <div class="skill-header">
+            <div class="skill-heading">
+              <span class="skill-name">{{ skillName }}</span>
+              <p class="skill-summary">{{ skillSummary(skillConfig) }}</p>
+            </div>
+            <n-switch
+              :value="skillEnabled(skillConfig)"
+              :data-testid="`skill-enable-${skillName}`"
+              @click.stop
+              @update:value="(next) => updateSkillField(skillName, 'enabled', next)"
+            />
+          </div>
+        </template>
+
         <n-collapse
-          class="skills-collapse"
+          v-if="skillAdvancedEntries(skillConfig).length > 0"
+          class="skill-card-collapse"
         >
-          <n-collapse-item
-            v-for="[skillName, skillConfig] in skillsEntries"
-            :key="skillName"
-            :name="skillName"
-          >
-            <template #header>
-              <div class="skill-header">
-                <span class="skill-name">{{ skillName }}</span>
-                <n-switch
-                  :value="isRecord(skillConfig) ? Boolean(skillConfig.enabled) : false"
-                  :data-testid="`skill-enable-${skillName}`"
-                  @click.stop
-                  @update:value="(next) => updateSkillField(skillName, 'enabled', next)"
-                />
-              </div>
-            </template>
-
-            <div v-if="isRecord(skillConfig)" class="skill-advanced-fields">
+          <n-collapse-item :name="`${skillName}-advanced`" title="高级设置">
+            <div class="skill-advanced-fields">
               <div
-                v-for="[fieldKey, fieldValue] in Object.entries(skillConfig).filter(([k]) => k !== 'enabled')"
+                v-for="[fieldKey, fieldValue] in skillAdvancedEntries(skillConfig)"
                 :key="fieldKey"
               >
                 <div v-if="typeof fieldValue === 'boolean'" class="field-row">
@@ -386,6 +456,7 @@ const updateSkillField = (skillName: string, field: string, value: unknown): voi
             </div>
           </n-collapse-item>
         </n-collapse>
+        <p v-else class="skill-empty">当前技能没有额外参数。</p>
       </n-card>
     </div>
   </div>
@@ -591,8 +662,28 @@ const updateSkillField = (skillName: string, field: string, value: unknown): voi
         class="field-row"
       >
         <label class="field-label">{{ key }}</label>
+        <n-select
+          v-if="key === 'provider'"
+          :value="value"
+          :options="providerOptions()"
+          filterable
+          tag
+          clearable
+          :data-testid="testIdFor(pathFor(key))"
+          @update:value="(next) => updateProviderAndResetModel(String(next ?? ''))"
+        />
+        <n-select
+          v-else-if="key === 'litellm_model' && providerHasPresetModels()"
+          :value="value"
+          :options="modelOptions()"
+          filterable
+          tag
+          clearable
+          :data-testid="testIdFor(pathFor(key))"
+          @update:value="(next) => updateObjectField(key, String(next ?? ''))"
+        />
         <n-input
-          v-if="!shouldUseTextarea(key, value)"
+          v-else-if="!shouldUseTextarea(key, value)"
           :value="value"
           :type="isMaskedField(pathFor(key)) ? 'password' : 'text'"
           :placeholder="isMaskedField(pathFor(key)) ? '••••••••' : ''"
@@ -719,42 +810,86 @@ const updateSkillField = (skillName: string, field: string, value: unknown): voi
   gap: 1rem;
 }
 
-.skill-root-item {
+.skill-global-card {
+  background:
+    linear-gradient(150deg, color-mix(in srgb, var(--brand) 5%, transparent), transparent 72%),
+    color-mix(in srgb, var(--surface) 95%, transparent);
+  border: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
+}
+
+.skill-global-grid {
   display: grid;
   gap: 1rem;
 }
 
 .skill-global-config {
-  background: color-mix(in srgb, var(--surface) 95%, transparent);
-  border: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
-  border-radius: 0.8rem;
-  padding: 1.25rem;
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+  border: 1px solid color-mix(in srgb, var(--panel-edge) 88%, transparent);
+  border-radius: 0.9rem;
+  padding: 1rem 1.1rem;
 }
 
-.skills-card {
+.skills-grid {
+  align-items: stretch;
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+}
+
+.skill-card {
   background:
-    linear-gradient(145deg, color-mix(in srgb, var(--brand) 6%, transparent), transparent 60%),
+    linear-gradient(145deg, color-mix(in srgb, var(--brand) 7%, transparent), transparent 62%),
     color-mix(in srgb, var(--surface) 95%, transparent);
   border: 1px solid color-mix(in srgb, var(--panel-edge) 90%, transparent);
-  border-radius: 1rem;
+  height: 100%;
+}
+
+.skill-card :deep(.n-card__content) {
+  display: grid;
+  gap: 0.85rem;
+  height: 100%;
 }
 
 .skill-header {
-  align-items: center;
+  align-items: flex-start;
   display: flex;
   gap: 1rem;
   justify-content: space-between;
   width: 100%;
 }
 
+.skill-heading {
+  display: grid;
+  gap: 0.3rem;
+}
+
 .skill-name {
+  font-size: 1rem;
   font-weight: 600;
+}
+
+.skill-summary {
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  margin: 0;
+}
+
+.skill-card-collapse {
+  margin-top: auto;
 }
 
 .skill-advanced-fields {
   display: grid;
   gap: 0.85rem;
   padding: 0.5rem 0;
+}
+
+.skill-empty {
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+  margin: auto 0 0;
 }
 
 .persona-layout {

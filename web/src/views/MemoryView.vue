@@ -396,6 +396,7 @@ watch(activeFile, () => {
   height: 100%;
   min-height: 0;
   overflow: auto;
+  width: 100%;
 }
 
 .l1-layout,

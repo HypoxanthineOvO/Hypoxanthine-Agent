@@ -6,6 +6,7 @@ import {
   NMessageProvider,
   NNotificationProvider,
 } from "naive-ui";
+import type { GlobalThemeOverrides } from "naive-ui";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 
 import SideNav from "./components/layout/SideNav.vue";
@@ -31,6 +32,16 @@ const activeChatSessionId = ref<string>("");
 const onOpenSession = (sessionId: string) => {
   activeView.value = "chat";
   activeChatSessionId.value = sessionId;
+};
+
+const onNavigate = (
+  view: "chat" | "dashboard" | "config" | "memory",
+  sessionId?: string,
+): void => {
+  activeView.value = view;
+  if (view === "chat" && sessionId) {
+    activeChatSessionId.value = sessionId;
+  }
 };
 const navItems = [
   { key: "chat", icon: "💬", label: "Chat" },
@@ -80,12 +91,129 @@ const titleByView: Record<typeof activeView.value, string> = {
 
 const pageTitle = computed(() => titleByView[activeView.value]);
 
+const palette = computed(() =>
+  mode.value === "dark"
+    ? {
+        bg: "#11131a",
+        surface: "#1a1f2b",
+        surfaceSoft: "#212736",
+        panelEdge: "#2f394d",
+        text: "#eef3ff",
+        textSoft: "#c6d1e6",
+        muted: "#9eacc7",
+        brand: "#5aa6ff",
+        brandStrong: "#8bbcff",
+        brandAlt: "#2d8cff",
+        info: "#6ea8ff",
+        ok: "#5bd08d",
+        warn: "#ffb84d",
+        error: "#ff6b81",
+      }
+    : {
+        bg: "#f5f7fb",
+        surface: "#ffffff",
+        surfaceSoft: "#f8fafc",
+        panelEdge: "#d7e0ec",
+        text: "#162033",
+        textSoft: "#54627a",
+        muted: "#687892",
+        brand: "#2080f0",
+        brandStrong: "#155ec2",
+        brandAlt: "#5aa6ff",
+        info: "#2080f0",
+        ok: "#18a058",
+        warn: "#f0a020",
+        error: "#d03050",
+      },
+);
+
+const themeOverrides = computed<GlobalThemeOverrides>(() => ({
+  common: {
+    borderRadius: "14px",
+    borderRadiusSmall: "12px",
+    primaryColor: palette.value.brand,
+    primaryColorHover: palette.value.brandAlt,
+    primaryColorPressed: palette.value.brandStrong,
+    primaryColorSuppl: palette.value.brandAlt,
+    infoColor: palette.value.info,
+    infoColorHover: palette.value.brandAlt,
+    successColor: palette.value.ok,
+    warningColor: palette.value.warn,
+    errorColor: palette.value.error,
+    bodyColor: palette.value.bg,
+    cardColor: palette.value.surface,
+    modalColor: palette.value.surface,
+    popoverColor: palette.value.surface,
+    tableColor: palette.value.surface,
+    borderColor: palette.value.panelEdge,
+    textColorBase: palette.value.text,
+    textColor1: palette.value.text,
+    textColor2: palette.value.textSoft,
+    textColor3: palette.value.muted,
+    placeholderColor: palette.value.muted,
+    closeIconColor: palette.value.muted,
+    closeIconColorHover: palette.value.text,
+  },
+  Card: {
+    borderRadius: "14px",
+    borderRadiusSmall: "12px",
+    borderRadiusMedium: "14px",
+    borderRadiusLarge: "16px",
+    boxShadow:
+      mode.value === "dark"
+        ? "0 0 0 1px rgba(148, 163, 184, 0.14), 0 16px 30px rgba(2, 6, 23, 0.22)"
+        : "0 18px 40px rgba(15, 23, 42, 0.08)",
+  },
+  Button: {
+    borderRadiusMedium: "12px",
+    borderRadiusSmall: "10px",
+    textColorText: palette.value.text,
+    textColorGhost: palette.value.text,
+    textColorTertiary: palette.value.text,
+  },
+  Input: {
+    color: palette.value.surface,
+    colorFocus: palette.value.surface,
+    border: `1px solid ${palette.value.panelEdge}`,
+    borderHover: `1px solid ${palette.value.brandAlt}`,
+    borderFocus: `1px solid ${palette.value.brand}`,
+    caretColor: palette.value.brand,
+    textColor: palette.value.text,
+    placeholderColor: palette.value.muted,
+  },
+  Menu: {
+    itemTextColor: palette.value.textSoft,
+    itemTextColorHover: palette.value.text,
+    itemTextColorActive: palette.value.text,
+    itemColorHover: mode.value === "dark" ? "rgba(90, 166, 255, 0.12)" : "rgba(32, 128, 240, 0.12)",
+    itemColorActive: mode.value === "dark" ? "rgba(90, 166, 255, 0.18)" : "rgba(32, 128, 240, 0.18)",
+    itemColorActiveHover: mode.value === "dark" ? "rgba(90, 166, 255, 0.22)" : "rgba(32, 128, 240, 0.22)",
+    itemIconColor: palette.value.muted,
+    itemIconColorActive: palette.value.brand,
+    itemIconColorHover: palette.value.brand,
+    arrowColor: palette.value.muted,
+    borderRadius: "12px",
+  },
+  Layout: {
+    color: "transparent",
+    siderColor: "transparent",
+    headerColor: "transparent",
+  },
+  Drawer: {
+    color: palette.value.surface,
+  },
+}));
+
 const onSelectView = (view: "chat" | "dashboard" | "config" | "memory"): void => {
   activeView.value = view;
 };
 
 watch(mode, (nextMode) => {
   document.documentElement.dataset.theme = nextMode;
+}, { immediate: true });
+
+watch(pageTitle, (nextTitle) => {
+  document.title = nextTitle;
 }, { immediate: true });
 
 watch(isDesktop, (nextIsDesktop) => {
@@ -120,7 +248,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <n-config-provider :theme="theme">
+  <n-config-provider :theme="theme" :theme-overrides="themeOverrides">
     <n-notification-provider>
       <n-message-provider>
         <n-global-style />
@@ -153,29 +281,36 @@ onUnmounted(() => {
             </header>
 
             <section class="main-body">
-              <ChatView
-                v-if="activeView === 'chat'"
-                :session-id="activeChatSessionId"
-                :ws-url="wsUrl"
-                :token="token"
-                :api-base="apiBase"
-              />
-              <DashboardView
-                v-else-if="activeView === 'dashboard'"
-                :token="token"
-                :api-base="apiBase"
-                @open-session="onOpenSession"
-              />
-              <ConfigView
-                v-else-if="activeView === 'config'"
-                :token="token"
-                :api-base="apiBase"
-              />
-              <MemoryView
-                v-else
-                :token="token"
-                :api-base="apiBase"
-              />
+              <Transition name="view-fade" mode="out-in">
+                <ChatView
+                  v-if="activeView === 'chat'"
+                  key="chat"
+                  :session-id="activeChatSessionId"
+                  :ws-url="wsUrl"
+                  :token="token"
+                  :api-base="apiBase"
+                />
+                <DashboardView
+                  v-else-if="activeView === 'dashboard'"
+                  key="dashboard"
+                  :token="token"
+                  :api-base="apiBase"
+                  @open-session="onOpenSession"
+                  @navigate="onNavigate"
+                />
+                <ConfigView
+                  v-else-if="activeView === 'config'"
+                  key="config"
+                  :token="token"
+                  :api-base="apiBase"
+                />
+                <MemoryView
+                  v-else
+                  key="memory"
+                  :token="token"
+                  :api-base="apiBase"
+                />
+              </Transition>
             </section>
 
             <nav v-if="isMobile" class="mobile-nav" data-testid="mobile-nav">
@@ -206,18 +341,25 @@ onUnmounted(() => {
   margin: 0 auto;
   max-width: 1320px;
   height: 100vh;
+  min-height: 0;
   padding: 0.85rem;
 }
 
 .app-rail {
+  min-height: 0;
   max-width: 250px;
   min-width: 76px;
+  transition:
+    max-width 0.3s ease,
+    min-width 0.3s ease,
+    transform 0.3s ease;
 }
 
 .app-main {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 0.85rem;
-  grid-template-rows: auto 1fr auto;
+  height: 100%;
   min-height: 0;
   min-width: 0;
 }
@@ -248,9 +390,17 @@ onUnmounted(() => {
 }
 
 .main-body {
+  display: flex;
+  flex: 1;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
+  width: 100%;
+}
+
+.main-body :deep(> *) {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .mobile-nav {
@@ -291,6 +441,19 @@ onUnmounted(() => {
   font-weight: 700;
 }
 
+.view-fade-enter-active,
+.view-fade-leave-active {
+  transition:
+    opacity 0.24s ease,
+    transform 0.24s ease;
+}
+
+.view-fade-enter-from,
+.view-fade-leave-to {
+  opacity: 0;
+  transform: translateY(10px);
+}
+
 @media (max-width: 1023px) {
   .app-shell {
     grid-template-columns: 76px 1fr;
@@ -319,7 +482,15 @@ onUnmounted(() => {
   }
 
   .main-body {
-    overflow: auto;
+    overflow: hidden;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-rail,
+  .view-fade-enter-active,
+  .view-fade-leave-active {
+    transition: none;
   }
 }
 </style>

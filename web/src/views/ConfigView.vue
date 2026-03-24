@@ -325,6 +325,7 @@ watch(activeMode, (nextMode, previousMode) => {
   grid-template-columns: minmax(270px, 320px) minmax(0, 1fr);
   height: 100%;
   min-height: 0;
+  width: 100%;
 }
 
 .config-editor-card {

@@ -16,7 +16,10 @@ const isNarration = (): boolean => props.message.message_tag === "narration";
 const sourceLabel = (): string => {
   const channel = String(props.message.channel ?? "").trim().toLowerCase();
   if (channel === "qq") {
-    return "via QQ";
+    return "🐧 QQ";
+  }
+  if (channel === "weixin") {
+    return "💬 微信";
   }
   if (channel === "system") {
     return "系统";
@@ -101,6 +104,8 @@ const attachmentLabel = (rawPath: string, filename?: string | null): string =>
   gap: 0.55rem;
   grid-template-columns: auto 1fr;
   max-width: min(84ch, 100%);
+  min-width: 0;
+  width: 100%;
 }
 
 .message-bubble[data-sender="user"] {
@@ -136,7 +141,9 @@ const attachmentLabel = (rawPath: string, filename?: string | null): string =>
   border-radius: 0.9rem;
   display: grid;
   gap: 0.55rem;
+  max-width: 100%;
   min-width: 0;
+  overflow: hidden;
   overflow-wrap: anywhere;
   word-break: break-word;
   padding: 0.6rem 0.72rem;
@@ -194,6 +201,8 @@ const attachmentLabel = (rawPath: string, filename?: string | null): string =>
 .bubble-attachments {
   display: grid;
   gap: 0.55rem;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .message-bubble[data-sender="user"] .bubble-time {
@@ -215,5 +224,11 @@ const attachmentLabel = (rawPath: string, filename?: string | null): string =>
   color: var(--muted);
   font-size: 0.94rem;
   font-style: italic;
+}
+
+@media (max-width: 767px) {
+  .message-bubble {
+    max-width: 100%;
+  }
 }
 </style>

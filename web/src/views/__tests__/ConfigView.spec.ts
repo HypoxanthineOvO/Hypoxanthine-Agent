@@ -1,8 +1,23 @@
+/// <reference types="node" />
+
 import { mount } from "@vue/test-utils";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import ConfigView from "../ConfigView.vue";
+
+const configSource = readFileSync(
+  resolve(process.cwd(), "src/views/ConfigView.vue"),
+  "utf8",
+);
+const configFormSource = readFileSync(
+  resolve(process.cwd(), "src/components/ConfigFormRenderer.vue"),
+  "utf8",
+);
+const configRootBlock = configSource.match(/\.config-page\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
+const skillsGridBlock = configFormSource.match(/\.skills-grid\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
 
 async function flushUi(): Promise<void> {
   await Promise.resolve();
@@ -63,6 +78,19 @@ afterEach(() => {
 });
 
 describe("ConfigView", () => {
+  it("fills the full width of the content area", () => {
+    expect(configRootBlock).toMatch(/width:\s*100%;/);
+  });
+
+  it("lays out skill cards in an equal-height responsive grid", () => {
+    expect(configFormSource).toContain('class="skills-grid"');
+    expect(configFormSource).toContain('class="skill-card"');
+    expect(skillsGridBlock).toMatch(
+      /grid-template-columns:\s*repeat\(auto-fill,\s*minmax\(280px,\s*1fr\)\);/,
+    );
+    expect(skillsGridBlock).toMatch(/align-items:\s*stretch;/);
+  });
+
   it("loads config list, renders tasks cards, and saves structured data", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);

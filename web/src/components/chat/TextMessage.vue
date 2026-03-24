@@ -59,9 +59,19 @@ watch(
 <style scoped>
 .text-message {
   line-height: 1.5;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .text-message :deep(p) {
   margin: 0.2rem 0;
+}
+
+.text-message :deep(a) {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 </style>

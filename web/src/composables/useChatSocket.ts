@@ -20,6 +20,11 @@ interface UseChatSocketOptions {
   sessionId: Ref<string>;
 }
 
+interface PendingOutboundMessage {
+  text: string;
+  attachments: Attachment[];
+}
+
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 16000, 30000] as const;
 
 function withToken(url: string, token: string): string {
@@ -38,6 +43,8 @@ export function useChatSocket(options: UseChatSocketOptions) {
   let reconnectAttempt = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let shouldReconnect = true;
+  let pendingRetryMessage: PendingOutboundMessage | null = null;
+  const lastOutboundBySession = new Map<string, PendingOutboundMessage>();
 
   const isMessage = (payload: IncomingWsEvent): payload is Message =>
     "sender" in payload &&
@@ -117,6 +124,11 @@ export function useChatSocket(options: UseChatSocketOptions) {
       reconnectAttempt = 0;
       reconnectDelayMs.value = null;
       lastError.value = null;
+      if (pendingRetryMessage) {
+        const next = pendingRetryMessage;
+        pendingRetryMessage = null;
+        sendMessage(next.text, next.attachments);
+      }
     };
 
     socket.onclose = () => {
@@ -144,6 +156,18 @@ export function useChatSocket(options: UseChatSocketOptions) {
             return;
           }
           lastError.value = payload;
+          messages.value.push({
+            sender: "assistant",
+            session_id: payload.session_id,
+            timestamp: new Date().toISOString(),
+            text: payload.message,
+            metadata: {
+              error_card: true,
+              retryable: payload.retryable,
+              error_code: payload.code,
+              error_detail: payload.message,
+            },
+          });
           status.value = "error";
           return;
         }
@@ -308,6 +332,13 @@ export function useChatSocket(options: UseChatSocketOptions) {
       session_id: options.sessionId.value,
       timestamp: new Date().toISOString(),
     };
+    lastOutboundBySession.set(options.sessionId.value, {
+      text: trimmed,
+      attachments: normalizedAttachments,
+    });
+    messages.value = messages.value.filter(
+      (item) => !(item.metadata?.error_card === true && item.session_id === options.sessionId.value),
+    );
     socket.send(JSON.stringify(message));
     messages.value.push(message);
     return true;
@@ -320,6 +351,22 @@ export function useChatSocket(options: UseChatSocketOptions) {
     streamingAssistantIndex = null;
   };
 
+  const retryLastMessage = (): boolean => {
+    const previous = lastOutboundBySession.get(options.sessionId.value);
+    if (!previous) {
+      return false;
+    }
+    if (socket?.readyState === WebSocket.OPEN) {
+      return sendMessage(previous.text, previous.attachments);
+    }
+    pendingRetryMessage = {
+      text: previous.text,
+      attachments: previous.attachments.map((attachment) => ({ ...attachment })),
+    };
+    connect();
+    return true;
+  };
+
   return {
     connect,
     disconnect,
@@ -328,6 +375,7 @@ export function useChatSocket(options: UseChatSocketOptions) {
     reconnectDelayMs,
     reconnectNow,
     replaceMessages,
+    retryLastMessage,
     sendMessage,
     sendText,
     status,

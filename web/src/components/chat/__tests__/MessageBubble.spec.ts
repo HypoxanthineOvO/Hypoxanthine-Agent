@@ -53,6 +53,22 @@ describe("MessageBubble", () => {
     expect(wrapper.find(".message-tag").exists()).toBe(false);
   });
 
+  it("renders weixin source label for forwarded messages", () => {
+    const wrapper = mount(MessageBubble, {
+      props: {
+        message: {
+          text: "来自微信",
+          sender: "user",
+          session_id: "main",
+          channel: "weixin",
+        },
+      },
+      slots: { default: "<div>微信内容</div>" },
+    });
+
+    expect(wrapper.text()).toContain("💬 微信");
+  });
+
   it("renders formatted time for normal messages and hides it for narration", () => {
     const normal = mount(MessageBubble, {
       props: {

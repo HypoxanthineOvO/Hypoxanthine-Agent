@@ -30,7 +30,7 @@ export default defineConfig({
       },
       manifest: {
         name: "Hypo-Agent",
-        short_name: "Hypo",
+        short_name: "Hypo-Agent",
         description: "Single-user personal AI assistant",
         start_url: "/",
         display: "standalone",
