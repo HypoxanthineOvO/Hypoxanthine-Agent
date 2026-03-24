@@ -193,6 +193,45 @@ def test_pipeline_event_consumer_processes_multiple_events() -> None:
     asyncio.run(_run())
 
 
+def test_pipeline_event_consumer_preserves_target_channels_metadata() -> None:
+    async def _run() -> None:
+        queue = EventQueue()
+        memory = StubSessionMemory()
+        pushed: list[Message] = []
+
+        async def on_proactive_message(message: Message) -> None:
+            pushed.append(message)
+
+        pipeline = ChatPipeline(
+            router=StubRouter(),
+            chat_model="Gemini3Pro",
+            session_memory=memory,
+            event_queue=queue,
+            on_proactive_message=on_proactive_message,
+        )
+
+        await pipeline.start_event_consumer()
+        await queue.put(
+            {
+                "event_type": "heartbeat_trigger",
+                "session_id": "main",
+                "summary": "只发微信",
+                "channel": "weixin",
+            }
+        )
+        await asyncio.sleep(0.05)
+        await pipeline.stop_event_consumer()
+
+        assert len(memory.appended) == 1
+        assert memory.appended[0].metadata["target_channels"] == ["weixin"]
+        assert memory.appended[0].metadata["delivery_channel"] == "weixin"
+        assert memory.appended[0].metadata["event_source"] == "heartbeat_trigger"
+        assert len(pushed) == 1
+        assert pushed[0].metadata["target_channels"] == ["weixin"]
+
+    asyncio.run(_run())
+
+
 def test_pipeline_event_consumer_writes_email_scan_message() -> None:
     async def _run() -> None:
         queue = EventQueue()

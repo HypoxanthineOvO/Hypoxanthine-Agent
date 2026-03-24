@@ -7,10 +7,14 @@ from typing import Any
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
+import structlog
+
 from hypo_agent.core.markdown_splitter import renderable_markdown_block, split_markdown_blocks
 from hypo_agent.core.qq_text_renderer import render_qq_plaintext
 from hypo_agent.core.rich_response import RichResponse
 from hypo_agent.models import Attachment, Message
+
+logger = structlog.get_logger("hypo_agent.channels.qq.adapter")
 
 
 class QQAdapter:
@@ -151,6 +155,9 @@ class QQAdapter:
             segments=[{"type": "text", "data": {"text": text}}],
         )
 
+    def get_status(self) -> dict[str, Any] | None:
+        return self._post_json("/get_status", {})
+
     def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         url = self._build_request_url(path)
@@ -166,14 +173,21 @@ class QQAdapter:
         try:
             with urllib_request.urlopen(req, timeout=self.request_timeout_seconds) as resp:
                 raw = resp.read().decode("utf-8")
-        except Exception:
+        except Exception as exc:
+            logger.warning("qq.adapter.request_failed", path=path, error=str(exc))
             return None
         try:
             parsed = json.loads(raw or "{}")
         except json.JSONDecodeError:
+            logger.warning("qq.adapter.response_invalid_json", path=path)
             return None
         if isinstance(parsed, dict):
             return parsed
+        logger.warning(
+            "qq.adapter.response_invalid_shape",
+            path=path,
+            payload_type=type(parsed).__name__,
+        )
         return None
 
     def download_remote_file(self, *, url: str, target_path: str) -> dict[str, Any]:

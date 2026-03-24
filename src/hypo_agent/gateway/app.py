@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import inspect
+import os
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +14,15 @@ from fastapi.middleware.cors import CORSMiddleware
 import structlog
 import yaml
 
-from hypo_agent.core.config_loader import get_database_path, get_memory_dir, get_test_sandbox_dir, is_test_mode
+from hypo_agent.core.config_loader import (
+    get_agent_root,
+    get_database_path,
+    get_memory_dir,
+    get_test_sandbox_dir,
+    is_test_mode,
+)
 from hypo_agent.channels.qq_channel import QQChannelService
+from hypo_agent.channels.weixin import WeixinAdapter, WeixinChannel
 from hypo_agent.core.config_loader import (
     load_persona_config,
     load_secrets_config,
@@ -52,7 +60,7 @@ from hypo_agent.gateway.qq_ws_client import NapCatWebSocketClient
 from hypo_agent.gateway.settings import load_gateway_settings
 from hypo_agent.gateway.ws import broadcast_message, connection_manager, router as ws_router
 from hypo_agent.memory import MemoryGC, SemanticMemory, SessionMemory, StructuredStore
-from hypo_agent.models import Message, QQServiceConfig, SecurityConfig, SkillOutput
+from hypo_agent.models import Message, QQServiceConfig, SecurityConfig, SkillOutput, WeixinServiceConfig
 from hypo_agent.security import CircuitBreaker, PermissionManager
 from hypo_agent.skills import (
     AgentSearchSkill,
@@ -739,6 +747,7 @@ def create_app(
                     resolved_deps.memory_gc.run,
                 )
         await app.state.pipeline.start_event_consumer()
+        await start_weixin_channel()
         await restart_qq_ws_client()
         app.state.directory_index_task = asyncio.create_task(run_directory_index_refresh())
         app.state.email_cache_warmup_task = asyncio.create_task(run_email_cache_warmup())
@@ -760,6 +769,7 @@ def create_app(
             qq_ws_client = getattr(app.state, "qq_ws_client", None)
             if qq_ws_client is not None:
                 await qq_ws_client.stop()
+            await stop_weixin_channel()
             await app.state.pipeline.stop_event_consumer()
             if resolved_deps.scheduler is not None:
                 await resolved_deps.scheduler.stop()
@@ -820,6 +830,8 @@ def create_app(
     app.state.qq_ws_client = None
     app.state.qq_ws_url = None
     app.state.qq_ws_token = ""
+    app.state.weixin_channel = None
+    app.state.weixin_adapter = None
     app.state.qq_config_dir_snapshot = None
     app.state.directory_index_task = None
     app.state.email_cache_warmup_task = None
@@ -833,6 +845,14 @@ def create_app(
             sandbox_root=str(get_test_sandbox_dir()),
             mode="test",
         )
+
+    def external_channels_disabled_for(config_dir: Path) -> bool:
+        if test_mode_enabled:
+            return True
+        if not os.getenv("PYTEST_CURRENT_TEST"):
+            return False
+        repo_config_dir = (get_agent_root() / "config").resolve(strict=False)
+        return config_dir.resolve(strict=False) == repo_config_dir
 
     async def push_ws_message(
         payload: dict[str, object],
@@ -853,6 +873,11 @@ def create_app(
 
     app.state.channel_dispatcher.register("webui", push_webui_message)
 
+    def should_sync_webui_session_to_external(message: Message) -> bool:
+        if str(message.channel).strip().lower() != "webui":
+            return True
+        return str(message.session_id or "").strip() == "main"
+
     def qq_runtime_connected() -> bool:
         service = getattr(app.state, "qq_channel_service", None)
         client = getattr(app.state, "qq_ws_client", None)
@@ -863,11 +888,25 @@ def create_app(
                 status = client.get_status()
             except Exception:
                 return False
-            return str(status.get("status") or "").strip().lower() == "connected"
-        return str(getattr(client, "status", "")).strip().lower() == "connected"
+            transport_connected = str(status.get("status") or "").strip().lower() == "connected"
+        else:
+            transport_connected = str(getattr(client, "status", "")).strip().lower() == "connected"
+        if not transport_connected:
+            return False
+        if hasattr(service, "is_runtime_online"):
+            try:
+                runtime_online = service.is_runtime_online()
+            except Exception:
+                logger.warning("qq.runtime.status_check_failed", exc_info=True)
+            else:
+                if runtime_online is False:
+                    return False
+        return True
 
     async def mirror_webui_message_to_qq(message: Message) -> None:
         if str(message.channel).strip().lower() != "webui":
+            return
+        if not should_sync_webui_session_to_external(message):
             return
         service = getattr(app.state, "qq_channel_service", None)
         if service is None or not qq_runtime_connected():
@@ -950,9 +989,16 @@ def create_app(
 
     def refresh_qq_channel_service() -> None:
         app.state.channel_dispatcher.unregister("qq")
+        existing_service = getattr(app.state, "qq_channel_service", None)
+        existing_snapshot = getattr(app.state, "qq_config_dir_snapshot", None)
         config_dir = Path(getattr(app.state, "config_dir", Path("config")))
         app.state.qq_config_dir_snapshot = str(config_dir.resolve(strict=False))
-        if test_mode_enabled:
+        if existing_service is not None and existing_snapshot is None:
+            app.state.qq_channel_service = existing_service
+            app.state.channel_dispatcher.register("qq", existing_service.send_message)
+            logger.info("qq.channel.prebound", config_dir=str(config_dir))
+            return
+        if external_channels_disabled_for(config_dir):
             app.state.qq_channel_service = None
             app.state.qq_ws_url = None
             app.state.qq_ws_token = ""
@@ -990,6 +1036,81 @@ def create_app(
             napcat_http_url=qq_cfg.napcat_http_url,
             allowed_users=len(service.allowed_users),
         )
+
+    def _load_enabled_weixin_service_config(config_dir: Path) -> WeixinServiceConfig | None:
+        secrets_path = config_dir / "secrets.yaml"
+        try:
+            secrets = load_secrets_config(secrets_path)
+        except FileNotFoundError:
+            return None
+        except Exception:
+            logger.exception("weixin.config.load_failed", path=str(secrets_path))
+            return None
+
+        services = secrets.services
+        weixin_cfg = services.weixin if services is not None else None
+        if weixin_cfg is None or not weixin_cfg.enabled:
+            return None
+        return weixin_cfg
+
+    def refresh_weixin_channel() -> None:
+        app.state.channel_dispatcher.unregister("weixin")
+        app.state.weixin_adapter = None
+        config_dir = Path(getattr(app.state, "config_dir", Path("config")))
+        if external_channels_disabled_for(config_dir):
+            app.state.weixin_channel = None
+            logger.info("weixin.channel.disabled", reason="test_mode")
+            return
+        weixin_cfg = _load_enabled_weixin_service_config(config_dir)
+        if weixin_cfg is None:
+            app.state.weixin_channel = None
+            logger.info("weixin.channel.disabled", config_dir=str(config_dir))
+            return
+
+        app.state.weixin_channel = WeixinChannel(
+            config=weixin_cfg,
+            message_queue=resolved_deps.event_queue,
+            build_message=Message,
+            inbound_callback_getter=lambda: getattr(app.state.pipeline, "on_proactive_message", None),
+        )
+        logger.info(
+            "weixin.channel.configured",
+            config_dir=str(config_dir),
+            token_path=weixin_cfg.token_path,
+            allowed_users=len(weixin_cfg.allowed_users),
+        )
+
+    async def start_weixin_channel() -> None:
+        channel = getattr(app.state, "weixin_channel", None)
+        if channel is None:
+            return
+        await channel.start()
+        client = getattr(channel, "client", None)
+        bot_token = str(getattr(client, "bot_token", "") or "").strip()
+        user_id = str(getattr(client, "user_id", "") or "").strip()
+        if client is None or not bot_token:
+            return
+        adapter = WeixinAdapter(
+            client=client,
+            target_user_id="",
+            image_renderer=resolved_deps.image_renderer,
+            on_message_sent=channel.record_message_sent,
+        )
+        app.state.weixin_adapter = adapter
+        app.state.channel_dispatcher.register("weixin", adapter.push)
+        if not user_id:
+            logger.warning(
+                "weixin.adapter.target_user_missing",
+                hint="Will use the latest inbound weixin sender once available",
+            )
+        logger.info("weixin.adapter.enabled", user_id=user_id)
+
+    async def stop_weixin_channel() -> None:
+        app.state.channel_dispatcher.unregister("weixin")
+        app.state.weixin_adapter = None
+        channel = getattr(app.state, "weixin_channel", None)
+        if channel is not None:
+            await channel.stop()
 
     async def restart_qq_ws_client() -> None:
         existing_client = getattr(app.state, "qq_ws_client", None)
@@ -1063,8 +1184,20 @@ def create_app(
         exclude_client_ids: set[str] | None = None,
     ) -> None:
         merged_exclusions = {item for item in (exclude_channels or set()) if item}
+        target_channels_raw = message.metadata.get("target_channels")
+        target_channels = {
+            str(item).strip().lower()
+            for item in target_channels_raw
+            if str(item).strip()
+        } if isinstance(target_channels_raw, list) else None
+        if target_channels is not None:
+            external_channels = {"qq", "weixin"}
+            merged_exclusions.update(external_channels - target_channels)
         if str(message.channel).strip().lower() == "webui":
-            merged_exclusions.add("qq")
+            if should_sync_webui_session_to_external(message):
+                merged_exclusions.add("qq")
+            else:
+                merged_exclusions.update({"qq", "weixin"})
         await app.state.channel_dispatcher.broadcast(
             message,
             exclude_channels=merged_exclusions,
@@ -1113,12 +1246,16 @@ def create_app(
         app.state.output_compressor = deps.output_compressor
         refresh_narration_observer()
         await app.state.pipeline.start_event_consumer()
+        await stop_weixin_channel()
+        refresh_weixin_channel()
+        await start_weixin_channel()
         refresh_qq_channel_service()
         await restart_qq_ws_client()
 
     resolved_deps.reload_config = reload_config
     app.state.reload_config = reload_config
     refresh_qq_channel_service()
+    refresh_weixin_channel()
 
     app.include_router(ws_router)
     app.include_router(qq_ws_router)

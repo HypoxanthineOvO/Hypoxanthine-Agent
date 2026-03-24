@@ -902,6 +902,9 @@ class ChatPipeline:
         if use_tools:
             llm_messages.append({"role": "system", "content": TOOL_USE_SYSTEM_PROMPT})
         llm_messages.append({"role": "system", "content": self._system_time_context()})
+        inbound_context = self._current_message_context(inbound)
+        if inbound_context:
+            llm_messages.append({"role": "system", "content": inbound_context})
         prefs_context = self._preferences_context()
         if prefs_context:
             llm_messages.append({"role": "system", "content": prefs_context})
@@ -1071,6 +1074,9 @@ class ChatPipeline:
             role = "assistant"
         else:
             return None
+        history_context = self._history_message_context(message)
+        if history_context:
+            text = f"{history_context}\n\n{text}"
         return {"role": role, "content": text}
 
     def _resolve_model_for_inbound(self, inbound: Message) -> str:
@@ -1099,6 +1105,51 @@ class ChatPipeline:
         if not legacy_items:
             return ""
         return "[Attachments]\n- " + "\n- ".join(legacy_items)
+
+    def _current_message_context(self, inbound: Message) -> str:
+        channel = self._normalized_channel_name(inbound.channel)
+        channel_label = self._channel_label(channel)
+        lines = ["[Current Message Context]"]
+        lines.append(f"- 当前消息渠道: {channel_label} ({channel})")
+        lines.append(f"- 当前会话: {inbound.session_id}")
+        if inbound.sender_id:
+            lines.append(f"- 当前发送者ID: {inbound.sender_id}")
+        if inbound.timestamp is not None:
+            lines.append(f"- 当前消息时间: {utc_isoformat(inbound.timestamp)}")
+        lines.append("- 这条消息能从上述渠道到达你，说明该渠道到 Agent 的入站链路当前是可用的。")
+        lines.append("- 当用户在排查 QQ/微信/WebUI 等渠道问题时，必须结合这条上下文一起判断。")
+        return "\n".join(lines)
+
+    def _history_message_context(self, message: Message) -> str:
+        channel = self._normalized_channel_name(message.channel)
+        if channel in {"", "webui"}:
+            return ""
+
+        include_sender = bool(str(message.sender_id or "").strip())
+        include_time = message.timestamp is not None
+        if not any((include_sender, include_time)):
+            return ""
+
+        lines = ["[Historical Message Context]"]
+        lines.append(f"- 渠道: {self._channel_label(channel)} ({channel})")
+        if include_sender:
+            lines.append(f"- 发送者ID: {message.sender_id}")
+        if include_time and message.timestamp is not None:
+            lines.append(f"- 时间: {utc_isoformat(message.timestamp)}")
+        return "\n".join(lines)
+
+    def _normalized_channel_name(self, value: str | None) -> str:
+        normalized = str(value or "").strip().lower()
+        return normalized or "webui"
+
+    def _channel_label(self, channel: str) -> str:
+        mapping = {
+            "webui": "WebUI",
+            "qq": "QQ",
+            "weixin": "微信",
+            "system": "系统",
+        }
+        return mapping.get(channel, channel.upper() if channel else "WebUI")
 
     def _attachments_summary_text(self, attachments: list[Attachment]) -> str:
         if not attachments:
@@ -1537,6 +1588,7 @@ class ChatPipeline:
                 session_id=session_id,
                 message_tag="reminder",
                 channel="system",
+                metadata=self._event_message_metadata(event),
             )
 
         if event_type == "heartbeat_trigger":
@@ -1552,6 +1604,7 @@ class ChatPipeline:
                 session_id=session_id,
                 message_tag="heartbeat",
                 channel="system",
+                metadata=self._event_message_metadata(event),
             )
 
         if event_type == "email_scan_trigger":
@@ -1564,6 +1617,7 @@ class ChatPipeline:
                 session_id=session_id,
                 message_tag="email_scan",
                 channel="system",
+                metadata=self._event_message_metadata(event),
             )
 
         if event_type == "trendradar_trigger":
@@ -1580,6 +1634,40 @@ class ChatPipeline:
                 session_id=session_id,
                 message_tag="tool_status",
                 channel="system",
+                metadata=self._event_message_metadata(event),
             )
 
         return None
+
+    def _event_message_metadata(self, event: dict[str, Any]) -> dict[str, Any]:
+        metadata: dict[str, Any] = {}
+        target_channels = self._resolve_target_channels(event.get("channel"))
+        if target_channels is not None:
+            metadata["target_channels"] = sorted(target_channels)
+        raw_channel = str(event.get("channel") or "").strip()
+        if raw_channel:
+            metadata["delivery_channel"] = raw_channel
+        event_type = str(event.get("event_type") or "").strip().lower()
+        if event_type:
+            metadata["event_source"] = event_type
+        return metadata
+
+    def _resolve_target_channels(self, raw_value: Any) -> set[str] | None:
+        if raw_value is None:
+            return None
+
+        raw_items: list[str] = []
+        if isinstance(raw_value, str):
+            raw_items = [item.strip().lower() for item in raw_value.split(",")]
+        elif isinstance(raw_value, (list, tuple, set)):
+            raw_items = [str(item).strip().lower() for item in raw_value]
+        else:
+            raw_items = [str(raw_value).strip().lower()]
+
+        normalized = {item for item in raw_items if item}
+        if not normalized or "all" in normalized:
+            return None
+
+        supported = {"webui", "qq", "weixin"}
+        filtered = {item for item in normalized if item in supported}
+        return filtered or None

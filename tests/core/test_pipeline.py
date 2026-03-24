@@ -41,7 +41,10 @@ def test_pipeline_injects_recent_history_before_inbound() -> None:
             assert model_name == "Gemini3Pro"
             assert messages[0]["role"] == "system"
             assert "当前时间:" in messages[0]["content"]
-            assert messages[1:] == [
+            assert messages[1]["role"] == "system"
+            assert "[Current Message Context]" in messages[1]["content"]
+            assert "当前消息渠道: WebUI (webui)" in messages[1]["content"]
+            assert messages[2:] == [
                 {"role": "user", "content": "旧问题"},
                 {"role": "assistant", "content": "旧回答"},
                 {"role": "user", "content": "新问题"},
@@ -150,7 +153,10 @@ def test_pipeline_stream_reply_emits_chunk_and_done_events_and_persists() -> Non
             assert model_name == "Gemini3Pro"
             assert messages[0]["role"] == "system"
             assert "当前时间:" in messages[0]["content"]
-            assert messages[1:] == [{"role": "user", "content": "hello"}]
+            assert messages[1]["role"] == "system"
+            assert "[Current Message Context]" in messages[1]["content"]
+            assert "当前消息渠道: WebUI (webui)" in messages[1]["content"]
+            assert messages[2:] == [{"role": "user", "content": "hello"}]
             assert session_id == "s1"
             yield "He"
             yield "llo"
@@ -399,13 +405,15 @@ def test_system_prompt_contains_time(monkeypatch: pytest.MonkeyPatch) -> None:
         pipeline._build_llm_messages(Message(text="hi", sender="user", session_id="s1"))
     )
     system_messages = [item for item in messages if item["role"] == "system"]
-    assert len(system_messages) == 1
+    assert len(system_messages) == 2
     content = system_messages[0]["content"]
     assert "当前时间:" in content
     assert "2026-03-10T00:15:00+08:00" in content
     assert "(" in content and ")" in content
     tz_name = content.split("(")[-1].split(")")[0].strip()
     assert tz_name
+    assert "[Current Message Context]" in system_messages[1]["content"]
+    assert "当前消息渠道: WebUI (webui)" in system_messages[1]["content"]
 
 
 def test_pipeline_broadcasts_reply_for_qq_channel() -> None:
@@ -590,6 +598,7 @@ def test_pipeline_injects_semantic_memory_before_history() -> None:
         async def call(self, model_name, messages):
             assert model_name == "Gemini3Pro"
             system_messages = [item for item in messages if item["role"] == "system"]
+            assert any("[Current Message Context]" in item["content"] for item in system_messages)
             assert any("[相关记忆]" in item["content"] for item in system_messages)
             assert messages[-3:] == [
                 {"role": "user", "content": "旧问题"},
@@ -609,6 +618,83 @@ def test_pipeline_injects_semantic_memory_before_history() -> None:
     reply = asyncio.run(pipeline.run_once(Message(text="新问题", sender="user", session_id="s1")))
 
     assert reply.text == "新回答"
+
+
+def test_pipeline_injects_current_message_context_for_external_inbound() -> None:
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        async def call(self, model_name, messages):
+            del model_name
+            current_context = [
+                item["content"]
+                for item in messages
+                if item["role"] == "system" and "[Current Message Context]" in item["content"]
+            ]
+            assert len(current_context) == 1
+            assert "当前消息渠道: QQ (qq)" in current_context[0]
+            assert "当前发送者ID: 10001" in current_context[0]
+            assert "入站链路当前是可用的" in current_context[0]
+            assert messages[-1] == {"role": "user", "content": "QQ 来的测试"}
+            return "ok"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+    )
+
+    reply = asyncio.run(
+        pipeline.run_once(
+            Message(
+                text="QQ 来的测试",
+                sender="user",
+                session_id="s1",
+                channel="qq",
+                sender_id="10001",
+            )
+        )
+    )
+
+    assert reply.text == "ok"
+
+
+def test_pipeline_prefixes_external_history_with_channel_context() -> None:
+    memory = StubSessionMemory(
+        history=[
+            Message(
+                text="我从微信发的",
+                sender="user",
+                session_id="s1",
+                channel="weixin",
+                sender_id="wx-user-1",
+            )
+        ]
+    )
+
+    class StubRouter:
+        async def call(self, model_name, messages):
+            del model_name
+            assert messages[-2]["role"] == "user"
+            assert "[Historical Message Context]" in messages[-2]["content"]
+            assert "渠道: 微信 (weixin)" in messages[-2]["content"]
+            assert "发送者ID: wx-user-1" in messages[-2]["content"]
+            assert messages[-1] == {"role": "user", "content": "继续"}
+            return "ok"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+    )
+
+    reply = asyncio.run(
+        pipeline.run_once(Message(text="继续", sender="user", session_id="s1"))
+    )
+
+    assert reply.text == "ok"
 
 
 def test_pipeline_skips_semantic_memory_for_heartbeat_messages() -> None:

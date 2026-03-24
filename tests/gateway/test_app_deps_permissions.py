@@ -219,3 +219,99 @@ def test_create_app_registers_qq_channel_only_when_enabled(
 
     assert disabled_app.state.qq_channel_service is None
     assert "qq" not in disabled_app.state.channel_dispatcher.channels
+
+
+def test_create_app_registers_weixin_adapter_even_without_persisted_user_id(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "secrets.yaml").write_text(
+        """
+providers: {}
+services:
+  weixin:
+    enabled: true
+    token_path: "memory/weixin_auth.json"
+    allowed_users: []
+""".strip(),
+        encoding="utf-8",
+    )
+    token_dir = tmp_path / "memory"
+    token_dir.mkdir(parents=True, exist_ok=True)
+    (token_dir / "weixin_auth.json").write_text(
+        """
+{
+  "bot_token": "bot-token",
+  "user_id": "",
+  "bot_id": "bot-1"
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    app = create_app(
+        auth_token="test-token",
+        pipeline=PassivePipeline(),
+        deps=AppDeps(
+            session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+            structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        ),
+    )
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(app):
+        assert app.state.weixin_adapter is not None
+        assert app.state.weixin_adapter.target_user_id == ""
+        assert "weixin" in app.state.channel_dispatcher.channels
+
+
+def test_create_app_weixin_adapter_keeps_dynamic_target_even_with_cached_user_id(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "secrets.yaml").write_text(
+        """
+providers: {}
+services:
+  weixin:
+    enabled: true
+    token_path: "memory/weixin_auth.json"
+    allowed_users: []
+""".strip(),
+        encoding="utf-8",
+    )
+    token_dir = tmp_path / "memory"
+    token_dir.mkdir(parents=True, exist_ok=True)
+    (token_dir / "weixin_auth.json").write_text(
+        """
+{
+  "bot_token": "bot-token",
+  "user_id": "cached@im.wechat",
+  "bot_id": "bot-1"
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    app = create_app(
+        auth_token="test-token",
+        pipeline=PassivePipeline(),
+        deps=AppDeps(
+            session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+            structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        ),
+    )
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(app):
+        assert app.state.weixin_adapter is not None
+        assert app.state.weixin_adapter.target_user_id == ""
+        assert getattr(app.state.weixin_adapter.client, "user_id", "") == "cached@im.wechat"

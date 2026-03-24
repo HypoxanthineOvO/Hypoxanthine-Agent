@@ -117,3 +117,41 @@ def test_napcat_websocket_client_omits_access_token_when_empty(monkeypatch) -> N
     asyncio.run(client.run_once())
 
     assert captured["url"] == "ws://127.0.0.1:3009/onebot/v11/ws"
+
+
+def test_napcat_websocket_client_counts_only_handled_messages(monkeypatch) -> None:
+    class IgnoringQQService:
+        async def handle_onebot_event(self, payload: dict, *, pipeline: object) -> bool:
+            del payload, pipeline
+            return False
+
+    service = IgnoringQQService()
+    pipeline = object()
+
+    def fake_connect(url: str, *args, **kwargs):
+        del url, args, kwargs
+        return FakeConnection(
+            [
+                json.dumps(
+                    {
+                        "post_type": "message",
+                        "message_type": "private",
+                        "user_id": "10001",
+                        "message": "ignored",
+                    }
+                )
+            ]
+        )
+
+    monkeypatch.setattr("hypo_agent.gateway.qq_ws_client.websockets.connect", fake_connect)
+
+    client = NapCatWebSocketClient(
+        url="ws://127.0.0.1:3009/onebot/v11/ws",
+        service_getter=lambda: service,
+        pipeline_getter=lambda: pipeline,
+    )
+
+    asyncio.run(client.run_once())
+
+    assert client.messages_received == 0
+    assert client.last_message_at is None

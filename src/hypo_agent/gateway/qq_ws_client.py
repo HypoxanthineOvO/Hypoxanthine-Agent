@@ -74,17 +74,17 @@ class NapCatWebSocketClient:
                 payload = self._decode_payload(raw)
                 if payload is None:
                     continue
-                self.messages_received += 1
-                payload = self._normalize_event_timestamp(payload)
-                self.last_message_at = str(payload.get("timestamp") or utc_isoformat(utc_now()))
-
                 service = self._service_getter()
                 pipeline = self._pipeline_getter()
                 if service is None or pipeline is None:
                     logger.warning("qq.ws.client.message.skipped", reason="service_or_pipeline_unavailable")
                     continue
 
-                await service.handle_onebot_event(payload, pipeline=pipeline)
+                payload = self._normalize_event_timestamp(payload)
+                handled = await service.handle_onebot_event(payload, pipeline=pipeline)
+                if handled:
+                    self.messages_received += 1
+                    self.last_message_at = str(payload.get("timestamp") or utc_isoformat(utc_now()))
 
     def _build_connect_url(self) -> str:
         if not self.token:

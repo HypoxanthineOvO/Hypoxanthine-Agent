@@ -81,15 +81,42 @@ class QQChannelService:
         await self.send_message(message)
 
     async def send_message(self, message: Message) -> None:
+        outbound = self._prefixed_message(message)
         sender_id = str(message.sender_id or "").strip()
         if sender_id and sender_id in self.allowed_users:
             target_users = [sender_id]
         else:
             target_users = sorted(self.allowed_users)
         for user_id in target_users:
-            await self.adapter.send_message(user_id=user_id, message=message)
-            if callable(self._on_message_sent):
+            success = await self.adapter.send_message(user_id=user_id, message=outbound)
+            if success and callable(self._on_message_sent):
                 self._on_message_sent()
+            if not success:
+                logger.warning(
+                    "qq.message.send_failed",
+                    user_id=user_id,
+                    session_id=message.session_id,
+                    source_channel=message.channel,
+                )
+
+    def get_runtime_status(self) -> dict[str, Any]:
+        payload = self.adapter.get_status()
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            return {
+                "online": None,
+                "good": None,
+            }
+        online = data.get("online")
+        good = data.get("good")
+        return {
+            "online": online if isinstance(online, bool) else None,
+            "good": good if isinstance(good, bool) else None,
+        }
+
+    def is_runtime_online(self) -> bool | None:
+        online = self.get_runtime_status().get("online")
+        return online if isinstance(online, bool) else None
 
     async def _run_pipeline_for_user(self, *, user_id: str, inbound: Message, pipeline: Any) -> None:
         async def emit(event: dict[str, Any]) -> None:
@@ -194,3 +221,16 @@ class QQChannelService:
                 }
             )
         return segments
+
+    def _prefixed_message(self, message: Message) -> Message:
+        source = str(message.channel or "").strip().lower()
+        if source in {"", "qq", "system"}:
+            return message
+        prefix_map = {
+            "weixin": "[微信] ",
+        }
+        prefix = prefix_map.get(source, "")
+        text = str(message.text or "")
+        if not prefix or not text.strip() or text.startswith(prefix):
+            return message
+        return message.model_copy(update={"text": f"{prefix}{text}"})

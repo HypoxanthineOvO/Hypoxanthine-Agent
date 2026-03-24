@@ -157,3 +157,72 @@ def test_webui_origin_conversation_is_mirrored_to_qq_notifications(tmp_path: Pat
 
     assert mirrored[0] == "[WebUI] User: mirror me"
     assert mirrored[1] == f"[WebUI] Assistant: {long_reply}"
+
+
+def test_non_main_webui_session_does_not_mirror_to_external_channels(tmp_path: Path) -> None:
+    app = _make_app(tmp_path, reply="DEBUG REPLY")
+    mirrored_qq: list[str] = []
+    mirrored_weixin: list[str] = []
+
+    class ConnectedQQClient:
+        status = "connected"
+
+        def get_status(self) -> dict[str, str]:
+            return {"status": "connected"}
+
+        async def stop(self) -> None:
+            return None
+
+    class MirrorQQService:
+        async def send_message(self, message: Message) -> None:
+            mirrored_qq.append(str(message.text or ""))
+
+        def is_runtime_online(self) -> bool:
+            return True
+
+    async def fake_weixin_push(message: Message) -> None:
+        mirrored_weixin.append(str(message.text or ""))
+
+    with TestClient(app) as client:
+        client.app.state.qq_ws_client = ConnectedQQClient()
+        client.app.state.qq_channel_service = MirrorQQService()
+        client.app.state.channel_dispatcher.register("weixin", fake_weixin_push)
+
+        with client.websocket_connect("/ws?token=test-token") as ws:
+            ws.send_json({"text": "hidden session", "sender": "user", "session_id": "debug-session"})
+            ws.receive_json()
+            ws.receive_json()
+
+    assert mirrored_qq == []
+    assert mirrored_weixin == []
+
+
+def test_proactive_messages_honor_target_channels(tmp_path: Path) -> None:
+    app = _make_app(tmp_path, reply="unused")
+    qq_pushed: list[str] = []
+    weixin_pushed: list[str] = []
+
+    async def fake_qq_push(message: Message) -> None:
+        qq_pushed.append(str(message.text or ""))
+
+    async def fake_weixin_push(message: Message) -> None:
+        weixin_pushed.append(str(message.text or ""))
+
+    with TestClient(app) as client:
+        client.app.state.channel_dispatcher.register("qq", fake_qq_push)
+        client.app.state.channel_dispatcher.register("weixin", fake_weixin_push)
+
+        asyncio.run(
+            client.app.state.pipeline.on_proactive_message(
+                Message(
+                    text="heartbeat only for weixin",
+                    sender="assistant",
+                    session_id="main",
+                    channel="system",
+                    metadata={"target_channels": ["weixin"]},
+                )
+            )
+        )
+
+    assert qq_pushed == []
+    assert weixin_pushed == ["heartbeat only for weixin"]
