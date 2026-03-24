@@ -110,6 +110,14 @@ class QQServiceConfig(BaseModel):
     allowed_users: list[str] = Field(default_factory=list)
 
 
+class WeixinServiceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    token_path: str = "memory/weixin_auth.json"
+    allowed_users: list[str] = Field(default_factory=list)
+
+
 class TavilyServiceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -121,6 +129,7 @@ class ServicesConfig(BaseModel):
 
     email: EmailServiceConfig | None = None
     qq: QQServiceConfig | None = None
+    weixin: WeixinServiceConfig | None = None
     tavily: TavilyServiceConfig | None = None
 
 
