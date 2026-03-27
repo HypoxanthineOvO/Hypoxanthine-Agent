@@ -4,6 +4,7 @@ import asyncio
 import base64
 from pathlib import Path
 
+from hypo_agent.channels.weixin.ilink_client import ILinkAPIError
 from hypo_agent.channels.weixin.weixin_adapter import WeixinAdapter
 from hypo_agent.models import Message
 
@@ -16,30 +17,83 @@ _PNG_1X1 = base64.b64decode(
 class DummyClient:
     def __init__(self, *, bot_token: str | None = "bot-token") -> None:
         self.bot_token = bot_token
+        self.user_id = ""
+        self.last_context_token = ""
         self.sent: list[tuple[str, str]] = []
+        self.sent_context_tokens: list[str | None] = []
         self.sent_images: list[dict] = []
+        self.upload_requests: list[dict] = []
+        self.uploaded_payloads: list[dict] = []
+        self.fail_texts: dict[str, int] = {}
+        self.fail_uploads = 0
 
     async def send_message(self, to_user_id: str, text: str, context_token: str = "", **kwargs) -> str:
+        remaining_failures = self.fail_texts.get(text, 0)
+        if remaining_failures > 0:
+            self.fail_texts[text] = remaining_failures - 1
+            raise ILinkAPIError("/ilink/bot/sendmessage", {"ret": -2})
         self.sent.append((to_user_id, text))
+        self.sent_context_tokens.append(context_token)
         return f"wcb-{len(self.sent)}"
 
-    async def get_upload_url(self, file_type: str, file_size: int) -> dict:
+    def remember_user_id(self, user_id: str) -> None:
+        self.user_id = user_id
+
+    def remember_context_token(self, context_token: str) -> None:
+        self.last_context_token = context_token
+
+    @staticmethod
+    def build_media_upload_payload(
+        *,
+        to_user_id: str,
+        media_type: int,
+        plaintext: bytes,
+        encrypted_size: int,
+        aes_key_hex: str,
+    ) -> dict:
         return {
-            "upload_url": f"https://upload.example/{file_type}",
-            "file_id": f"{file_type}-1",
+            "filekey": "filekey-1",
+            "media_type": media_type,
+            "to_user_id": to_user_id,
+            "rawsize": len(plaintext),
+            "rawfilemd5": "md5-1",
+            "filesize": encrypted_size,
+            "no_need_thumb": True,
+            "aeskey": aes_key_hex,
         }
 
-    async def upload_media(self, upload_url: str, encrypted_data: bytes) -> None:
-        del upload_url, encrypted_data
+    async def get_upload_url(self, **payload) -> dict:
+        if self.fail_uploads > 0:
+            self.fail_uploads -= 1
+            raise ILinkAPIError("/ilink/bot/getuploadurl", {"ret": -2})
+        self.upload_requests.append(payload)
+        return {
+            "upload_param": "upload-param-1",
+        }
 
-    async def send_image(self, to_user_id: str, file_id: str, aes_key_hex: str, width: int, height: int, file_size: int, **kwargs) -> dict:
+    async def upload_media(self, *, upload_param: str, filekey: str, encrypted_data: bytes) -> str:
+        self.uploaded_payloads.append(
+            {
+                "upload_param": upload_param,
+                "filekey": filekey,
+                "encrypted_size": len(encrypted_data),
+            }
+        )
+        return "download-param-1"
+
+    async def send_image(
+        self,
+        to_user_id: str,
+        encrypt_query_param: str,
+        aes_key: str,
+        encrypted_file_size: int,
+        **kwargs,
+    ) -> dict:
         payload = {
             "to_user_id": to_user_id,
-            "file_id": file_id,
-            "aes_key_hex": aes_key_hex,
-            "width": width,
-            "height": height,
-            "file_size": file_size,
+            "encrypt_query_param": encrypt_query_param,
+            "aes_key": aes_key,
+            "encrypted_file_size": encrypted_file_size,
             **kwargs,
         }
         self.sent_images.append(payload)
@@ -195,6 +249,7 @@ def test_weixin_adapter_splits_inline_images_for_weixin_delivery(tmp_path: Path)
         image_path = tmp_path / "cat.png"
         image_path.write_bytes(_PNG_1X1)
         client = DummyClient()
+        client.last_context_token = "ctx-inline-image"
         adapter = WeixinAdapter(
             client=client,
             target_user_id="user@im.wechat",
@@ -213,7 +268,167 @@ def test_weixin_adapter_splits_inline_images_for_weixin_delivery(tmp_path: Path)
         assert client.sent == [("user@im.wechat", "请看截图 【见下方图片】")]
         assert len(client.sent_images) == 1
         assert client.sent_images[0]["to_user_id"] == "user@im.wechat"
-        assert client.sent_images[0]["width"] == 1
-        assert client.sent_images[0]["height"] == 1
+        assert client.sent_images[0]["encrypt_query_param"] == "download-param-1"
+        assert client.sent_images[0]["encrypted_file_size"] >= len(_PNG_1X1)
+
+    asyncio.run(_run())
+
+
+def test_weixin_adapter_falls_back_to_text_when_image_upload_fails(tmp_path: Path) -> None:
+    async def _run() -> None:
+        image_path = tmp_path / "cat.png"
+        image_path.write_bytes(_PNG_1X1)
+        client = DummyClient()
+        client.fail_uploads = 3
+        client.last_context_token = "ctx-image-fail"
+        adapter = WeixinAdapter(
+            client=client,
+            target_user_id="user@im.wechat",
+            send_delay_seconds=0,
+        )
+
+        await adapter.push(
+            Message(
+                text=f"请看截图 ![cat]({image_path})",
+                sender="assistant",
+                session_id="main",
+                channel="system",
+            )
+        )
+
+        assert client.sent == [
+            ("user@im.wechat", "请看截图 【见下方图片】"),
+            ("user@im.wechat", "[图片] cat.png"),
+        ]
+        assert client.sent_images == []
+
+    asyncio.run(_run())
+
+
+def test_weixin_adapter_retries_image_upload_before_success(tmp_path: Path) -> None:
+    async def _run() -> None:
+        image_path = tmp_path / "cat.png"
+        image_path.write_bytes(_PNG_1X1)
+        client = DummyClient()
+        client.fail_uploads = 1
+        client.last_context_token = "ctx-image-retry"
+        sleep_calls: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+
+        adapter = WeixinAdapter(
+            client=client,
+            target_user_id="user@im.wechat",
+            send_delay_seconds=0,
+            sleep_func=fake_sleep,
+        )
+
+        await adapter.push(
+            Message(
+                text=f"请看截图 ![cat]({image_path})",
+                sender="assistant",
+                session_id="main",
+                channel="system",
+            )
+        )
+
+        assert client.sent == [("user@im.wechat", "请看截图 【见下方图片】")]
+        assert len(client.sent_images) == 1
+        assert sleep_calls == [0.5]
+
+    asyncio.run(_run())
+
+
+def test_weixin_adapter_retries_without_context_token_on_ret_minus_2() -> None:
+    async def _run() -> None:
+        client = DummyClient()
+        client.fail_texts["heartbeat"] = 1
+        adapter = WeixinAdapter(client=client, target_user_id="user@im.wechat")
+
+        await adapter.push(
+            Message(
+                text="heartbeat",
+                sender="assistant",
+                session_id="main",
+                channel="system",
+            )
+        )
+
+        assert client.sent == [("user@im.wechat", "heartbeat")]
+        assert client.sent_context_tokens == [None]
+
+    asyncio.run(_run())
+
+
+def test_weixin_adapter_splits_text_after_ret_minus_2_when_payload_too_large() -> None:
+    async def _run() -> None:
+        client = DummyClient()
+        text = "你" * 80
+        client.fail_texts[text] = 2
+        adapter = WeixinAdapter(client=client, target_user_id="user@im.wechat")
+
+        await adapter.push(
+            Message(
+                text=text,
+                sender="assistant",
+                session_id="main",
+                channel="system",
+            )
+        )
+
+        assert len(client.sent) >= 2
+        assert "".join(chunk for _, chunk in client.sent) == text
+        assert all(token is None for token in client.sent_context_tokens)
+
+    asyncio.run(_run())
+
+
+def test_weixin_adapter_uses_persisted_context_token_for_proactive_message() -> None:
+    async def _run() -> None:
+        client = DummyClient()
+        client.last_context_token = "ctx-persisted"
+        adapter = WeixinAdapter(client=client, target_user_id="user@im.wechat")
+
+        await adapter.push(
+            Message(
+                text="heartbeat",
+                sender="assistant",
+                session_id="main",
+                channel="system",
+            )
+        )
+
+        assert client.sent == [("user@im.wechat", "heartbeat")]
+        assert client.sent_context_tokens == ["ctx-persisted"]
+
+    asyncio.run(_run())
+
+
+def test_weixin_adapter_degrades_mixed_image_message_without_context_token(tmp_path: Path) -> None:
+    async def _run() -> None:
+        image_path = tmp_path / "cat.png"
+        image_path.write_bytes(_PNG_1X1)
+        client = DummyClient()
+        adapter = WeixinAdapter(
+            client=client,
+            target_user_id="user@im.wechat",
+            send_delay_seconds=0,
+        )
+
+        await adapter.push(
+            Message(
+                text=f"请看截图 ![cat]({image_path})",
+                sender="assistant",
+                session_id="main",
+                channel="system",
+            )
+        )
+
+        assert client.sent == [
+            ("user@im.wechat", "请看截图 【见下方图片】"),
+            ("user@im.wechat", "[图片] cat.png"),
+        ]
+        assert client.sent_images == []
 
     asyncio.run(_run())

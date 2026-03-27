@@ -30,6 +30,7 @@ class MediaClientStub:
         self.bot_token = bot_token
         self.user_id = "target@im.wechat"
         self.bot_id = "bot-1"
+        self.last_context_token = ""
         self.downloads: dict[str, bytes] = {}
         self.download_requests: list[str] = []
         self.sent_text: list[dict] = []
@@ -39,6 +40,12 @@ class MediaClientStub:
 
     async def close(self) -> None:
         return None
+
+    def remember_user_id(self, user_id: str) -> None:
+        self.user_id = user_id
+
+    def remember_context_token(self, context_token: str) -> None:
+        self.last_context_token = context_token
 
     async def download_media(self, url: str) -> bytes:
         self.download_requests.append(url)
@@ -55,38 +62,49 @@ class MediaClientStub:
         )
         return "wcb-test"
 
-    async def get_upload_url(self, file_type: str, file_size: int) -> dict:
-        payload = {
-            "file_type": file_type,
-            "file_size": file_size,
-            "upload_url": f"https://upload.example/{len(self.upload_requests) + 1}",
-            "file_id": f"file-{len(self.upload_requests) + 1}",
+    @staticmethod
+    def build_media_upload_payload(
+        *,
+        to_user_id: str,
+        media_type: int,
+        plaintext: bytes,
+        encrypted_size: int,
+        aes_key_hex: str,
+    ) -> dict:
+        return {
+            "filekey": "filekey-1",
+            "media_type": media_type,
+            "to_user_id": to_user_id,
+            "rawsize": len(plaintext),
+            "rawfilemd5": "md5-1",
+            "filesize": encrypted_size,
+            "no_need_thumb": True,
+            "aeskey": aes_key_hex,
         }
-        self.upload_requests.append(payload)
-        return payload
 
-    async def upload_media(self, upload_url: str, encrypted_data: bytes) -> None:
-        self.uploaded_payloads.append((upload_url, encrypted_data))
+    async def get_upload_url(self, **payload) -> dict:
+        self.upload_requests.append(payload)
+        return {"upload_param": f"upload-param-{len(self.upload_requests)}"}
+
+    async def upload_media(self, *, upload_param: str, filekey: str, encrypted_data: bytes) -> str:
+        self.uploaded_payloads.append((f"{upload_param}:{filekey}", encrypted_data))
+        return f"download-param-{len(self.uploaded_payloads)}"
 
     async def send_image(
         self,
         to_user_id: str,
-        file_id: str,
-        aes_key_hex: str,
-        width: int,
-        height: int,
-        file_size: int,
+        encrypt_query_param: str,
+        aes_key: str,
+        encrypted_file_size: int,
         *,
         context_token: str = "",
         **kwargs,
     ) -> dict:
         payload = {
             "to_user_id": to_user_id,
-            "file_id": file_id,
-            "aes_key_hex": aes_key_hex,
-            "width": width,
-            "height": height,
-            "file_size": file_size,
+            "encrypt_query_param": encrypt_query_param,
+            "aes_key": aes_key,
+            "encrypted_file_size": encrypted_file_size,
             "context_token": context_token,
             **kwargs,
         }
@@ -353,6 +371,7 @@ def test_weixin_adapter_renders_markdown_block_to_image_and_prefixes_source(tmp_
         rendered_path = tmp_path / "rendered.png"
         rendered_path.write_bytes(_PNG_1X1)
         client = MediaClientStub()
+        client.last_context_token = "ctx-markdown"
         renderer = ImageRendererStub(rendered_path)
         adapter = WeixinAdapter(
             client=client,  # type: ignore[arg-type]
@@ -373,9 +392,9 @@ def test_weixin_adapter_renders_markdown_block_to_image_and_prefixes_source(tmp_
         assert client.sent_text[0]["text"].startswith("[QQ] ")
         assert "这里有代码" in client.sent_text[0]["text"]
         assert renderer.calls == [("print(1)", "code")]
-        assert client.upload_requests[0]["file_type"] == "image"
+        assert client.upload_requests[0]["media_type"] == 1
         assert client.sent_images[0]["to_user_id"] == "target@im.wechat"
-        assert client.sent_images[0]["width"] == 1
-        assert client.sent_images[0]["height"] == 1
+        assert client.sent_images[0]["encrypt_query_param"] == "download-param-1"
+        assert client.sent_images[0]["encrypted_file_size"] >= len(_PNG_1X1)
 
     asyncio.run(_run())

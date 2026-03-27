@@ -27,6 +27,7 @@ class FakeClient:
         self.bot_token = bot_token
         self.user_id = user_id
         self.bot_id = bot_id
+        self.last_context_token = ""
         self._updates = list(updates or [])
         self.closed = False
         self.send_typing_calls: list[tuple[str, int]] = []
@@ -52,6 +53,12 @@ class FakeClient:
 
     async def close(self) -> None:
         self.closed = True
+
+    def remember_user_id(self, user_id: str) -> None:
+        self.user_id = user_id
+
+    def remember_context_token(self, context_token: str) -> None:
+        self.last_context_token = context_token
 
 
 def test_weixin_channel_start_skips_when_token_missing() -> None:
@@ -156,6 +163,33 @@ def test_weixin_channel_allows_all_users_when_allowlist_empty() -> None:
         )
 
         assert len(queue.events) == 1
+
+    asyncio.run(_run())
+
+
+def test_weixin_channel_persists_latest_context_token_from_inbound_message() -> None:
+    async def _run() -> None:
+        queue = QueueStub()
+        client = FakeClient()
+        channel = WeixinChannel(
+            config={"token_path": "memory/weixin_auth.json", "allowed_users": []},
+            message_queue=queue,
+            build_message=Message,
+            client_factory=lambda: client,
+        )
+        channel.client = client
+
+        await channel._handle_message(  # type: ignore[attr-defined]
+            {
+                "from_user_id": "alice@im.wechat",
+                "context_token": "ctx-123",
+                "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+            }
+        )
+
+        assert client.user_id == "alice@im.wechat"
+        assert client.last_context_token == "ctx-123"
+        assert queue.events[0]["message"].metadata["weixin"]["context_token"] == "ctx-123"
 
     asyncio.run(_run())
 

@@ -38,6 +38,7 @@ def test_ilink_client_loads_persisted_auth_state(tmp_path: Path) -> None:
     assert client.base_url == "https://custom.example.com"
     assert client.bot_id == "bot-id-1"
     assert client.user_id == "user-id-1"
+    assert client.last_context_token == ""
     assert client.get_updates_buf == "cursor-1"
 
     asyncio.run(client.close())
@@ -115,6 +116,7 @@ def test_ilink_client_login_polls_until_confirmed_and_persists(tmp_path: Path) -
         "baseurl": "https://alt.ilink.example.com",
         "bot_id": "bot-42",
         "user_id": "user-99",
+        "last_context_token": "",
         "get_updates_buf": "",
     }
 
@@ -246,6 +248,7 @@ def test_ilink_client_get_updates_filters_bot_messages_and_persists_cursor(tmp_p
         "baseurl": "https://custom.example.com",
         "bot_id": "",
         "user_id": "",
+        "last_context_token": "",
         "get_updates_buf": "cursor-2",
     }
 
@@ -421,7 +424,7 @@ def test_ilink_client_request_post_omits_authorization_when_token_missing(tmp_pa
     asyncio.run(client.close())
 
 
-def test_ilink_client_get_upload_url_includes_base_info_and_content_length(tmp_path: Path) -> None:
+def test_ilink_client_get_upload_url_includes_media_metadata(tmp_path: Path) -> None:
     token_path = tmp_path / "weixin_auth.json"
     token_path.write_text(
         json.dumps({"bot_token": "bot-123", "baseurl": "https://custom.example.com"}),
@@ -432,10 +435,7 @@ def test_ilink_client_get_upload_url_includes_base_info_and_content_length(tmp_p
     def handler(request: httpx.Request) -> httpx.Response:
         captured["headers"] = dict(request.headers)
         captured["payload"] = json.loads(request.content.decode("utf-8"))
-        return httpx.Response(
-            200,
-            json={"ret": 0, "upload_url": "https://upload.example/1", "file_id": "file-1"},
-        )
+        return httpx.Response(200, json={"ret": 0, "upload_param": "upload-param-1"})
 
     client = ILinkClient(
         "https://ilinkai.weixin.qq.com",
@@ -443,18 +443,75 @@ def test_ilink_client_get_upload_url_includes_base_info_and_content_length(tmp_p
         transport=httpx.MockTransport(handler),
     )
 
-    payload = asyncio.run(client.get_upload_url("image", 128))
+    payload = asyncio.run(
+        client.get_upload_url(
+            filekey="filekey-1",
+            media_type=1,
+            to_user_id="user@im.wechat",
+            rawsize=64,
+            rawfilemd5="0123456789abcdef0123456789abcdef",
+            filesize=80,
+            aeskey="00112233445566778899aabbccddeeff",
+        )
+    )
 
-    assert payload["upload_url"] == "https://upload.example/1"
-    assert payload["file_id"] == "file-1"
+    assert payload["upload_param"] == "upload-param-1"
     assert captured["payload"] == {
-        "file_type": "image",
-        "file_size": 128,
+        "filekey": "filekey-1",
+        "media_type": 1,
+        "to_user_id": "user@im.wechat",
+        "rawsize": 64,
+        "rawfilemd5": "0123456789abcdef0123456789abcdef",
+        "filesize": 80,
+        "no_need_thumb": True,
+        "aeskey": "00112233445566778899aabbccddeeff",
         "base_info": {"channel_version": "1.0.2"},
     }
     headers = captured["headers"]
     assert headers["authorization"] == "Bearer bot-123"
     assert headers["content-length"] == str(len(json.dumps(captured["payload"]).encode("utf-8")))
+
+    asyncio.run(client.close())
+
+
+def test_ilink_client_upload_media_posts_ciphertext_to_cdn(tmp_path: Path) -> None:
+    token_path = tmp_path / "weixin_auth.json"
+    token_path.write_text(
+        json.dumps({"bot_token": "bot-123", "baseurl": "https://custom.example.com"}),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        captured["content"] = bytes(request.content)
+        return httpx.Response(200, headers={"x-encrypted-param": "download-param-1"})
+
+    client = ILinkClient(
+        "https://ilinkai.weixin.qq.com",
+        token_path=str(token_path),
+        transport=httpx.MockTransport(handler),
+    )
+
+    encrypt_query_param = asyncio.run(
+        client.upload_media(
+            upload_param="upload-param-1",
+            filekey="filekey-1",
+            encrypted_data=b"ciphertext",
+        )
+    )
+
+    assert encrypt_query_param == "download-param-1"
+    assert captured["method"] == "POST"
+    assert (
+        captured["url"]
+        == "https://novac2c.cdn.weixin.qq.com/c2c/upload?encrypted_query_param=upload-param-1&filekey=filekey-1"
+    )
+    assert captured["headers"]["content-type"] == "application/octet-stream"
+    assert captured["headers"]["content-length"] == str(len(b"ciphertext"))
+    assert captured["content"] == b"ciphertext"
 
     asyncio.run(client.close())
 
@@ -479,12 +536,10 @@ def test_ilink_client_send_image_posts_image_item(tmp_path: Path) -> None:
 
     asyncio.run(
         client.send_image(
-            "user@im.wechat",
-            "file-123",
-            "a" * 32,
-            640,
-            480,
-            1024,
+            to_user_id="user@im.wechat",
+            encrypt_query_param="download-param-1",
+            aes_key="YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZg==",
+            encrypted_file_size=1024,
             context_token="ctx-1",
         )
     )
@@ -498,11 +553,12 @@ def test_ilink_client_send_image_posts_image_item(tmp_path: Path) -> None:
         {
             "type": 2,
             "image_item": {
-                "file_id": "file-123",
-                "aes_key": "a" * 32,
-                "width": 640,
-                "height": 480,
-                "file_size": 1024,
+                "media": {
+                    "encrypt_query_param": "download-param-1",
+                    "aes_key": "YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZg==",
+                    "encrypt_type": 1,
+                },
+                "mid_size": 1024,
             },
         }
     ]

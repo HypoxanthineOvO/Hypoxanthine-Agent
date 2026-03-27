@@ -132,6 +132,10 @@ class WeixinChannel:
             return
         self._sync_target_user(from_user)
 
+        context_token = str(raw_msg.get("context_token") or "").strip()
+        if context_token:
+            self._sync_context_token(context_token)
+
         text_parts: list[str] = []
         attachments: list[Attachment] = []
         for item in raw_msg.get("item_list") or []:
@@ -200,6 +204,11 @@ class WeixinChannel:
             channel="weixin",
             sender_id=from_user,
             attachments=attachments,
+            metadata={
+                "weixin": {
+                    "context_token": context_token,
+                }
+            },
         )
 
         callback = self._get_inbound_callback()
@@ -215,14 +224,14 @@ class WeixinChannel:
             {
                 "event_type": "user_message",
                 "message": message,
-                "emit": self._make_emit_callback(from_user),
+                "emit": self._make_emit_callback(from_user, context_token=context_token),
             }
         )
         self._messages_received += 1
         self._last_message_at = utc_isoformat(utc_now())
         logger.info("weixin.channel.enqueued", user=from_user, text_len=len(text))
 
-    def _make_emit_callback(self, user_id: str):
+    def _make_emit_callback(self, user_id: str, *, context_token: str):
         typing_started = False
 
         async def emit(event: dict[str, Any]) -> None:
@@ -262,7 +271,11 @@ class WeixinChannel:
                         )
                 text = str(event.get("message") or "处理失败，请稍后重试").strip()
                 if text:
-                    await self.client.send_message(to_user_id=user_id, text=text, context_token="")
+                    await self.client.send_message(
+                        to_user_id=user_id,
+                        text=text,
+                        context_token=context_token or None,
+                    )
                     self.record_message_sent()
 
         return emit
@@ -463,7 +476,11 @@ class WeixinChannel:
         current_user = str(getattr(self.client, "user_id", "") or "").strip()
         if current_user == from_user:
             return
-        self.client.user_id = from_user
+        remember_user_id = getattr(self.client, "remember_user_id", None)
+        if callable(remember_user_id):
+            remember_user_id(from_user)
+        else:
+            self.client.user_id = from_user
         if current_user:
             logger.info(
                 "weixin.channel.target_user_updated",
@@ -472,6 +489,15 @@ class WeixinChannel:
             )
             return
         logger.info("weixin.channel.target_user_learned", user_id=from_user)
+
+    def _sync_context_token(self, context_token: str) -> None:
+        if self.client is None or not context_token:
+            return
+        remember_context_token = getattr(self.client, "remember_context_token", None)
+        if callable(remember_context_token):
+            remember_context_token(context_token)
+            return
+        self.client.last_context_token = context_token  # type: ignore[attr-defined]
 
     def _attachment_type_for_name(self, filename: str, mime_type: str) -> str:
         lowered = mime_type.lower()

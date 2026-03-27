@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import hashlib
 import random
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from urllib.parse import quote
 from uuid import uuid4
 
 import httpx
@@ -20,6 +22,7 @@ _LOGIN_POLL_INTERVAL_SECONDS = 1.0
 _LOGIN_TOTAL_TIMEOUT_SECONDS = 300.0
 _LOGIN_MAX_REFRESHES = 3
 _CHANNEL_VERSION = "1.0.2"
+_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
 
 
 class ILinkError(RuntimeError):
@@ -66,6 +69,7 @@ class ILinkClient:
         self.bot_token: str | None = None
         self.bot_id = ""
         self.user_id = ""
+        self.last_context_token = ""
         self.get_updates_buf = ""
         self._sleep = sleep_func
         self._client = httpx.AsyncClient(
@@ -136,6 +140,7 @@ class ILinkClient:
                 self.base_url = session["baseurl"]
                 self.bot_id = session["bot_id"]
                 self.user_id = session["user_id"]
+                self.last_context_token = ""
                 self.get_updates_buf = ""
                 self._persist_state()
                 return session
@@ -217,63 +222,124 @@ class ILinkClient:
             message_payload["msg_id"] = msg_id
         return await self._request_post("/ilink/bot/sendmessage", {"msg": message_payload})
 
-    async def get_upload_url(self, file_type: str, file_size: int) -> dict[str, Any]:
+    async def get_upload_url(
+        self,
+        *,
+        filekey: str,
+        media_type: int,
+        to_user_id: str,
+        rawsize: int,
+        rawfilemd5: str,
+        filesize: int,
+        aeskey: str,
+        no_need_thumb: bool = True,
+    ) -> dict[str, Any]:
         self._require_bot_token()
         return await self._request_post(
             "/ilink/bot/getuploadurl",
             {
-                "file_type": str(file_type).strip(),
-                "file_size": int(file_size),
+                "filekey": str(filekey).strip(),
+                "media_type": int(media_type),
+                "to_user_id": str(to_user_id).strip(),
+                "rawsize": int(rawsize),
+                "rawfilemd5": str(rawfilemd5).strip(),
+                "filesize": int(filesize),
+                "no_need_thumb": bool(no_need_thumb),
+                "aeskey": str(aeskey).strip(),
             },
         )
 
-    async def upload_media(self, upload_url: str, encrypted_data: bytes) -> None:
-        response = await self._client.put(
-            str(upload_url).strip(),
+    async def upload_media(self, *, upload_param: str, filekey: str, encrypted_data: bytes) -> str:
+        upload_url = (
+            f"{_CDN_BASE_URL}/upload"
+            f"?encrypted_query_param={quote(str(upload_param).strip(), safe='')}"
+            f"&filekey={quote(str(filekey).strip(), safe='')}"
+        )
+        response = await self._client.post(
+            upload_url,
             content=bytes(encrypted_data),
-            headers={"Content-Length": str(len(encrypted_data))},
+            headers={
+                "Content-Type": "application/octet-stream",
+                "Content-Length": str(len(encrypted_data)),
+            },
         )
         response.raise_for_status()
+        encrypted_param = str(response.headers.get("x-encrypted-param") or "").strip()
+        if not encrypted_param:
+            raise ILinkError("CDN upload succeeded but x-encrypted-param header is missing")
+        return encrypted_param
 
     async def send_image(
         self,
         to_user_id: str,
-        file_id: str,
-        aes_key_hex: str,
-        width: int,
-        height: int,
-        file_size: int,
+        encrypt_query_param: str,
+        aes_key: str,
+        encrypted_file_size: int,
         *,
         context_token: str | None = "",
         msg_id: str | None = None,
         message_state: int = 2,
+        caption: str | None = None,
     ) -> dict[str, Any]:
         self._require_bot_token()
         client_id = msg_id or f"wcb-{uuid4()}"
+        item_list: list[dict[str, Any]] = []
+        if str(caption or "").strip():
+            item_list.append(
+                {
+                    "type": 1,
+                    "text_item": {
+                        "text": str(caption).strip(),
+                    },
+                }
+            )
+        item_list.append(
+            {
+                "type": 2,
+                "image_item": {
+                    "media": {
+                        "encrypt_query_param": str(encrypt_query_param).strip(),
+                        "aes_key": str(aes_key).strip(),
+                        "encrypt_type": 1,
+                    },
+                    "mid_size": int(encrypted_file_size),
+                },
+            }
+        )
         message_payload: dict[str, Any] = {
             "from_user_id": "",
             "to_user_id": to_user_id,
             "client_id": client_id,
             "message_type": 2,
             "message_state": int(message_state),
-            "item_list": [
-                {
-                    "type": 2,
-                    "image_item": {
-                        "file_id": file_id,
-                        "aes_key": aes_key_hex,
-                        "width": int(width),
-                        "height": int(height),
-                        "file_size": int(file_size),
-                    },
-                }
-            ],
+            "item_list": item_list,
         }
         if context_token is not None:
             message_payload["context_token"] = context_token
         if msg_id:
             message_payload["msg_id"] = msg_id
         return await self._request_post("/ilink/bot/sendmessage", {"msg": message_payload})
+
+    @staticmethod
+    def build_media_upload_payload(
+        *,
+        to_user_id: str,
+        media_type: int,
+        plaintext: bytes,
+        encrypted_size: int,
+        aes_key_hex: str,
+    ) -> dict[str, Any]:
+        filekey = f"{random.getrandbits(128):032x}"
+        return {
+            "filekey": filekey,
+            "media_type": int(media_type),
+            "to_user_id": str(to_user_id).strip(),
+            "rawsize": len(plaintext),
+            "rawfilemd5": hashlib.md5(plaintext).hexdigest(),
+            "filesize": int(encrypted_size),
+            "no_need_thumb": True,
+            "aeskey": str(aes_key_hex).strip(),
+        }
 
     async def send_typing(self, user_id: str, status: int = 1) -> None:
         config = await self.get_config(user_id)
@@ -307,6 +373,20 @@ class ILinkClient:
 
     async def close(self) -> None:
         await self._client.aclose()
+
+    def remember_user_id(self, user_id: str) -> None:
+        normalized = str(user_id or "").strip()
+        if not normalized or normalized == self.user_id:
+            return
+        self.user_id = normalized
+        self._persist_state()
+
+    def remember_context_token(self, context_token: str) -> None:
+        normalized = str(context_token or "").strip()
+        if not normalized or normalized == self.last_context_token:
+            return
+        self.last_context_token = normalized
+        self._persist_state()
 
     async def _request_get(
         self,
@@ -413,6 +493,10 @@ class ILinkClient:
         if isinstance(cursor, str):
             self.get_updates_buf = cursor
 
+        context_token = payload.get("last_context_token")
+        if isinstance(context_token, str):
+            self.last_context_token = context_token.strip()
+
     def _persist_state(self) -> None:
         self.token_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -421,6 +505,7 @@ class ILinkClient:
             "baseurl": self.base_url,
             "bot_id": self.bot_id,
             "user_id": self.user_id,
+            "last_context_token": self.last_context_token,
             "get_updates_buf": self.get_updates_buf,
         }
         self.token_path.write_text(
@@ -430,6 +515,7 @@ class ILinkClient:
 
     def _invalidate_session(self) -> None:
         self.bot_token = None
+        self.last_context_token = ""
         self.get_updates_buf = ""
         self._persist_state()
 

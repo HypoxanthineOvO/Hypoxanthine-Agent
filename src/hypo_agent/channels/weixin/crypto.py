@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import base64
 
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -47,6 +48,22 @@ def decrypt_media(data: bytes, aes_key: bytes) -> bytes:
 def generate_aes_key() -> bytes:
     """Generate a random 16-byte AES key."""
     return os.urandom(_BLOCK_SIZE_BYTES)
+
+
+def encrypted_media_size(raw_size: int) -> int:
+    """Return AES-128-ECB ciphertext size after PKCS7 padding."""
+    size = max(0, int(raw_size))
+    return ((size + 1 + (_BLOCK_SIZE_BYTES - 1)) // _BLOCK_SIZE_BYTES) * _BLOCK_SIZE_BYTES
+
+
+def encode_aes_key_hex(aes_key: bytes) -> str:
+    key = _validate_key(aes_key)
+    return key.hex()
+
+
+def encode_aes_key_base64hex(aes_key: bytes) -> str:
+    key = _validate_key(aes_key)
+    return base64.b64encode(key.hex().encode("utf-8")).decode("ascii")
 
 
 def _validate_key(aes_key: bytes) -> bytes:
