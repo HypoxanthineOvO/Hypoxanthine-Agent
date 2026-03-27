@@ -543,6 +543,79 @@ services:
     assert "stop" in calls
 
 
+def test_app_lifespan_prefers_qqbot_websocket_client_when_secrets_enable_bot(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    qqbot_calls: list[str] = []
+    napcat_calls: list[str] = []
+
+    class FakeQQBotWebSocketClient:
+        def __init__(self, *, service_getter, pipeline_getter, reconnect_delay_seconds=5.0, connect_timeout_seconds=10.0, intents=None) -> None:
+            del service_getter, pipeline_getter, reconnect_delay_seconds, connect_timeout_seconds, intents
+            qqbot_calls.append("init")
+
+        async def start(self) -> None:
+            qqbot_calls.append("start")
+
+        async def stop(self) -> None:
+            qqbot_calls.append("stop")
+
+    class FakeNapCatWebSocketClient:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+            napcat_calls.append("init")
+
+        async def start(self) -> None:
+            napcat_calls.append("start")
+
+        async def stop(self) -> None:
+            napcat_calls.append("stop")
+
+    monkeypatch.setattr("hypo_agent.gateway.app.QQBotWebSocketClient", FakeQQBotWebSocketClient)
+    monkeypatch.setattr("hypo_agent.gateway.app.NapCatWebSocketClient", FakeNapCatWebSocketClient)
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "skills.yaml").write_text(
+        """
+default_timeout_seconds: 30
+skills:
+  qq:
+    enabled: true
+  qq_bot:
+    enabled: false
+""".strip(),
+        encoding="utf-8",
+    )
+    (config_dir / "secrets.yaml").write_text(
+        """
+providers: {}
+services:
+  qq_bot:
+    app_id: "1029384756"
+    app_secret: "bot-secret-xyz"
+    enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    deps = AppDeps(
+        session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+        structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        scheduler=RecordingScheduler(),
+        event_queue=DummyEventQueue(),
+    )
+    app = create_app(auth_token="test-token", pipeline=RecordingPipeline(), deps=deps)
+    app.state.config_dir = config_dir
+
+    with TestClient(app):
+        assert qqbot_calls == ["init", "start"]
+        assert napcat_calls == []
+
+    assert qqbot_calls == ["init", "start", "stop"]
+
+
 def test_app_lifespan_schedules_directory_index_refresh_in_background(
     tmp_path,
     monkeypatch,

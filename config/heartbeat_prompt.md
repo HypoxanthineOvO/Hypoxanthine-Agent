@@ -12,6 +12,9 @@
   - 推荐按下面的粒度分别执行；每一条是一条独立的 `run_command`：
     - 负载/概览：`uptime`
     - CPU/内存概览：`free -h`
+    - GPU 概览（必须执行）：`nvidia-smi --query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits`
+    - GPU 进程（必须执行）：`nvidia-smi --query-compute-apps=gpu_uuid,gpu_bus_id,pid,process_name,used_memory --format=csv,noheader,nounits`
+    - GPU UUID 映射（如需要，必须执行）：`nvidia-smi --query-gpu=gpu_uuid,index --format=csv,noheader`
 
 ## 项目概览（按人汇报）
 - **人名映射规则**：在汇报时，必须读取 `memory/people/index.md` 文件，将账号（如 heyx/dingqh）映射为对应的中文姓名（如 贺云翔/丁麒涵）。如果索引中找不到该账号，则保留原账号名。
@@ -22,6 +25,15 @@
   - 每个用户一行：`user(姓名): 项目/命令的整理介绍）+ 负载情况`
   - 负载情况包括：CPU / 内存 / GPU / 磁盘。记得使用非阻塞命令进行查询。
   - 如果某用户没进程就不写。
+
+## GPU 归属规则（必须做）
+- 每次心跳必须查询 GPU（不得写“GPU 未查”）。
+- 需要同时汇报：
+  - GPU 总览（每张卡 util/显存/温度）
+  - GPU 进程列表（PID -> 显存占用）
+- 必须把 GPU 进程 PID 映射回 `ps` 里的 user，并并入「项目概览（按人汇报）」的每人一行里（至少给出：该用户占用哪几张卡/显存大概多少）。
+- 如果 `nvidia-smi --query-compute-apps` 返回空：明确写“当前无 GPU compute 进程”。
+- 如果机器无 NVIDIA/无权限/命令不可用：明确写失败原因（stderr 关键行），不要静默跳过。
 
 ## 邮件
 - 调用 scan_emails 扫描未读邮件。

@@ -809,7 +809,7 @@ class InfoReachSkill(BaseSkill):
         normalized = str(time_range or "today").strip().lower()
         day_start = datetime.combine(now.date(), time.min, tzinfo=UTC)
         if normalized == "today":
-            return day_start, now
+            return day_start, datetime.combine(now.date(), time.max, tzinfo=UTC)
         if normalized == "yesterday":
             yesterday = now.date() - timedelta(days=1)
             return (
