@@ -6,16 +6,29 @@ skills:
   code_run:
     enabled: true
     timeout_seconds: 30
+  coder:
+    enabled: true
+    default_model: o4-mini
   filesystem:
     enabled: true
   agent_search:
     enabled: true
+  info:
+    enabled: true
+    max_items: 15
+  notion:
+    enabled: true
+  log_inspector:
+    enabled: true
+    service_name: hypo-agent
   info_reach:
     enabled: true
     output_root: ~/trendradar/output
   export:
     enabled: true
   qq:
+    enabled: true
+  probe:
     enabled: true
   reminder:
     enabled: true

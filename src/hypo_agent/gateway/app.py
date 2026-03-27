@@ -21,8 +21,11 @@ from hypo_agent.core.config_loader import (
     get_test_sandbox_dir,
     is_test_mode,
 )
-from hypo_agent.channels.qq_channel import QQChannelService
+from hypo_agent.channels.coder import CoderClient
+from hypo_agent.channels.coder.coder_webhook import router as coder_webhook_router
+from hypo_agent.channels.probe import ProbeServer, router as probe_ws_router
 from hypo_agent.channels.qq_bot_channel import QQBotChannelService
+from hypo_agent.channels.qq_channel import QQChannelService
 from hypo_agent.channels.weixin import WeixinAdapter, WeixinChannel
 from hypo_agent.core.config_loader import (
     load_persona_config,
@@ -54,9 +57,9 @@ from hypo_agent.gateway.files_api import router as files_api_router
 from hypo_agent.gateway.kill_switch_api import router as kill_switch_api_router
 from hypo_agent.gateway.memory_api import router as memory_api_router
 from hypo_agent.gateway.sessions_api import router as sessions_api_router
+from hypo_agent.gateway.qqbot_ws_client import QQBotWebSocketClient
 from hypo_agent.gateway.upload_api import router as upload_api_router
 from hypo_agent.gateway.middleware import WsTokenAuthMiddleware
-from hypo_agent.gateway.qqbot_ws_client import QQBotWebSocketClient
 from hypo_agent.gateway.qq_ws import router as qq_ws_router
 from hypo_agent.gateway.qq_ws_client import NapCatWebSocketClient
 from hypo_agent.gateway.settings import load_gateway_settings
@@ -74,11 +77,16 @@ from hypo_agent.security import CircuitBreaker, PermissionManager
 from hypo_agent.skills import (
     AgentSearchSkill,
     CodeRunSkill,
+    CoderSkill,
     EmailScannerSkill,
     ExportSkill,
     FileSystemSkill,
+    InfoSkill,
     InfoReachSkill,
+    LogInspectorSkill,
     MemorySkill,
+    NotionSkill,
+    ProbeSkill,
     ReminderSkill,
     TmuxSkill,
 )
@@ -122,6 +130,10 @@ class AppDeps:
     permission_manager: PermissionManager | None = None
     heartbeat_service: HeartbeatService | Any | None = None
     memory_gc: MemoryGC | Any | None = None
+    coder_client: CoderClient | Any | None = None
+    coder_webhook_secret: str | None = None
+    coder_webhook_url: str | None = None
+    probe_server: ProbeServer | Any | None = None
     reload_config: Any | None = None
 
 
@@ -134,7 +146,10 @@ def _register_enabled_skills(
     message_queue: EventQueue | Any | None = None,
     model_router: ModelRouter | None = None,
     heartbeat_service: HeartbeatService | Any | None = None,
+    coder_client: CoderClient | Any | None = None,
+    coder_webhook_url: str | None = None,
     image_renderer: ImageRenderer | Any | None = None,
+    probe_server: ProbeServer | Any | None = None,
     skills_config_path: Path = Path("config/skills.yaml"),
 ) -> None:
     skills_payload: dict[str, Any] = {}
@@ -154,12 +169,17 @@ def _register_enabled_skills(
     code_run_cfg = per_skill.get("code_run", {}) if isinstance(per_skill, dict) else {}
     reminder_cfg = per_skill.get("reminder", {}) if isinstance(per_skill, dict) else {}
     email_scanner_cfg = per_skill.get("email_scanner", {}) if isinstance(per_skill, dict) else {}
+    coder_cfg = per_skill.get("coder", {}) if isinstance(per_skill, dict) else {}
+    info_cfg = per_skill.get("info", {}) if isinstance(per_skill, dict) else {}
     info_reach_cfg = per_skill.get("info_reach", {}) if isinstance(per_skill, dict) else {}
+    log_inspector_cfg = per_skill.get("log_inspector", {}) if isinstance(per_skill, dict) else {}
     tmux_timeout = int(tmux_cfg.get("timeout_seconds", default_timeout))
     code_run_timeout = int(code_run_cfg.get("timeout_seconds", default_timeout))
     auto_confirm = bool(reminder_cfg.get("auto_confirm", True))
     email_mark_as_read = bool(email_scanner_cfg.get("mark_as_read", True))
+    info_max_items = int(info_cfg.get("max_items", 15))
     trendradar_output_root = str(info_reach_cfg.get("output_root", "~/trendradar/output"))
+    log_service_name = str(log_inspector_cfg.get("service_name", "hypo-agent"))
 
     if "tmux" in enabled_skills:
         skill_manager.register(
@@ -174,11 +194,49 @@ def _register_enabled_skills(
             )
         )
 
+    if "coder" in enabled_skills:
+        if coder_client is None:
+            logger.warning(
+                "coder_skill.disabled",
+                reason=(
+                    "Missing Hypo-Coder config: config/secrets.yaml -> "
+                    "services.hypo_coder.base_url/agent_token/webhook_secret"
+                ),
+            )
+        else:
+            skill_manager.register(
+                CoderSkill(
+                    coder_client=coder_client,
+                    webhook_url=coder_webhook_url,
+                )
+            )
+
     if "filesystem" in enabled_skills:
         skill_manager.register(FileSystemSkill(permission_manager=permission_manager))
 
     if "agent_search" in enabled_skills:
         skill_manager.register(AgentSearchSkill())
+
+    if "info" in enabled_skills:
+        try:
+            skill_manager.register(InfoSkill(max_items=info_max_items))
+        except ValueError as exc:
+            logger.warning("info_skill.disabled", reason=str(exc))
+
+    if "notion" in enabled_skills:
+        try:
+            skill_manager.register(NotionSkill(heartbeat_service=heartbeat_service))
+        except ValueError as exc:
+            logger.warning("notion_skill.disabled", reason=str(exc))
+
+    if "log_inspector" in enabled_skills and structured_store is not None:
+        skill_manager.register(
+            LogInspectorSkill(
+                structured_store=structured_store,
+                permission_manager=permission_manager,
+                service_name=log_service_name,
+            )
+        )
 
     if "info_reach" in enabled_skills and structured_store is not None:
         skill_manager.register(
@@ -218,6 +276,9 @@ def _register_enabled_skills(
         )
         skill_manager.register(email_skill)
 
+    if "probe" in enabled_skills and probe_server is not None:
+        skill_manager.register(ProbeSkill(probe_server=probe_server))
+
     # Memory tools are safe and expected to be available for preference persistence.
     if structured_store is not None:
         skill_manager.register(MemorySkill(structured_store=structured_store))
@@ -245,6 +306,8 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
         message_queue=event_queue,
         scheduler=scheduler,
     )
+    probe_server = ProbeServer()
+    coder_client, coder_webhook_secret, coder_webhook_url = _load_hypo_coder_runtime()
     permission_manager = PermissionManager(resolved_security.directory_whitelist)
     circuit_breaker = CircuitBreaker(resolved_security.circuit_breaker)
     skill_manager = SkillManager(
@@ -259,7 +322,10 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
         scheduler=scheduler,
         message_queue=event_queue,
         heartbeat_service=heartbeat_service,
+        coder_client=coder_client,
+        coder_webhook_url=coder_webhook_url,
         image_renderer=image_renderer,
+        probe_server=probe_server,
     )
 
     return AppDeps(
@@ -269,10 +335,35 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
         event_queue=event_queue,
         scheduler=scheduler,
         heartbeat_service=heartbeat_service,
+        coder_client=coder_client,
+        coder_webhook_secret=coder_webhook_secret,
+        coder_webhook_url=coder_webhook_url,
         skill_manager=skill_manager,
         circuit_breaker=circuit_breaker,
         permission_manager=permission_manager,
+        probe_server=probe_server,
     )
+
+
+def _load_hypo_coder_runtime(
+    secrets_path: Path | str = "config/secrets.yaml",
+) -> tuple[CoderClient | None, str | None, str | None]:
+    try:
+        secrets = load_secrets_config(secrets_path)
+    except FileNotFoundError:
+        return None, None, None
+    services = secrets.services
+    coder_cfg = services.hypo_coder if services is not None else None
+    if coder_cfg is None:
+        return None, None, None
+
+    base_url = str(coder_cfg.base_url or "").strip()
+    agent_token = str(coder_cfg.agent_token or "").strip()
+    webhook_secret = str(coder_cfg.webhook_secret or "").strip()
+    webhook_url = str(coder_cfg.webhook_url or "").strip() or None
+    if not base_url or not agent_token or not webhook_secret:
+        return None, webhook_secret or None, webhook_url
+    return CoderClient(base_url=base_url, agent_token=agent_token), webhook_secret, webhook_url
 
 
 def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
@@ -584,9 +675,6 @@ def _build_qq_channel_service(qq_cfg: QQServiceConfig) -> QQChannelService:
     )
 
 
-def _validate_test_mode_storage_isolation(*, deps: AppDeps) -> None:
-    sandbox_root = get_test_sandbox_dir()
-    expected_sessions_dir = (sandbox_root / "memory" / "sessions").resolve(strict=False)
 def _build_qq_bot_channel_service(qq_bot_cfg: QQBotServiceConfig) -> QQBotChannelService:
     return QQBotChannelService(
         app_id=qq_bot_cfg.app_id,
@@ -594,6 +682,9 @@ def _build_qq_bot_channel_service(qq_bot_cfg: QQBotServiceConfig) -> QQBotChanne
     )
 
 
+def _validate_test_mode_storage_isolation(*, deps: AppDeps) -> None:
+    sandbox_root = get_test_sandbox_dir()
+    expected_sessions_dir = (sandbox_root / "memory" / "sessions").resolve(strict=False)
     expected_db_path = (sandbox_root / "hypo.db").resolve(strict=False)
 
     actual_sessions_dir = Path(getattr(deps.session_memory, "sessions_dir", "")).resolve(strict=False)
@@ -655,6 +746,8 @@ def create_app(
         )
     if resolved_deps.image_renderer is None:
         resolved_deps.image_renderer = ImageRenderer()
+    if resolved_deps.probe_server is None:
+        resolved_deps.probe_server = ProbeServer()
 
     pipeline_instance = pipeline or _build_default_pipeline(resolved_deps)
     _ensure_pipeline_lifecycle_hooks(pipeline_instance)
@@ -686,6 +779,9 @@ def create_app(
         refresh_narration_observer()
         if getattr(app.state, "qq_config_dir_snapshot", None) != current_config_snapshot:
             refresh_qq_channel_service()
+        refresh_probe_server_config()
+        if resolved_deps.probe_server is not None:
+            await resolved_deps.probe_server.start()
         if resolved_deps.scheduler is not None:
             await resolved_deps.scheduler.start()
             tasks_path = Path(getattr(app.state, "config_dir", Path("config"))) / "tasks.yaml"
@@ -808,6 +904,8 @@ def create_app(
             await app.state.pipeline.stop_event_consumer()
             if resolved_deps.scheduler is not None:
                 await resolved_deps.scheduler.stop()
+            if resolved_deps.probe_server is not None:
+                await resolved_deps.probe_server.stop()
             if image_renderer is not None and callable(getattr(image_renderer, "shutdown", None)):
                 try:
                     await image_renderer.shutdown()
@@ -857,12 +955,16 @@ def create_app(
     app.state.scheduler = resolved_deps.scheduler
     app.state.heartbeat_service = resolved_deps.heartbeat_service
     app.state.memory_gc = resolved_deps.memory_gc
+    app.state.coder_client = resolved_deps.coder_client
+    app.state.coder_webhook_secret = resolved_deps.coder_webhook_secret or ""
+    app.state.coder_webhook_url = resolved_deps.coder_webhook_url or ""
+    app.state.probe_server = resolved_deps.probe_server
     app.state.pipeline = pipeline_instance
     connection_manager.reset()
     app.state.ws_connection_manager = connection_manager
     app.state.channel_dispatcher = ChannelDispatcher()
-    app.state.qq_bot_channel_service = None
     app.state.qq_channel_service = None
+    app.state.qq_bot_channel_service = None
     app.state.qq_ws_client = None
     app.state.qq_ws_url = None
     app.state.qq_ws_token = ""
@@ -916,10 +1018,6 @@ def create_app(
 
     def qq_runtime_connected() -> bool:
         service = getattr(app.state, "qq_channel_service", None)
-        client = getattr(app.state, "qq_ws_client", None)
-        if service is None or client is None:
-            return False
-        if hasattr(client, "get_status"):
         qq_bot_service = getattr(app.state, "qq_bot_channel_service", None)
         if service is not None and service is qq_bot_service:
             if hasattr(service, "is_runtime_online"):
@@ -930,6 +1028,10 @@ def create_app(
                     return False
                 return bool(online)
             return False
+        client = getattr(app.state, "qq_ws_client", None)
+        if service is None or client is None:
+            return False
+        if hasattr(client, "get_status"):
             try:
                 status = client.get_status()
             except Exception:
@@ -1033,6 +1135,29 @@ def create_app(
         setattr(app.state.pipeline, "narration_observer", observer)
         setattr(app.state.pipeline, "on_narration", emit_narration)
 
+    def refresh_probe_server_config() -> None:
+        probe_server = getattr(app.state, "probe_server", None)
+        if probe_server is None:
+            return
+        config_dir = Path(getattr(app.state, "config_dir", Path("config")))
+        secrets_path = config_dir / "secrets.yaml"
+        try:
+            secrets = load_secrets_config(secrets_path)
+        except FileNotFoundError:
+            if not probe_server.has_token():
+                probe_server.configure(None)
+            return
+        except Exception:
+            logger.exception("probe.config.load_failed", path=str(secrets_path))
+            if not probe_server.has_token():
+                probe_server.configure(None)
+            return
+        services = secrets.services
+        probe_cfg = services.probe if services is not None else None
+        if probe_cfg is None and probe_server.has_token():
+            return
+        probe_server.configure(probe_cfg)
+
     def refresh_qq_channel_service() -> None:
         app.state.channel_dispatcher.unregister("qq")
         existing_service = getattr(app.state, "qq_channel_service", None)
@@ -1046,20 +1171,16 @@ def create_app(
             return
         if external_channels_disabled_for(config_dir):
             app.state.qq_channel_service = None
+            app.state.qq_bot_channel_service = None
             app.state.qq_ws_url = None
             app.state.qq_ws_token = ""
             logger.info("qq_adapter.skip", reason="test_mode", mode="test")
             return
-            app.state.qq_bot_channel_service = None
+        qq_bot_cfg = _load_enabled_qq_bot_service_config(config_dir)
         qq_cfg = _load_enabled_qq_service_config(config_dir)
+        app.state.qq_bot_channel_service = None
         app.state.qq_ws_url = None
         app.state.qq_ws_token = ""
-        if qq_cfg is None:
-        qq_bot_cfg = _load_enabled_qq_bot_service_config(config_dir)
-            app.state.qq_channel_service = None
-        app.state.qq_bot_channel_service = None
-            logger.info("qq.channel.disabled", config_dir=str(config_dir))
-            return
         if qq_bot_cfg is not None:
             async def load_target_openid() -> str | None:
                 store = getattr(app.state, "structured_store", None)
@@ -1094,6 +1215,10 @@ def create_app(
             )
             return
         # DEPRECATED: only used as fallback when qq_bot is not enabled.
+        if qq_cfg is None:
+            app.state.qq_channel_service = None
+            logger.info("qq.channel.disabled", config_dir=str(config_dir))
+            return
 
         def on_message_sent() -> None:
             client = getattr(app.state, "qq_ws_client", None)
@@ -1201,7 +1326,6 @@ def create_app(
             await existing_client.stop()
             app.state.qq_ws_client = None
 
-        service = getattr(app.state, "qq_channel_service", None)
         qq_bot_service = getattr(app.state, "qq_bot_channel_service", None)
         if qq_bot_service is not None:
             client = QQBotWebSocketClient(
@@ -1212,6 +1336,7 @@ def create_app(
             await client.start()
             return
 
+        service = getattr(app.state, "qq_channel_service", None)
         url = str(getattr(app.state, "qq_ws_url", "") or "").strip()
         if service is None or not url:
             return
@@ -1315,6 +1440,7 @@ def create_app(
             permission_manager=deps.permission_manager,
             structured_store=deps.structured_store,
         )
+        deps.coder_client, deps.coder_webhook_secret, deps.coder_webhook_url = _load_hypo_coder_runtime()
         _register_enabled_skills(
             skill_manager=deps.skill_manager,
             permission_manager=deps.permission_manager,
@@ -1322,7 +1448,10 @@ def create_app(
             scheduler=deps.scheduler,
             message_queue=deps.event_queue,
             heartbeat_service=deps.heartbeat_service,
+            coder_client=deps.coder_client,
+            coder_webhook_url=deps.coder_webhook_url,
             image_renderer=deps.image_renderer,
+            probe_server=deps.probe_server,
         )
 
         deps.output_compressor = None
@@ -1331,6 +1460,9 @@ def create_app(
         app.state.permission_manager = deps.permission_manager
         app.state.circuit_breaker = deps.circuit_breaker
         app.state.skill_manager = deps.skill_manager
+        app.state.coder_client = deps.coder_client
+        app.state.coder_webhook_secret = deps.coder_webhook_secret or ""
+        app.state.coder_webhook_url = deps.coder_webhook_url or ""
         app.state.pipeline = _build_default_pipeline(deps)
         app.state.semantic_memory = deps.semantic_memory
         app.state.persona_manager = deps.persona_manager
@@ -1344,14 +1476,28 @@ def create_app(
         await start_weixin_channel()
         refresh_qq_channel_service()
         await restart_qq_ws_client()
+        refresh_probe_server_config()
 
     resolved_deps.reload_config = reload_config
     app.state.reload_config = reload_config
+    if (
+        resolved_deps.heartbeat_service is not None
+        and resolved_deps.probe_server is not None
+        and hasattr(resolved_deps.heartbeat_service, "register_event_source")
+    ):
+        resolved_deps.heartbeat_service.register_event_source(
+            "probe",
+            resolved_deps.probe_server.probe_heartbeat_callback,
+        )
     refresh_qq_channel_service()
     refresh_weixin_channel()
+    refresh_probe_server_config()
 
     app.include_router(ws_router)
+    app.include_router(coder_webhook_router)
+    app.include_router(probe_ws_router)
     app.include_router(qq_ws_router)
+    # DEPRECATED: QQ Bot webhook fallback is retained in source but no longer registered by default.
     app.include_router(sessions_api_router)
     app.include_router(compressed_api_router)
     app.include_router(files_api_router)

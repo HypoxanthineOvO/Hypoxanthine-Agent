@@ -7,6 +7,7 @@ from hypo_agent.core.config_loader import (
     load_persona_config,
     get_memory_dir,
     get_port,
+    load_secrets_config,
     load_narration_config,
     render_persona_system_prompt,
     load_runtime_model_config,
@@ -230,6 +231,50 @@ heartbeat:
     assert tasks.heartbeat.enabled is True
     assert tasks.heartbeat.mode == "cron"
     assert tasks.heartbeat.cron == "*/10 * * * *"
+
+
+def test_load_secrets_config_accepts_probe_service(tmp_path: Path) -> None:
+    secrets_yaml = tmp_path / "secrets.yaml"
+    secrets_yaml.write_text(
+        """
+providers: {}
+services:
+  probe:
+    token: probe-secret
+    screenshot_dir: memory/probe_screenshots
+""".strip(),
+        encoding="utf-8",
+    )
+
+    secrets = load_secrets_config(secrets_yaml)
+
+    assert secrets.services is not None
+    assert secrets.services.probe is not None
+    assert secrets.services.probe.token == "probe-secret"
+    assert secrets.services.probe.screenshot_dir == "memory/probe_screenshots"
+
+
+def test_load_secrets_config_accepts_notion_service(tmp_path: Path) -> None:
+    secrets_yaml = tmp_path / "secrets.yaml"
+    secrets_yaml.write_text(
+        """
+providers: {}
+services:
+  notion:
+    integration_secret: secret_xxx
+    default_workspace: Hypo
+    todo_database_id: todo-db
+""".strip(),
+        encoding="utf-8",
+    )
+
+    secrets = load_secrets_config(secrets_yaml)
+
+    assert secrets.services is not None
+    assert secrets.services.notion is not None
+    assert secrets.services.notion.integration_secret == "secret_xxx"
+    assert secrets.services.notion.default_workspace == "Hypo"
+    assert secrets.services.notion.todo_database_id == "todo-db"
 
 
 def test_memory_dir_default(monkeypatch: pytest.MonkeyPatch) -> None:

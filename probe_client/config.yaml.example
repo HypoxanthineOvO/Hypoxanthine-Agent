@@ -1,0 +1,17 @@
+server:
+  url: "ws://localhost:8090/ws/probe"
+  token: "your-probe-token-here"
+
+device:
+  device_id: "windows-office"
+  platform: "windows"
+  version: "1.0.0"
+  capabilities:
+    - "screenshot"
+    - "process_list"
+
+screenshot:
+  enabled: true
+  interval_minutes: 5
+  quality: 85
+  active_hours: [8, 24]

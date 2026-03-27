@@ -161,6 +161,14 @@ def test_repo_skills_config_enables_qq() -> None:
     assert "qq" in enabled
 
 
+def test_repo_skills_config_enables_probe() -> None:
+    config = Path(__file__).resolve().parents[2] / "config" / "skills.yaml"
+
+    enabled = SkillManager.find_enabled_skills(config)
+
+    assert "probe" in enabled
+
+
 def test_skill_manager_invoke_checks_circuit_breaker_before_execution() -> None:
     class BlockedCircuitBreaker:
         def can_execute(self, tool_name: str, session_id: str | None):

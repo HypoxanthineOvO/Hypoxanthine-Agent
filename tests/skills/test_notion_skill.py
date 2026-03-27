@@ -1,0 +1,327 @@
+from __future__ import annotations
+
+import asyncio
+
+from hypo_agent.channels.notion.notion_client import NotionUnavailableError
+from hypo_agent.skills.notion_skill import NotionSkill
+
+
+class FakeNotionClient:
+    def __init__(self) -> None:
+        self.database_id = "22222222-2222-2222-2222-222222222222"
+        self.page_payload = {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "parent": {"type": "database_id", "database_id": self.database_id},
+            "properties": {
+                "Name": {
+                    "id": "title",
+                    "type": "title",
+                    "title": [{"type": "text", "plain_text": "开发计划", "annotations": {}}],
+                },
+                "Status": {"id": "status", "type": "status", "status": {"name": "Done"}},
+                "Tags": {
+                    "id": "tags",
+                    "type": "multi_select",
+                    "multi_select": [{"name": "AI"}, {"name": "Agent"}],
+                },
+            },
+        }
+        self.page_blocks = [
+            {
+                "id": "block-1",
+                "type": "heading_2",
+                "heading_2": {"rich_text": [{"type": "text", "plain_text": "里程碑", "annotations": {}}]},
+            },
+            {
+                "id": "block-2",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{"type": "text", "plain_text": "完成 NotionSkill", "annotations": {}}]
+                },
+            },
+        ]
+        self.append_calls: list[tuple[str, list[dict]]] = []
+        self.deleted_blocks: list[str] = []
+        self.update_calls: list[tuple[str, dict]] = []
+        self.query_calls: list[dict] = []
+        self.create_calls: list[dict] = []
+        self.search_calls: list[dict] = []
+        self.database_payload = {
+            "id": self.database_id,
+            "title": [{"type": "text", "plain_text": "待办数据库", "annotations": {}}],
+            "properties": {
+                "Name": {"id": "title", "type": "title"},
+                "Status": {"id": "status", "type": "status"},
+                "Tags": {"id": "tags", "type": "multi_select"},
+                "Estimate": {"id": "est", "type": "number"},
+                "Done": {"id": "done", "type": "checkbox"},
+            },
+        }
+
+    async def get_page(self, page_id: str) -> dict:
+        assert page_id
+        return dict(self.page_payload)
+
+    async def get_page_content(self, page_id: str) -> list[dict]:
+        assert page_id
+        return list(self.page_blocks)
+
+    async def append_blocks(self, page_id: str, blocks: list[dict]) -> None:
+        self.append_calls.append((page_id, blocks))
+
+    async def delete_block(self, block_id: str) -> None:
+        self.deleted_blocks.append(block_id)
+
+    async def update_page_properties(self, page_id: str, properties: dict) -> dict:
+        self.update_calls.append((page_id, properties))
+        return {"id": page_id, "properties": properties}
+
+    async def query_database(
+        self,
+        database_id: str,
+        filter: dict | None = None,
+        sorts: list | None = None,
+        page_size: int = 50,
+    ) -> list[dict]:
+        self.query_calls.append(
+            {
+                "database_id": database_id,
+                "filter": filter,
+                "sorts": sorts,
+                "page_size": page_size,
+            }
+        )
+        return [
+            {
+                "id": "page-1",
+                "last_edited_time": "2026-03-27T10:00:00.000Z",
+                "properties": {
+                    "Name": {
+                        "type": "title",
+                        "title": [{"type": "text", "plain_text": "完成测试", "annotations": {}}],
+                    },
+                    "Status": {"type": "status", "status": {"name": "In Progress"}},
+                    "Tags": {
+                        "type": "multi_select",
+                        "multi_select": [{"name": "QA"}, {"name": "Notion"}],
+                    },
+                },
+            }
+        ]
+
+    async def create_page(
+        self,
+        parent: dict,
+        properties: dict,
+        children: list[dict] | None = None,
+    ) -> dict:
+        self.create_calls.append(
+            {"parent": parent, "properties": properties, "children": children}
+        )
+        return {
+            "id": "new-page",
+            "properties": {
+                "Name": {
+                    "type": "title",
+                    "title": [{"type": "text", "plain_text": "新条目", "annotations": {}}],
+                }
+            },
+        }
+
+    async def search(
+        self,
+        query: str,
+        object_type: str | None = None,
+        page_size: int = 10,
+    ) -> list[dict]:
+        self.search_calls.append(
+            {"query": query, "object_type": object_type, "page_size": page_size}
+        )
+        return [
+            {
+                "object": object_type or "page",
+                "id": "result-1",
+                "last_edited_time": "2026-03-27T11:00:00.000Z",
+                "properties": {
+                    "title": {
+                        "type": "title",
+                        "title": [{"type": "text", "plain_text": "Hypo-Agent 开发日志", "annotations": {}}],
+                    }
+                },
+            }
+        ]
+
+    async def get_database(self, database_id: str) -> dict:
+        assert database_id
+        return dict(self.database_payload)
+
+
+def test_read_page_formats_title_properties_and_markdown() -> None:
+    async def _run() -> None:
+        skill = NotionSkill(notion_client=FakeNotionClient())
+
+        result = await skill.execute(
+            "notion_read_page",
+            {"page_id": "https://www.notion.so/workspace/dev-plan-11111111111111111111111111111111"},
+        )
+
+        assert result.status == "success"
+        assert "📄 开发计划" in result.result
+        assert "Status=Done" in result.result
+        assert "Tags=AI, Agent" in result.result
+        assert "## 里程碑" in result.result
+        assert "完成 NotionSkill" in result.result
+
+    asyncio.run(_run())
+
+
+def test_write_page_append_calls_append_blocks() -> None:
+    async def _run() -> None:
+        client = FakeNotionClient()
+        skill = NotionSkill(notion_client=client)
+
+        result = await skill.execute(
+            "notion_write_page",
+            {"page_id": "11111111111111111111111111111111", "content": "# Added", "mode": "append"},
+        )
+
+        assert result.status == "success"
+        assert client.append_calls
+        assert client.append_calls[0][0] == "11111111-1111-1111-1111-111111111111"
+        assert "已写入" in result.result
+
+    asyncio.run(_run())
+
+
+def test_write_page_replace_deletes_supported_blocks_before_append() -> None:
+    async def _run() -> None:
+        client = FakeNotionClient()
+        client.page_blocks = [
+            {
+                "id": "paragraph-1",
+                "type": "paragraph",
+                "paragraph": {"rich_text": []},
+            },
+            {
+                "id": "child-page-1",
+                "type": "child_page",
+                "child_page": {"title": "子页面"},
+            },
+        ]
+        skill = NotionSkill(notion_client=client)
+
+        result = await skill.execute(
+            "notion_write_page",
+            {"page_id": "11111111111111111111111111111111", "content": "new content", "mode": "replace"},
+        )
+
+        assert result.status == "success"
+        assert client.deleted_blocks == ["paragraph-1"]
+        assert client.append_calls
+
+    asyncio.run(_run())
+
+
+def test_update_page_uses_database_schema_to_build_properties() -> None:
+    async def _run() -> None:
+        client = FakeNotionClient()
+        skill = NotionSkill(notion_client=client)
+
+        result = await skill.execute(
+            "notion_update_page",
+            {
+                "page_id": "11111111111111111111111111111111",
+                "properties": '{"Status":"Done","Tags":["AI"],"Estimate":3,"Done":true}',
+            },
+        )
+
+        assert result.status == "success"
+        assert client.update_calls
+        props = client.update_calls[0][1]
+        assert props["Status"] == {"status": {"name": "Done"}}
+        assert props["Tags"] == {"multi_select": [{"name": "AI"}]}
+        assert props["Estimate"] == {"number": 3}
+        assert props["Done"] == {"checkbox": True}
+
+    asyncio.run(_run())
+
+
+def test_query_db_formats_table() -> None:
+    async def _run() -> None:
+        client = FakeNotionClient()
+        skill = NotionSkill(notion_client=client)
+
+        result = await skill.execute(
+            "notion_query_db",
+            {"database_id": "22222222222222222222222222222222", "limit": 20},
+        )
+
+        assert result.status == "success"
+        assert "📊 待办数据库（共 1 条）" in result.result
+        assert "| 标题 | Status | Tags | 更新时间 |" in result.result
+        assert "| 完成测试 | In Progress | QA, Notion | 2026-03-27 |" in result.result
+
+    asyncio.run(_run())
+
+
+def test_create_entry_constructs_parent_properties_and_children() -> None:
+    async def _run() -> None:
+        client = FakeNotionClient()
+        skill = NotionSkill(notion_client=client)
+
+        result = await skill.execute(
+            "notion_create_entry",
+            {
+                "database_id": "22222222222222222222222222222222",
+                "properties": '{"Name":"新条目","Status":"In Progress","Tags":["AI"],"Estimate":5}',
+                "content": "hello",
+            },
+        )
+
+        assert result.status == "success"
+        payload = client.create_calls[0]
+        assert payload["parent"] == {"database_id": "22222222-2222-2222-2222-222222222222"}
+        assert payload["properties"]["Name"]["title"][0]["text"]["content"] == "新条目"
+        assert payload["properties"]["Status"] == {"status": {"name": "In Progress"}}
+        assert payload["children"]
+        assert "已创建条目：新条目" in result.result
+
+    asyncio.run(_run())
+
+
+def test_search_formats_results() -> None:
+    async def _run() -> None:
+        skill = NotionSkill(notion_client=FakeNotionClient())
+
+        result = await skill.execute(
+            "notion_search",
+            {"query": "开发日志", "type": "page"},
+        )
+
+        assert result.status == "success"
+        assert "🔍 搜索结果（共 1 条）" in result.result
+        assert "Hypo-Agent 开发日志" in result.result
+        assert "最后编辑: 2026-03-27" in result.result
+
+    asyncio.run(_run())
+
+
+def test_notion_unavailable_returns_friendly_message() -> None:
+    class UnavailableClient(FakeNotionClient):
+        async def search(
+            self,
+            query: str,
+            object_type: str | None = None,
+            page_size: int = 10,
+        ) -> list[dict]:
+            raise NotionUnavailableError("boom")
+
+    async def _run() -> None:
+        skill = NotionSkill(notion_client=UnavailableClient())
+
+        result = await skill.execute("notion_search", {"query": "x"})
+
+        assert result.status == "error"
+        assert "Notion 当前不可用" in result.error_info
+
+    asyncio.run(_run())

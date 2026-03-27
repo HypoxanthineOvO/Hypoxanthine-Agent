@@ -133,10 +133,44 @@ class TavilyServiceConfig(BaseModel):
     api_key: str
 
 
+class HypoInfoConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: str
+
+
+class HypoCoderConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: str
+    agent_token: str
+    webhook_secret: str
+    webhook_url: str = ""
+
+
+class ProbeConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token: str
+    screenshot_dir: str = "memory/probe_screenshots"
+
+
+class NotionServiceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    integration_secret: str
+    default_workspace: str = ""
+    todo_database_id: str = ""
+
+
 class ServicesConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     email: EmailServiceConfig | None = None
+    hypo_coder: HypoCoderConfig | None = None
+    hypo_info: HypoInfoConfig | None = None
+    notion: NotionServiceConfig | None = None
+    probe: ProbeConfig | None = None
     qq: QQServiceConfig | None = None
     qq_bot: QQBotServiceConfig | None = None
     weixin: WeixinServiceConfig | None = None

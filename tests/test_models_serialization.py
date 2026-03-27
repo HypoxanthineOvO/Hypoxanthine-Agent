@@ -377,6 +377,46 @@ def test_secrets_config_accepts_services_tavily():
     assert config.services.tavily.api_key == "tvly-dev-key"
 
 
+def test_secrets_config_accepts_services_hypo_info() -> None:
+    config = SecretsConfig.model_validate(
+        {
+            "providers": {},
+            "services": {
+                "hypo_info": {
+                    "base_url": "http://localhost:8090",
+                }
+            },
+        }
+    )
+
+    assert config.services is not None
+    assert config.services.hypo_info is not None
+    assert config.services.hypo_info.base_url == "http://localhost:8090"
+
+
+def test_secrets_config_accepts_services_hypo_coder() -> None:
+    config = SecretsConfig.model_validate(
+        {
+            "providers": {},
+            "services": {
+                "hypo_coder": {
+                    "base_url": "http://localhost:11451",
+                    "agent_token": "coder-token",
+                    "webhook_secret": "coder-secret",
+                    "webhook_url": "http://localhost:8765/api/coder/webhook",
+                }
+            },
+        }
+    )
+
+    assert config.services is not None
+    assert config.services.hypo_coder is not None
+    assert config.services.hypo_coder.base_url == "http://localhost:11451"
+    assert config.services.hypo_coder.agent_token == "coder-token"
+    assert config.services.hypo_coder.webhook_secret == "coder-secret"
+    assert config.services.hypo_coder.webhook_url == "http://localhost:8765/api/coder/webhook"
+
+
 def test_secrets_yaml_example_includes_qq_template() -> None:
     example_path = Path(__file__).resolve().parents[1] / "config" / "secrets.yaml.example"
     payload = yaml.safe_load(example_path.read_text(encoding="utf-8"))
@@ -398,6 +438,12 @@ def test_secrets_yaml_example_includes_qq_template() -> None:
     assert config.services.weixin.allowed_users == []
     assert config.services.tavily is not None
     assert config.services.tavily.api_key == "PLACEHOLDER_TAVILY_API_KEY"
+    assert config.services.hypo_info is not None
+    assert config.services.hypo_info.base_url == "http://localhost:<info-port>"
+    assert config.services.hypo_coder is not None
+    assert config.services.hypo_coder.base_url == "http://localhost:11451"
+    assert config.services.hypo_coder.agent_token == "your-coder-agent-token-here"
+    assert config.services.hypo_coder.webhook_secret == "your-webhook-secret"
 
 
 def test_security_config_whitelist_and_circuit_breaker():
