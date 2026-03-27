@@ -78,12 +78,15 @@ describe("DashboardView", () => {
         },
         qq: {
           status: "connected",
-          bot_qq: "3637647606",
-          napcat_ws_url: "ws://127.0.0.1:3009/onebot/v11/ws",
-          connected_at: new Date().toISOString(),
+          qq_bot_enabled: true,
+          qq_bot_app_id: "••••4756",
+          ws_connected: true,
+          bot_qq: "",
+          napcat_ws_url: "",
+          connected_at: null,
           last_message_at: new Date().toISOString(),
-          messages_received: 42,
-          messages_sent: 38,
+          messages_received: 3,
+          messages_sent: 2,
         },
         weixin: {
           status: "connected",
@@ -250,8 +253,10 @@ describe("DashboardView", () => {
 
     expect(wrapper.text()).toContain("系统状态");
     expect(wrapper.text()).toContain("QQ");
-    expect(wrapper.text()).toContain("3637647606");
-    expect(wrapper.text()).toContain("收 42 / 发 38");
+    expect(wrapper.text()).toContain("官方 Bot 通道");
+    expect(wrapper.text()).toContain("••••4756");
+    expect(wrapper.text()).toContain("WS 已连接");
+    expect(wrapper.text()).toContain("收 3 / 发 2");
     expect(wrapper.text()).toContain("微信");
     expect(wrapper.text()).toContain("wx-bot-1");
     expect(wrapper.text()).toContain("收 12 / 发 9");
@@ -463,12 +468,15 @@ describe("DashboardView", () => {
               webui: { status: "connected", active_connections: 1, last_message_at: new Date().toISOString() },
               qq: {
                 status: "connected",
-                bot_qq: "3637647606",
-                napcat_ws_url: "ws://127.0.0.1:3009/onebot/v11/ws",
-                connected_at: new Date().toISOString(),
+                qq_bot_enabled: true,
+                qq_bot_app_id: "••••4756",
+                ws_connected: true,
+                bot_qq: "",
+                napcat_ws_url: "",
+                connected_at: null,
                 last_message_at: new Date().toISOString(),
-                messages_received: 42,
-                messages_sent: 38,
+                messages_received: 3,
+                messages_sent: 2,
               },
               weixin: {
                 status: "connected",

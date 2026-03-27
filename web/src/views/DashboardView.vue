@@ -106,12 +106,17 @@ interface WebUiChannelStatus {
 
 interface QQChannelStatus {
   status: string;
+  qq_bot_enabled?: boolean;
+  qq_bot_app_id?: string;
+  ws_connected?: boolean;
+  connected_at?: string | null;
   bot_qq: string;
   napcat_ws_url: string;
-  connected_at: string | null;
   last_message_at: string | null;
   messages_received: number;
   messages_sent: number;
+  online?: boolean | null;
+  good?: boolean | null;
 }
 
 interface WeixinChannelStatus {
@@ -391,12 +396,26 @@ const channelCardMap = computed<ChannelCardMap>(() => {
       `活跃连接 ${payload.webui.active_connections}`,
       `最后消息 ${formatRelativeTime(payload.webui.last_message_at)}`,
     ]),
-    qq: createChannelCard("qq", "🐧", "QQ", payload.qq.status, [
-      `Bot QQ ${payload.qq.bot_qq || "未配置"}`,
-      payload.qq.napcat_ws_url || "未配置 WS URL",
-      `收 ${payload.qq.messages_received} / 发 ${payload.qq.messages_sent}`,
-      `最后消息 ${formatRelativeTime(payload.qq.last_message_at)}`,
-    ]),
+    qq: createChannelCard(
+      "qq",
+      "🐧",
+      "QQ",
+      payload.qq.status,
+      payload.qq.qq_bot_enabled
+        ? [
+            "官方 Bot 通道",
+            `App ID ${payload.qq.qq_bot_app_id || "未配置"}`,
+            `WS ${payload.qq.ws_connected ? "已连接" : "未连接"}`,
+            `收 ${payload.qq.messages_received} / 发 ${payload.qq.messages_sent}`,
+            `最后消息 ${formatRelativeTime(payload.qq.last_message_at)}`,
+          ]
+        : [
+            `Bot QQ ${payload.qq.bot_qq || "未配置"}`,
+            payload.qq.napcat_ws_url || "未配置 WS URL",
+            `收 ${payload.qq.messages_received} / 发 ${payload.qq.messages_sent}`,
+            `最后消息 ${formatRelativeTime(payload.qq.last_message_at)}`,
+          ],
+    ),
     weixin: createChannelCard("weixin", "💬", "微信", payload.weixin.status, [
       `Bot ID ${payload.weixin.bot_id || "未登录"}`,
       `目标用户 ${payload.weixin.user_id || "未绑定"}`,
