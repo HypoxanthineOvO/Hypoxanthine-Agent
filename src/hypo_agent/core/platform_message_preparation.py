@@ -19,7 +19,8 @@ _URL_IMAGE_PATTERN = re.compile(
 
 
 def prepare_message_for_platform(message: Message, platform: str) -> list[Message]:
-    if str(platform or "").strip().lower() != "weixin":
+    normalized_platform = str(platform or "").strip().lower()
+    if normalized_platform not in {"weixin", "qq", "qq_bot"}:
         return [message]
 
     text = str(message.text or "")

@@ -66,6 +66,20 @@ class DummyQQService:
         }
 
 
+class DummyQQBotService:
+    def get_status(self) -> dict:
+        return {
+            "status": "connected",
+            "qq_bot_enabled": True,
+            "qq_bot_app_id": "••••4756",
+            "ws_connected": True,
+            "connected_at": "2026-03-26T10:40:00+08:00",
+            "last_message_at": "2026-03-26T10:45:00+08:00",
+            "messages_received": 3,
+            "messages_sent": 2,
+        }
+
+
 class DummyHeartbeatService:
     def get_status(self, *, scheduler=None):
         del scheduler
@@ -121,7 +135,7 @@ def test_channels_status_returns_runtime_structure(tmp_path, monkeypatch) -> Non
     (config_dir / "skills.yaml").write_text(
         """
 skills:
-  qq:
+  qq_bot:
     enabled: true
   email_scanner:
     enabled: true
@@ -132,6 +146,10 @@ skills:
         """
 providers: {}
 services:
+  qq_bot:
+    app_id: "1029384756"
+    app_secret: "bot-secret-xyz"
+    enabled: true
   weixin:
     enabled: true
     token_path: memory/weixin_auth.json
@@ -144,8 +162,8 @@ services:
 
     with client:
         client.app.state.config_dir = config_dir
-        client.app.state.qq_ws_client = DummyQQClient()
-        client.app.state.qq_channel_service = DummyQQService(online=True)
+        client.app.state.qq_bot_channel_service = DummyQQBotService()
+        client.app.state.qq_channel_service = client.app.state.qq_bot_channel_service
         client.app.state.heartbeat_service = DummyHeartbeatService()
         client.app.state.weixin_channel = DummyWeixinChannel()
         response = client.get("/api/channels/status", params={"token": "test-token"})
@@ -155,14 +173,18 @@ services:
     assert payload["channels"]["webui"]["status"] == "connected"
     assert payload["channels"]["webui"]["active_connections"] == 1
     assert payload["channels"]["qq"]["status"] == "connected"
-    assert payload["channels"]["qq"]["online"] is True
+    assert payload["channels"]["qq"]["qq_bot_enabled"] is True
+    assert payload["channels"]["qq"]["qq_bot_app_id"] == "••••4756"
+    assert payload["channels"]["qq"]["ws_connected"] is True
     assert payload["channels"]["weixin"]["status"] == "connected"
     assert payload["channels"]["weixin"]["bot_id"] == "wx-bot-1"
-    assert payload["channels"]["qq"]["messages_received"] == 42
+    assert payload["channels"]["qq"]["messages_received"] == 3
     assert payload["channels"]["email"]["status"] == "enabled"
     assert payload["channels"]["email"]["accounts"] == ["hyx021203@shanghaitech.edu.cn"]
     assert payload["channels"]["heartbeat"]["status"] == "running"
     assert payload["channels"]["heartbeat"]["active_tasks"] == 2
+    assert payload["channels"]["qq_bot"]["qq_bot_app_id"] == "••••4756"
+    assert payload["qq_bot"]["status"] == "connected"
 
 
 def test_channels_status_returns_disabled_when_qq_not_enabled(tmp_path, monkeypatch) -> None:
@@ -173,6 +195,9 @@ def test_channels_status_returns_disabled_when_qq_not_enabled(tmp_path, monkeypa
         """
 skills:
   qq:
+    enabled: false
+    deprecated: true
+  qq_bot:
     enabled: false
   email_scanner:
     enabled: true
@@ -191,6 +216,45 @@ skills:
     payload = response.json()
     assert payload["channels"]["qq"]["status"] == "disabled"
     assert payload["channels"]["weixin"]["status"] == "disabled"
+
+
+def test_channels_status_prefers_qq_bot_config_over_legacy_skill_flag(tmp_path, monkeypatch) -> None:
+    client = _build_client(tmp_path)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "skills.yaml").write_text(
+        """
+skills:
+  qq:
+    enabled: true
+  qq_bot:
+    enabled: false
+""".strip(),
+        encoding="utf-8",
+    )
+    (config_dir / "secrets.yaml").write_text(
+        """
+providers: {}
+services:
+  qq_bot:
+    app_id: "1029384756"
+    app_secret: "bot-secret-xyz"
+    enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("hypo_agent.gateway.dashboard_api.connection_manager", DummyWsManager())
+
+    with client:
+        client.app.state.config_dir = config_dir
+        response = client.get("/api/channels/status", params={"token": "test-token"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["channels"]["qq"]["qq_bot_enabled"] is True
+    assert payload["channels"]["qq"]["qq_bot_app_id"] == "••••4756"
+    assert payload["channels"]["qq"]["status"] == "enabled"
 
 
 def test_channels_status_returns_disabled_when_email_not_enabled(tmp_path, monkeypatch) -> None:

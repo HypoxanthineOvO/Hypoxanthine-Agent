@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+# DEPRECATED: NapCat-based QQChannelService 已被 QQBotChannelService 取代（MQ 迁移，2026-03-26）
+# 保留此文件用于紧急回退，不再主动维护。
+
 import asyncio
 import inspect
 from pathlib import Path
 import re
 from typing import Any
+import warnings
 
 import structlog
+from typing_extensions import deprecated
 
 from hypo_agent.channels.onebot11 import parse_onebot_private_message
 from hypo_agent.channels.qq_adapter import QQAdapter
@@ -19,6 +24,7 @@ logger = structlog.get_logger("hypo_agent.channels.qq")
 _CQ_SEGMENT_PATTERN = re.compile(r"\[CQ:(?P<type>[a-zA-Z0-9_]+)(?:,(?P<params>[^\]]*))?\]")
 
 
+@deprecated("NapCat-based QQChannelService is deprecated; use QQBotChannelService instead.")
 class QQChannelService:
     def __init__(
         self,
@@ -32,6 +38,11 @@ class QQChannelService:
         on_message_sent: Any | None = None,
         uploads_dir: Path | str | None = None,
     ) -> None:
+        warnings.warn(
+            "NapCat-based QQChannelService is deprecated; use QQBotChannelService instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.adapter = QQAdapter(
             napcat_http_url=napcat_http_url,
             napcat_http_token=napcat_http_token,

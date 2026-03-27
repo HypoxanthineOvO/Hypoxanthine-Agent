@@ -22,6 +22,7 @@ from hypo_agent.core.config_loader import (
     is_test_mode,
 )
 from hypo_agent.channels.qq_channel import QQChannelService
+from hypo_agent.channels.qq_bot_channel import QQBotChannelService
 from hypo_agent.channels.weixin import WeixinAdapter, WeixinChannel
 from hypo_agent.core.config_loader import (
     load_persona_config,
@@ -55,12 +56,20 @@ from hypo_agent.gateway.memory_api import router as memory_api_router
 from hypo_agent.gateway.sessions_api import router as sessions_api_router
 from hypo_agent.gateway.upload_api import router as upload_api_router
 from hypo_agent.gateway.middleware import WsTokenAuthMiddleware
+from hypo_agent.gateway.qqbot_ws_client import QQBotWebSocketClient
 from hypo_agent.gateway.qq_ws import router as qq_ws_router
 from hypo_agent.gateway.qq_ws_client import NapCatWebSocketClient
 from hypo_agent.gateway.settings import load_gateway_settings
 from hypo_agent.gateway.ws import broadcast_message, connection_manager, router as ws_router
 from hypo_agent.memory import MemoryGC, SemanticMemory, SessionMemory, StructuredStore
-from hypo_agent.models import Message, QQServiceConfig, SecurityConfig, SkillOutput, WeixinServiceConfig
+from hypo_agent.models import (
+    Message,
+    QQBotServiceConfig,
+    QQServiceConfig,
+    SecurityConfig,
+    SkillOutput,
+    WeixinServiceConfig,
+)
 from hypo_agent.security import CircuitBreaker, PermissionManager
 from hypo_agent.skills import (
     AgentSearchSkill,
@@ -546,6 +555,25 @@ def _load_enabled_qq_service_config(config_dir: Path) -> QQServiceConfig | None:
     return qq_cfg
 
 
+def _load_enabled_qq_bot_service_config(config_dir: Path) -> QQBotServiceConfig | None:
+    secrets_path = config_dir / "secrets.yaml"
+    try:
+        secrets = load_secrets_config(secrets_path)
+    except FileNotFoundError:
+        return None
+    except Exception:
+        logger.exception("qq_bot.config.load_failed", path=str(secrets_path))
+        return None
+
+    services = secrets.services
+    qq_bot_cfg = services.qq_bot if services is not None else None
+    if qq_bot_cfg is None or not qq_bot_cfg.enabled:
+        return None
+    if not str(qq_bot_cfg.app_id).strip() or not str(qq_bot_cfg.app_secret).strip():
+        return None
+    return qq_bot_cfg
+
+
 def _build_qq_channel_service(qq_cfg: QQServiceConfig) -> QQChannelService:
     allowed_users = {item.strip() for item in qq_cfg.allowed_users if item and item.strip()}
     return QQChannelService(
@@ -559,6 +587,13 @@ def _build_qq_channel_service(qq_cfg: QQServiceConfig) -> QQChannelService:
 def _validate_test_mode_storage_isolation(*, deps: AppDeps) -> None:
     sandbox_root = get_test_sandbox_dir()
     expected_sessions_dir = (sandbox_root / "memory" / "sessions").resolve(strict=False)
+def _build_qq_bot_channel_service(qq_bot_cfg: QQBotServiceConfig) -> QQBotChannelService:
+    return QQBotChannelService(
+        app_id=qq_bot_cfg.app_id,
+        app_secret=qq_bot_cfg.app_secret,
+    )
+
+
     expected_db_path = (sandbox_root / "hypo.db").resolve(strict=False)
 
     actual_sessions_dir = Path(getattr(deps.session_memory, "sessions_dir", "")).resolve(strict=False)
@@ -826,6 +861,7 @@ def create_app(
     connection_manager.reset()
     app.state.ws_connection_manager = connection_manager
     app.state.channel_dispatcher = ChannelDispatcher()
+    app.state.qq_bot_channel_service = None
     app.state.qq_channel_service = None
     app.state.qq_ws_client = None
     app.state.qq_ws_url = None
@@ -884,6 +920,16 @@ def create_app(
         if service is None or client is None:
             return False
         if hasattr(client, "get_status"):
+        qq_bot_service = getattr(app.state, "qq_bot_channel_service", None)
+        if service is not None and service is qq_bot_service:
+            if hasattr(service, "is_runtime_online"):
+                try:
+                    online = service.is_runtime_online()
+                except Exception:
+                    logger.warning("qq_bot.runtime.status_check_failed", exc_info=True)
+                    return False
+                return bool(online)
+            return False
             try:
                 status = client.get_status()
             except Exception:
@@ -1004,13 +1050,50 @@ def create_app(
             app.state.qq_ws_token = ""
             logger.info("qq_adapter.skip", reason="test_mode", mode="test")
             return
+            app.state.qq_bot_channel_service = None
         qq_cfg = _load_enabled_qq_service_config(config_dir)
         app.state.qq_ws_url = None
         app.state.qq_ws_token = ""
         if qq_cfg is None:
+        qq_bot_cfg = _load_enabled_qq_bot_service_config(config_dir)
             app.state.qq_channel_service = None
+        app.state.qq_bot_channel_service = None
             logger.info("qq.channel.disabled", config_dir=str(config_dir))
             return
+        if qq_bot_cfg is not None:
+            async def load_target_openid() -> str | None:
+                store = getattr(app.state, "structured_store", None)
+                getter = getattr(store, "get_preference", None)
+                if not callable(getter):
+                    return None
+                return await getter("qq_bot.last_openid")
+
+            async def save_target_openid(openid: str) -> None:
+                store = getattr(app.state, "structured_store", None)
+                setter = getattr(store, "set_preference", None)
+                if not callable(setter):
+                    return
+                await setter("qq_bot.last_openid", openid)
+
+            service = QQBotChannelService(
+                app_id=qq_bot_cfg.app_id,
+                app_secret=qq_bot_cfg.app_secret,
+                on_message_sent=None,
+                load_target_openid=load_target_openid,
+                save_target_openid=save_target_openid,
+                public_base_url=qq_bot_cfg.public_base_url,
+                public_file_token=auth_token,
+            )
+            app.state.qq_bot_channel_service = service
+            app.state.qq_channel_service = service
+            app.state.channel_dispatcher.register("qq", service.send_message)
+            logger.info(
+                "qq_bot.channel.enabled",
+                config_dir=str(config_dir),
+                app_id_suffix=str(qq_bot_cfg.app_id)[-4:],
+            )
+            return
+        # DEPRECATED: only used as fallback when qq_bot is not enabled.
 
         def on_message_sent() -> None:
             client = getattr(app.state, "qq_ws_client", None)
@@ -1119,6 +1202,16 @@ def create_app(
             app.state.qq_ws_client = None
 
         service = getattr(app.state, "qq_channel_service", None)
+        qq_bot_service = getattr(app.state, "qq_bot_channel_service", None)
+        if qq_bot_service is not None:
+            client = QQBotWebSocketClient(
+                service_getter=lambda: getattr(app.state, "qq_bot_channel_service", None),
+                pipeline_getter=lambda: getattr(app.state, "pipeline", None),
+            )
+            app.state.qq_ws_client = client
+            await client.start()
+            return
+
         url = str(getattr(app.state, "qq_ws_url", "") or "").strip()
         if service is None or not url:
             return

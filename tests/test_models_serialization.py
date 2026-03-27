@@ -318,6 +318,27 @@ def test_secrets_config_accepts_services_qq():
     assert config.services.qq.allowed_users == ["10001"]
 
 
+def test_secrets_config_accepts_services_qq_bot() -> None:
+    config = SecretsConfig.model_validate(
+        {
+            "providers": {},
+            "services": {
+                "qq_bot": {
+                    "app_id": "1029384756",
+                    "app_secret": "bot-secret-xyz",
+                    "enabled": True,
+                }
+            },
+        }
+    )
+
+    assert config.services is not None
+    assert config.services.qq_bot is not None
+    assert config.services.qq_bot.app_id == "1029384756"
+    assert config.services.qq_bot.app_secret == "bot-secret-xyz"
+    assert config.services.qq_bot.enabled is True
+
+
 def test_secrets_config_accepts_services_weixin() -> None:
     config = SecretsConfig.model_validate(
         {
@@ -368,6 +389,9 @@ def test_secrets_yaml_example_includes_qq_template() -> None:
     assert config.services.qq.napcat_ws_token == ""
     assert config.services.qq.bot_qq == "123456789"
     assert config.services.qq.allowed_users == ["10001"]
+    assert config.services.qq_bot is not None
+    assert config.services.qq_bot.enabled is False
+    assert config.services.qq_bot.app_id == ""
     assert config.services.weixin is not None
     assert config.services.weixin.enabled is False
     assert config.services.weixin.token_path == "memory/weixin_auth.json"

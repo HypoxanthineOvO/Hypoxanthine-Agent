@@ -110,6 +110,15 @@ class QQServiceConfig(BaseModel):
     allowed_users: list[str] = Field(default_factory=list)
 
 
+class QQBotServiceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    app_id: str = ""
+    app_secret: str = ""
+    enabled: bool = False
+    public_base_url: str = ""
+
+
 class WeixinServiceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -129,6 +138,7 @@ class ServicesConfig(BaseModel):
 
     email: EmailServiceConfig | None = None
     qq: QQServiceConfig | None = None
+    qq_bot: QQBotServiceConfig | None = None
     weixin: WeixinServiceConfig | None = None
     tavily: TavilyServiceConfig | None = None
 

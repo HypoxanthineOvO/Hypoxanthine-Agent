@@ -10,6 +10,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Query, Request
 
 from hypo_agent.core.recent_logs import get_recent_logs
+from hypo_agent.core.config_loader import load_secrets_config
 from hypo_agent.core.skill_manager import SkillManager
 from hypo_agent.gateway.auth import require_api_token
 from hypo_agent.gateway.ws import connection_manager
@@ -72,6 +73,8 @@ def _external_skill_runtime(request: Request, name: str) -> dict[str, Any] | Non
 def _disabled_qq_status() -> dict[str, Any]:
     return {
         "status": "disabled",
+        "qq_bot_enabled": False,
+        "qq_bot_app_id": "",
         "bot_qq": "",
         "napcat_ws_url": "",
         "connected_at": None,
@@ -81,6 +84,26 @@ def _disabled_qq_status() -> dict[str, Any]:
         "online": None,
         "good": None,
     }
+
+
+def _disabled_qq_bot_status() -> dict[str, Any]:
+    return {
+        "status": "disabled",
+        "qq_bot_enabled": False,
+        "qq_bot_app_id": "",
+        "ws_connected": False,
+        "connected_at": None,
+        "last_message_at": None,
+        "messages_received": 0,
+        "messages_sent": 0,
+    }
+
+
+def _mask_app_id(app_id: str | None) -> str:
+    value = str(app_id or "").strip()
+    if not value:
+        return ""
+    return f"••••{value[-4:]}" if len(value) >= 4 else "••••"
 
 
 def _disabled_email_status() -> dict[str, Any]:
@@ -150,8 +173,67 @@ async def channels_status(request: Request) -> dict[str, Any]:
     qq_enabled = configured_enabled.get("qq", False)
     email_enabled = configured_enabled.get("email_scanner", False)
 
+    qq_bot_config = None
+    secrets_path = config_dir / "secrets.yaml"
+    if secrets_path.exists():
+        try:
+            secrets = load_secrets_config(secrets_path)
+        except Exception:
+            qq_bot_config = None
+        else:
+            services = secrets.services
+            qq_bot_config = services.qq_bot if services is not None else None
+    qq_bot_enabled = bool(
+        qq_bot_config
+        and qq_bot_config.enabled
+        and str(qq_bot_config.app_id or "").strip()
+        and str(qq_bot_config.app_secret or "").strip()
+    )
+
     qq_status = _disabled_qq_status()
-    if qq_enabled:
+    qq_bot_status = _disabled_qq_bot_status()
+    if qq_bot_enabled:
+        qq_bot_service = getattr(request.app.state, "qq_bot_channel_service", None)
+        if qq_bot_service is not None and hasattr(qq_bot_service, "get_status"):
+            qq_bot_status = qq_bot_service.get_status()
+        else:
+            qq_bot_status = {
+                "status": "enabled" if qq_bot_config and str(qq_bot_config.app_id or "").strip() else "disabled",
+                "qq_bot_enabled": bool(qq_bot_config and qq_bot_config.enabled),
+                "qq_bot_app_id": _mask_app_id(getattr(qq_bot_config, "app_id", "")),
+                "ws_connected": False,
+                "connected_at": None,
+                "last_message_at": None,
+                "messages_received": 0,
+                "messages_sent": 0,
+            }
+        qq_bot_client = getattr(request.app.state, "qq_ws_client", None)
+        if qq_bot_client is not None and hasattr(qq_bot_client, "get_status"):
+            try:
+                transport_status = qq_bot_client.get_status()
+            except Exception:
+                transport_status = {}
+            qq_bot_status = {
+                **qq_bot_status,
+                "ws_connected": bool(transport_status.get("ws_connected", qq_bot_status.get("ws_connected"))),
+                "connected_at": transport_status.get("connected_at", qq_bot_status.get("connected_at")),
+            }
+        if qq_bot_config is not None:
+            ws_connected = bool(qq_bot_status.get("ws_connected"))
+            qq_bot_status = {
+                **qq_bot_status,
+                "status": (
+                    "connected"
+                    if ws_connected
+                    else "enabled"
+                    if str(qq_bot_config.app_id or "").strip()
+                    else str(qq_bot_status.get("status") or "disabled")
+                ),
+                "qq_bot_enabled": bool(qq_bot_config.enabled),
+                "qq_bot_app_id": _mask_app_id(qq_bot_config.app_id),
+            }
+        qq_status = {**_disabled_qq_status(), **dict(qq_bot_status)}
+    elif qq_enabled:
         qq_client = getattr(request.app.state, "qq_ws_client", None)
         qq_channel_service = getattr(request.app.state, "qq_channel_service", None)
         if qq_client is not None and hasattr(qq_client, "get_status"):
@@ -195,8 +277,6 @@ async def channels_status(request: Request) -> dict[str, Any]:
     weixin_enabled = False
     if secrets_path.exists():
         try:
-            from hypo_agent.core.config_loader import load_secrets_config
-
             services = load_secrets_config(secrets_path).services
             weixin_enabled = bool(services and services.weixin and services.weixin.enabled)
         except Exception:
@@ -219,10 +299,12 @@ async def channels_status(request: Request) -> dict[str, Any]:
         "channels": {
             "webui": connection_manager.get_status(),
             "qq": qq_status,
+            "qq_bot": qq_bot_status if qq_bot_enabled else _disabled_qq_bot_status(),
             "weixin": weixin_status,
             "email": email_status,
             "heartbeat": heartbeat_status,
-        }
+        },
+        "qq_bot": qq_bot_status if qq_bot_enabled else _disabled_qq_bot_status(),
     }
 
 

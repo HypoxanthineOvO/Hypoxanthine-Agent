@@ -99,7 +99,7 @@ def test_prepare_message_for_weixin_splits_image_attachments_after_text() -> Non
     assert prepared[1].attachments == [Attachment(type="image", url="./cat.png")]
 
 
-def test_prepare_message_for_non_weixin_preserves_mixed_message() -> None:
+def test_prepare_message_for_qq_splits_markdown_image_into_text_and_image_messages() -> None:
     message = Message(
         text="图在这里 ![cat](./cat.png)",
         sender="assistant",
@@ -109,4 +109,5 @@ def test_prepare_message_for_non_weixin_preserves_mixed_message() -> None:
 
     prepared = prepare_message_for_platform(message, platform="qq")
 
-    assert prepared == [message]
+    assert [item.text for item in prepared] == ["图在这里 【见下方图片】", None]
+    assert prepared[1].attachments == [Attachment(type="image", url="./cat.png")]
