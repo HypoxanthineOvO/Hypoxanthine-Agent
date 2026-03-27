@@ -8,8 +8,8 @@ task_routing:
 
 models:
   GPT:
-    litellm_model: "openai/gpt-5.2"
-    provider: "AISTOCK"
+    litellm_model: "openai/gpt-5.4"
+    provider: "TTAPI"
     supports_tool_calling: true
     description: "OpenAI ChatGPT"
     fallback: KimiK25
@@ -24,14 +24,6 @@ models:
     provider: "volcengine_coding"
     supports_tool_calling: true
     description: "Kimi K2.5 via 火山引擎 Coding Plan (OpenAI compat)"
-    fallback: GLM47
-
-  GLM47:
-    litellm_model: "openai/glm-4.7"
-    provider: "volcengine_coding"
-    supports_tool_calling: true
-    context_window: 128000
-    description: "GLM 4.7 via 火山方舟 Coding Plan"
     fallback: DeepseekV3_2_Core
 
   Gemini3Pro:
@@ -42,16 +34,6 @@ models:
     litellm_model: "openai/gemini-3-pro"
     fallback: DeepseekV3_2
 
-  DeepseekV3_1:
-    provider: Volcengine
-    litellm_model: "openai/ep-20250828163824-jxmm7"
-    fallback: DeepseekV3_2
-
-  DeepseekV3_2:
-    provider: "volcengine_coding"
-    litellm_model: "openai/deepseek-v3.2"
-    description: "DeepSeek V3.2 via 火山方舟 Coding Plan (lightweight)"
-    fallback: KimiK25
 
   DeepseekV3_2_Core:
     provider: "volcengine_coding"
@@ -59,20 +41,6 @@ models:
     description: "DeepSeek V3.2 via 火山方舟 Coding Plan (fallback terminal)"
     fallback: null
 
-  QwenPlus:
-    provider: Dashscope
-    litellm_model: "openai/qwen-plus"
-    fallback: null
-
-  ClaudeSonnet:
-    provider: null
-    litellm_model: null
-    fallback: KimiK2
-
-  Gpt4o:
-    provider: null
-    litellm_model: null
-    fallback: KimiK2
 
   VolcanoEmbedding:
     type: embedding

@@ -91,6 +91,7 @@ class SkillConfigEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
+    deprecated: bool | None = None
     timeout_seconds: int | None = None
     auto_confirm: bool | None = None
 

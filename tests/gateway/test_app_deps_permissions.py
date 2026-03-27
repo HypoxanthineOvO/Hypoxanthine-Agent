@@ -35,6 +35,8 @@ skills:
     enabled: true
   agent_search:
     enabled: true
+  log_inspector:
+    enabled: true
   reminder:
     enabled: true
   email_scanner:
@@ -69,6 +71,7 @@ skills:
     assert deps.skill_manager._skills["code_run"].permission_manager is deps.permission_manager
     assert deps.skill_manager._skills["filesystem"].permission_manager is deps.permission_manager
     assert deps.skill_manager._skills["agent_search"].secrets_path == Path("config/secrets.yaml")
+    assert deps.skill_manager._skills["log_inspector"].structured_store is deps.structured_store
     assert deps.skill_manager._skills["reminder"].structured_store is deps.structured_store
     assert deps.skill_manager._skills["reminder"].scheduler is deps.scheduler
     assert deps.skill_manager._skills["reminder"].auto_confirm is True

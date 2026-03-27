@@ -14,6 +14,9 @@ __pycache__/
 
 # Local sqlite state (should never be committed)
 hypo.db
+guild1.db
+guild1.db-shm
+guild1.db-wal
 
 web/node_modules/
 web/dist/
