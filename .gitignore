@@ -42,3 +42,13 @@ memory_backup_*
 
 # Test sandbox
 test/sandbox/
+
+# Runtime configs (machine-specific, may contain secrets)
+config/config.yaml
+config/email_outage_log.yaml
+
+# Ops scripts (machine-specific)
+Restart_Napcat.sh
+
+# Dev/demo scripts with hardcoded credentials
+scripts/demo_feishu.py
