@@ -70,11 +70,9 @@ def _external_skill_runtime(request: Request, name: str) -> dict[str, Any] | Non
     return None
 
 
-def _disabled_qq_status() -> dict[str, Any]:
+def _disabled_qq_napcat_status() -> dict[str, Any]:
     return {
         "status": "disabled",
-        "qq_bot_enabled": False,
-        "qq_bot_app_id": "",
         "bot_qq": "",
         "napcat_ws_url": "",
         "connected_at": None,
@@ -190,10 +188,10 @@ async def channels_status(request: Request) -> dict[str, Any]:
         and str(qq_bot_config.app_secret or "").strip()
     )
 
-    qq_status = _disabled_qq_status()
+    qq_bot_service = getattr(request.app.state, "qq_bot_channel_service", None)
+    qq_napcat_status: dict[str, Any] | None = _disabled_qq_napcat_status() if qq_enabled else None
     qq_bot_status = _disabled_qq_bot_status()
     if qq_bot_enabled:
-        qq_bot_service = getattr(request.app.state, "qq_bot_channel_service", None)
         if qq_bot_service is not None and hasattr(qq_bot_service, "get_status"):
             qq_bot_status = qq_bot_service.get_status()
         else:
@@ -232,14 +230,15 @@ async def channels_status(request: Request) -> dict[str, Any]:
                 "qq_bot_enabled": bool(qq_bot_config.enabled),
                 "qq_bot_app_id": _mask_app_id(qq_bot_config.app_id),
             }
-        qq_status = {**_disabled_qq_status(), **dict(qq_bot_status)}
-    elif qq_enabled:
+    if qq_enabled:
         qq_client = getattr(request.app.state, "qq_ws_client", None)
         qq_channel_service = getattr(request.app.state, "qq_channel_service", None)
-        if qq_client is not None and hasattr(qq_client, "get_status"):
-            qq_status = qq_client.get_status()
+        if qq_bot_enabled and (qq_channel_service is None or qq_channel_service is qq_bot_service):
+            qq_napcat_status = _disabled_qq_napcat_status()
+        elif qq_client is not None and hasattr(qq_client, "get_status"):
+            qq_napcat_status = qq_client.get_status()
         else:
-            qq_status = {
+            qq_napcat_status = {
                 "status": "disconnected",
                 "bot_qq": str(getattr(qq_channel_service, "bot_qq", "") or ""),
                 "napcat_ws_url": str(getattr(request.app.state, "qq_ws_url", "") or ""),
@@ -252,12 +251,12 @@ async def channels_status(request: Request) -> dict[str, Any]:
             }
         if qq_channel_service is not None and hasattr(qq_channel_service, "get_runtime_status"):
             runtime_status = qq_channel_service.get_runtime_status()
-            qq_status = {
-                **dict(qq_status),
+            qq_napcat_status = {
+                **dict(qq_napcat_status or _disabled_qq_napcat_status()),
                 **runtime_status,
             }
             if runtime_status.get("online") is False:
-                qq_status["status"] = "disconnected"
+                qq_napcat_status["status"] = "disconnected"
 
     email_status = _disabled_email_status()
     email_skill = None
@@ -295,17 +294,25 @@ async def channels_status(request: Request) -> dict[str, Any]:
                 "messages_sent": 0,
             }
 
-    return {
-        "channels": {
-            "webui": connection_manager.get_status(),
-            "qq": qq_status,
-            "qq_bot": qq_bot_status if qq_bot_enabled else _disabled_qq_bot_status(),
-            "weixin": weixin_status,
-            "email": email_status,
-            "heartbeat": heartbeat_status,
-        },
+    channels: dict[str, Any] = {
+        "webui": connection_manager.get_status(),
         "qq_bot": qq_bot_status if qq_bot_enabled else _disabled_qq_bot_status(),
+        "weixin": weixin_status,
+        "email": email_status,
+        "heartbeat": heartbeat_status,
     }
+    if qq_napcat_status is not None:
+        channels["qq_napcat"] = qq_napcat_status
+
+    relay = getattr(request.app.state, "channel_relay", None)
+    last_delivery_for = getattr(relay, "last_delivery_for", None)
+    if callable(last_delivery_for):
+        for channel_name in ("webui", "qq_bot", "qq_napcat", "weixin"):
+            channel_payload = channels.get(channel_name)
+            if isinstance(channel_payload, dict):
+                channel_payload["last_delivery"] = last_delivery_for(channel_name)
+
+    return {"channels": channels}
 
 
 @router.get("/dashboard/token-stats")

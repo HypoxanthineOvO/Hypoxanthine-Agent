@@ -34,6 +34,7 @@ circuit_breaker:
     assert settings.security.directory_whitelist.default_policy == "readonly"
     assert settings.security.directory_whitelist.rules[0].path == "./docs"
     assert settings.security.circuit_breaker.cooldown_seconds == 120
+    assert settings.channels.feishu.enabled is False
 
 
 def test_load_gateway_settings_rejects_missing_token(tmp_path: Path) -> None:
@@ -93,3 +94,34 @@ circuit_breaker:
     assert settings.security.directory_whitelist.rules[0].path == str(repo_root)
     assert settings.security.directory_whitelist.rules[1].path == str(repo_root / "config")
     assert settings.security.directory_whitelist.rules[2].path == str(repo_root / "memory")
+
+
+def test_load_gateway_settings_reads_channel_config_from_config_yaml(tmp_path: Path) -> None:
+    security_yaml = tmp_path / "security.yaml"
+    security_yaml.write_text(
+        """
+auth_token: test-token
+directory_whitelist:
+  rules: []
+  default_policy: readonly
+circuit_breaker:
+  tool_level_max_failures: 3
+  session_level_max_failures: 5
+  cooldown_seconds: 120
+  global_kill_switch: false
+""".strip(),
+        encoding="utf-8",
+    )
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        """
+channels:
+  feishu:
+    enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+
+    settings = load_gateway_settings(security_yaml, config_yaml)
+
+    assert settings.channels.feishu.enabled is True

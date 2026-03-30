@@ -13,6 +13,7 @@ def test_run_starts_uvicorn_with_loaded_settings(
     mock_load_gateway_settings.return_value = SimpleNamespace(
         auth_token="test-token",
         security=SimpleNamespace(),
+        channels=SimpleNamespace(),
     )
     mock_app = object()
     mock_create_app.return_value = mock_app
@@ -23,6 +24,7 @@ def test_run_starts_uvicorn_with_loaded_settings(
     mock_create_app.assert_called_once_with(
         auth_token="test-token",
         security=mock_load_gateway_settings.return_value.security,
+        channels=mock_load_gateway_settings.return_value.channels,
     )
     mock_uvicorn_run.assert_called_once()
     args, kwargs = mock_uvicorn_run.call_args
@@ -42,6 +44,7 @@ def test_port_default(
     mock_load_gateway_settings.return_value = SimpleNamespace(
         auth_token="test-token",
         security=SimpleNamespace(),
+        channels=SimpleNamespace(),
     )
     mock_app = object()
     mock_create_app.return_value = mock_app
@@ -62,6 +65,7 @@ def test_port_from_env(
     mock_load_gateway_settings.return_value = SimpleNamespace(
         auth_token="test-token",
         security=SimpleNamespace(),
+        channels=SimpleNamespace(),
     )
     mock_app = object()
     mock_create_app.return_value = mock_app
@@ -83,6 +87,7 @@ def test_port_defaults_to_test_mode_port(
     mock_load_gateway_settings.return_value = SimpleNamespace(
         auth_token="test-token",
         security=SimpleNamespace(),
+        channels=SimpleNamespace(),
     )
     mock_app = object()
     mock_create_app.return_value = mock_app

@@ -104,14 +104,22 @@ interface WebUiChannelStatus {
   last_message_at: string | null;
 }
 
-interface QQChannelStatus {
+interface QQBotChannelStatus {
   status: string;
   qq_bot_enabled?: boolean;
   qq_bot_app_id?: string;
   ws_connected?: boolean;
   connected_at?: string | null;
+  last_message_at: string | null;
+  messages_received: number;
+  messages_sent: number;
+}
+
+interface QQNapcatChannelStatus {
+  status: string;
   bot_qq: string;
   napcat_ws_url: string;
+  connected_at?: string | null;
   last_message_at: string | null;
   messages_received: number;
   messages_sent: number;
@@ -145,7 +153,8 @@ interface HeartbeatChannelStatus {
 interface ChannelsStatusResponse {
   channels: {
     webui: WebUiChannelStatus;
-    qq: QQChannelStatus;
+    qq_bot: QQBotChannelStatus;
+    qq_napcat?: QQNapcatChannelStatus;
     weixin: WeixinChannelStatus;
     email: EmailChannelStatus;
     heartbeat: HeartbeatChannelStatus;
@@ -164,7 +173,8 @@ interface ChannelCard {
 
 interface ChannelCardMap {
   webui: ChannelCard;
-  qq: ChannelCard;
+  qqBot: ChannelCard;
+  qqNapcat: ChannelCard | null;
   weixin: ChannelCard;
   email: ChannelCard;
   heartbeat: ChannelCard;
@@ -321,7 +331,7 @@ const channelTagType = (
   if (["connected", "running", "enabled"].includes(status)) {
     return "success";
   }
-  if (["connecting", "scanning"].includes(status)) {
+  if (["connecting", "scanning", "no_token"].includes(status)) {
     return "warning";
   }
   if (["disconnected", "error", "open"].includes(status)) {
@@ -348,6 +358,8 @@ const channelStatusLabel = (status: string): string => {
       return "🔴 异常";
     case "disabled":
       return "⚪ 已禁用";
+    case "no_token":
+      return "🟡 缺少 Token";
     default:
       return status || "未知";
   }
@@ -379,58 +391,98 @@ const createChannelCard = (
   details,
 });
 
+const defaultQQBotStatus = (): QQBotChannelStatus => ({
+  status: "disabled",
+  qq_bot_enabled: false,
+  qq_bot_app_id: "",
+  ws_connected: false,
+  connected_at: null,
+  last_message_at: null,
+  messages_received: 0,
+  messages_sent: 0,
+});
+
+const defaultWeixinStatus = (): WeixinChannelStatus => ({
+  status: "disabled",
+  bot_id: "",
+  user_id: "",
+  last_message_at: null,
+  messages_received: 0,
+  messages_sent: 0,
+});
+
+const defaultEmailStatus = (): EmailChannelStatus => ({
+  status: "disabled",
+  accounts: [],
+  last_scan_at: null,
+  next_scan_at: null,
+  emails_processed: 0,
+});
+
+const defaultHeartbeatStatus = (): HeartbeatChannelStatus => ({
+  status: "disabled",
+  last_heartbeat_at: null,
+  active_tasks: 0,
+});
+
 const channelCardMap = computed<ChannelCardMap>(() => {
   const payload = channels.value;
   if (!payload) {
     return {
       webui: createLoadingChannelCard("webui", "🖥️", "WebUI"),
-      qq: createLoadingChannelCard("qq", "🐧", "QQ"),
+      qqBot: createLoadingChannelCard("qq_bot", "🐧", "QQ Bot"),
+      qqNapcat: null,
       weixin: createLoadingChannelCard("weixin", "💬", "微信"),
       email: createLoadingChannelCard("email", "📧", "邮箱"),
       heartbeat: createLoadingChannelCard("heartbeat", "💓", "心跳"),
     };
   }
 
+  const qqBot = payload.qq_bot ?? defaultQQBotStatus();
+  const weixin = payload.weixin ?? defaultWeixinStatus();
+  const email = payload.email ?? defaultEmailStatus();
+  const heartbeat = payload.heartbeat ?? defaultHeartbeatStatus();
+
   return {
     webui: createChannelCard("webui", "🖥️", "WebUI", payload.webui.status, [
       `活跃连接 ${payload.webui.active_connections}`,
       `最后消息 ${formatRelativeTime(payload.webui.last_message_at)}`,
     ]),
-    qq: createChannelCard(
-      "qq",
+    qqBot: createChannelCard(
+      "qq_bot",
       "🐧",
-      "QQ",
-      payload.qq.status,
-      payload.qq.qq_bot_enabled
-        ? [
-            "官方 Bot 通道",
-            `App ID ${payload.qq.qq_bot_app_id || "未配置"}`,
-            `WS ${payload.qq.ws_connected ? "已连接" : "未连接"}`,
-            `收 ${payload.qq.messages_received} / 发 ${payload.qq.messages_sent}`,
-            `最后消息 ${formatRelativeTime(payload.qq.last_message_at)}`,
-          ]
-        : [
-            `Bot QQ ${payload.qq.bot_qq || "未配置"}`,
-            payload.qq.napcat_ws_url || "未配置 WS URL",
-            `收 ${payload.qq.messages_received} / 发 ${payload.qq.messages_sent}`,
-            `最后消息 ${formatRelativeTime(payload.qq.last_message_at)}`,
-          ],
+      "QQ Bot",
+      qqBot.status,
+      [
+        `App ID ${qqBot.qq_bot_app_id || "未配置"}`,
+        `WS ${qqBot.ws_connected ? "已连接" : "未连接"}`,
+        `收 ${qqBot.messages_received} / 发 ${qqBot.messages_sent}`,
+        `最后消息 ${formatRelativeTime(qqBot.last_message_at)}`,
+      ],
     ),
-    weixin: createChannelCard("weixin", "💬", "微信", payload.weixin.status, [
-      `Bot ID ${payload.weixin.bot_id || "未登录"}`,
-      `目标用户 ${payload.weixin.user_id || "未绑定"}`,
-      `收 ${payload.weixin.messages_received} / 发 ${payload.weixin.messages_sent}`,
-      `最后消息 ${formatRelativeTime(payload.weixin.last_message_at)}`,
+    qqNapcat: payload.qq_napcat
+      ? createChannelCard("qq_napcat", "📡", "QQ NapCat", payload.qq_napcat.status, [
+          `Bot QQ ${payload.qq_napcat.bot_qq || "未配置"}`,
+          payload.qq_napcat.napcat_ws_url || "未配置 WS URL",
+          `收 ${payload.qq_napcat.messages_received} / 发 ${payload.qq_napcat.messages_sent}`,
+          `最后消息 ${formatRelativeTime(payload.qq_napcat.last_message_at)}`,
+        ])
+      : null,
+    weixin: createChannelCard("weixin", "💬", "微信", weixin.status, [
+      `Bot ID ${weixin.bot_id || "未登录"}`,
+      `目标用户 ${weixin.user_id || "未绑定"}`,
+      `收 ${weixin.messages_received} / 发 ${weixin.messages_sent}`,
+      `最后消息 ${formatRelativeTime(weixin.last_message_at)}`,
     ]),
-    email: createChannelCard("email", "📧", "邮箱", payload.email.status, [
-      payload.email.accounts.join(", ") || "未配置邮箱账号",
-      `上次扫描 ${formatRelativeTime(payload.email.last_scan_at)}`,
-      `下次扫描 ${formatRelativeTime(payload.email.next_scan_at)}`,
-      `累计处理 ${payload.email.emails_processed} 封`,
+    email: createChannelCard("email", "📧", "邮箱", email.status, [
+      email.accounts.join(", ") || "未配置邮箱账号",
+      `上次扫描 ${formatRelativeTime(email.last_scan_at)}`,
+      `下次扫描 ${formatRelativeTime(email.next_scan_at)}`,
+      `累计处理 ${email.emails_processed} 封`,
     ]),
-    heartbeat: createChannelCard("heartbeat", "💓", "心跳", payload.heartbeat.status, [
-      `最后心跳 ${formatRelativeTime(payload.heartbeat.last_heartbeat_at)}`,
-      `active tasks ${payload.heartbeat.active_tasks}`,
+    heartbeat: createChannelCard("heartbeat", "💓", "心跳", heartbeat.status, [
+      `最后心跳 ${formatRelativeTime(heartbeat.last_heartbeat_at)}`,
+      `active tasks ${heartbeat.active_tasks}`,
     ]),
   };
 });
@@ -809,11 +861,21 @@ onUnmounted(() => {
 
       <n-grid-item>
         <ChannelStatusCard
-          :title="channelCardMap.qq.name"
-          :icon="channelCardMap.qq.icon"
-          :status-label="channelCardMap.qq.statusLabel"
-          :tag-type="channelCardMap.qq.tagType"
-          :details="channelCardMap.qq.details"
+          :title="channelCardMap.qqBot.name"
+          :icon="channelCardMap.qqBot.icon"
+          :status-label="channelCardMap.qqBot.statusLabel"
+          :tag-type="channelCardMap.qqBot.tagType"
+          :details="channelCardMap.qqBot.details"
+        />
+      </n-grid-item>
+
+      <n-grid-item v-if="channelCardMap.qqNapcat">
+        <ChannelStatusCard
+          :title="channelCardMap.qqNapcat.name"
+          :icon="channelCardMap.qqNapcat.icon"
+          :status-label="channelCardMap.qqNapcat.statusLabel"
+          :tag-type="channelCardMap.qqNapcat.tagType"
+          :details="channelCardMap.qqNapcat.details"
         />
       </n-grid-item>
 

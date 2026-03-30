@@ -76,13 +76,11 @@ describe("DashboardView", () => {
           active_connections: 1,
           last_message_at: new Date().toISOString(),
         },
-        qq: {
+        qq_bot: {
           status: "connected",
           qq_bot_enabled: true,
           qq_bot_app_id: "••••4756",
           ws_connected: true,
-          bot_qq: "",
-          napcat_ws_url: "",
           connected_at: null,
           last_message_at: new Date().toISOString(),
           messages_received: 3,
@@ -253,7 +251,7 @@ describe("DashboardView", () => {
 
     expect(wrapper.text()).toContain("系统状态");
     expect(wrapper.text()).toContain("QQ");
-    expect(wrapper.text()).toContain("官方 Bot 通道");
+    expect(wrapper.text()).toContain("QQ Bot");
     expect(wrapper.text()).toContain("••••4756");
     expect(wrapper.text()).toContain("WS 已连接");
     expect(wrapper.text()).toContain("收 3 / 发 2");
@@ -268,7 +266,7 @@ describe("DashboardView", () => {
     expect(dashboardSource).toContain('import ChannelStatusCard from "../components/dashboard/ChannelStatusCard.vue";');
     expect(dashboardSource).not.toContain("WeixinStatusCard");
     expect(dashboardSource).toContain(':title="channelCardMap.webui.name"');
-    expect(dashboardSource).toContain(':title="channelCardMap.qq.name"');
+    expect(dashboardSource).toContain(':title="channelCardMap.qqBot.name"');
     expect(dashboardSource).toContain(':title="channelCardMap.weixin.name"');
   });
 
@@ -466,13 +464,11 @@ describe("DashboardView", () => {
           json: async () => ({
             channels: {
               webui: { status: "connected", active_connections: 1, last_message_at: new Date().toISOString() },
-              qq: {
+              qq_bot: {
                 status: "connected",
                 qq_bot_enabled: true,
                 qq_bot_app_id: "••••4756",
                 ws_connected: true,
-                bot_qq: "",
-                napcat_ws_url: "",
                 connected_at: null,
                 last_message_at: new Date().toISOString(),
                 messages_received: 3,

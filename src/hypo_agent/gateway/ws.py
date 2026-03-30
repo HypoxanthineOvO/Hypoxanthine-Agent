@@ -165,15 +165,16 @@ async def websocket_chat(ws: WebSocket) -> None:
             )
             session_id = inbound.session_id
             connection_manager.record_activity()
-            await broadcast_message(
-                inbound.model_dump(mode="json"),
-                exclude_client_ids={client_id},
-            )
-            mirror = getattr(ws.app.state, "mirror_webui_message_to_qq", None)
-            if callable(mirror):
-                mirror_result = mirror(inbound)
-                if asyncio.iscoroutine(mirror_result):
-                    await mirror_result
+            proactive_callback = getattr(ws.app.state.pipeline, "on_proactive_message", None)
+            if callable(proactive_callback):
+                callback_result = proactive_callback(
+                    inbound,
+                    message_type="user_message",
+                    origin_channel="webui",
+                    origin_client_id=client_id,
+                )
+                if asyncio.iscoroutine(callback_result):
+                    await callback_result
             pipeline: ChatPipeline = ws.app.state.pipeline
             async for event in pipeline.stream_reply(inbound):
                 await ws.send_json(_normalize_event_timestamp(dict(event)))

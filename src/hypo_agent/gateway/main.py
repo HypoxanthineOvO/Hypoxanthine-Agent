@@ -11,7 +11,11 @@ from hypo_agent.gateway.settings import load_gateway_settings
 def build_app():
     configure_logging()
     settings = load_gateway_settings()
-    return create_app(auth_token=settings.auth_token, security=settings.security)
+    return create_app(
+        auth_token=settings.auth_token,
+        security=settings.security,
+        channels=settings.channels,
+    )
 
 
 def run(host: str = "0.0.0.0", port: int | None = None) -> None:

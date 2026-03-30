@@ -172,19 +172,18 @@ services:
     payload = response.json()
     assert payload["channels"]["webui"]["status"] == "connected"
     assert payload["channels"]["webui"]["active_connections"] == 1
-    assert payload["channels"]["qq"]["status"] == "connected"
-    assert payload["channels"]["qq"]["qq_bot_enabled"] is True
-    assert payload["channels"]["qq"]["qq_bot_app_id"] == "••••4756"
-    assert payload["channels"]["qq"]["ws_connected"] is True
+    assert payload["channels"]["qq_bot"]["status"] == "connected"
+    assert payload["channels"]["qq_bot"]["qq_bot_enabled"] is True
+    assert payload["channels"]["qq_bot"]["qq_bot_app_id"] == "••••4756"
+    assert payload["channels"]["qq_bot"]["ws_connected"] is True
     assert payload["channels"]["weixin"]["status"] == "connected"
     assert payload["channels"]["weixin"]["bot_id"] == "wx-bot-1"
-    assert payload["channels"]["qq"]["messages_received"] == 3
+    assert payload["channels"]["qq_bot"]["messages_received"] == 3
     assert payload["channels"]["email"]["status"] == "enabled"
     assert payload["channels"]["email"]["accounts"] == ["hyx021203@shanghaitech.edu.cn"]
     assert payload["channels"]["heartbeat"]["status"] == "running"
     assert payload["channels"]["heartbeat"]["active_tasks"] == 2
-    assert payload["channels"]["qq_bot"]["qq_bot_app_id"] == "••••4756"
-    assert payload["qq_bot"]["status"] == "connected"
+    assert "qq_napcat" not in payload["channels"]
 
 
 def test_channels_status_returns_disabled_when_qq_not_enabled(tmp_path, monkeypatch) -> None:
@@ -214,7 +213,8 @@ skills:
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["channels"]["qq"]["status"] == "disabled"
+    assert payload["channels"]["qq_bot"]["status"] == "disabled"
+    assert "qq_napcat" not in payload["channels"]
     assert payload["channels"]["weixin"]["status"] == "disabled"
 
 
@@ -252,9 +252,10 @@ services:
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["channels"]["qq"]["qq_bot_enabled"] is True
-    assert payload["channels"]["qq"]["qq_bot_app_id"] == "••••4756"
-    assert payload["channels"]["qq"]["status"] == "enabled"
+    assert payload["channels"]["qq_bot"]["qq_bot_enabled"] is True
+    assert payload["channels"]["qq_bot"]["qq_bot_app_id"] == "••••4756"
+    assert payload["channels"]["qq_bot"]["status"] == "enabled"
+    assert payload["channels"]["qq_napcat"]["status"] == "disabled"
 
 
 def test_channels_status_returns_disabled_when_email_not_enabled(tmp_path, monkeypatch) -> None:
@@ -308,5 +309,5 @@ skills:
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["channels"]["qq"]["status"] == "disconnected"
-    assert payload["channels"]["qq"]["online"] is False
+    assert payload["channels"]["qq_napcat"]["status"] == "disconnected"
+    assert payload["channels"]["qq_napcat"]["online"] is False

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from hypo_agent.core.event_queue import EventQueue
 from hypo_agent.channels.qq_channel import QQChannelService
+from hypo_agent.core.unified_message import UnifiedMessage
 from hypo_agent.core.pipeline import ChatPipeline
 from hypo_agent.gateway.app import AppDeps, create_app
 from hypo_agent.memory.session import SessionMemory
@@ -120,7 +121,7 @@ def test_qq_inbound_message_syncs_user_and_reply_to_webui(tmp_path: Path) -> Non
             inbound = ws.receive_json()
             outbound = ws.receive_json()
 
-    assert inbound["text"] == "你好，来自 QQ"
+    assert inbound["text"] == "[QQ] 你好，来自 QQ"
     assert inbound["sender"] == "user"
     assert inbound["channel"] == "qq"
     assert outbound["text"] == "QQ ASSISTANT REPLY"
@@ -128,73 +129,47 @@ def test_qq_inbound_message_syncs_user_and_reply_to_webui(tmp_path: Path) -> Non
     assert outbound["channel"] == "qq"
 
 
-def test_webui_origin_conversation_is_mirrored_to_qq_notifications(tmp_path: Path) -> None:
+def test_webui_origin_conversation_is_relayed_to_qq(tmp_path: Path) -> None:
     long_reply = "A" * 520
     app = _make_app(tmp_path, reply=long_reply)
-    mirrored: list[str] = []
+    relayed: list[str] = []
 
-    class ConnectedQQClient:
-        status = "connected"
-
-        def get_status(self) -> dict[str, str]:
-            return {"status": "connected"}
-
-        async def stop(self) -> None:
-            return None
-
-    class MirrorQQService:
-        async def send_message(self, message: Message) -> None:
-            mirrored.append(str(message.text or ""))
+    async def fake_qq_push(message: UnifiedMessage) -> None:
+        relayed.append(str(message.raw_text or message.plain_text()))
 
     with TestClient(app) as client:
-        client.app.state.qq_ws_client = ConnectedQQClient()
-        client.app.state.qq_channel_service = MirrorQQService()
+        client.app.state.channel_dispatcher.register("qq", fake_qq_push, platform="qq", is_external=True)
 
         with client.websocket_connect("/ws?token=test-token") as ws:
             ws.send_json({"text": "mirror me", "sender": "user", "session_id": "main"})
             ws.receive_json()
             ws.receive_json()
 
-    assert mirrored[0] == "[WebUI] User: mirror me"
-    assert mirrored[1] == f"[WebUI] Assistant: {long_reply}"
+    assert relayed == ["[WebUI] mirror me", long_reply]
 
 
-def test_non_main_webui_session_does_not_mirror_to_external_channels(tmp_path: Path) -> None:
+def test_non_main_webui_session_does_not_relay_to_external_channels(tmp_path: Path) -> None:
     app = _make_app(tmp_path, reply="DEBUG REPLY")
-    mirrored_qq: list[str] = []
-    mirrored_weixin: list[str] = []
+    relayed_qq: list[str] = []
+    relayed_weixin: list[str] = []
 
-    class ConnectedQQClient:
-        status = "connected"
+    async def fake_qq_push(message: UnifiedMessage) -> None:
+        relayed_qq.append(str(message.raw_text or message.plain_text()))
 
-        def get_status(self) -> dict[str, str]:
-            return {"status": "connected"}
-
-        async def stop(self) -> None:
-            return None
-
-    class MirrorQQService:
-        async def send_message(self, message: Message) -> None:
-            mirrored_qq.append(str(message.text or ""))
-
-        def is_runtime_online(self) -> bool:
-            return True
-
-    async def fake_weixin_push(message: Message) -> None:
-        mirrored_weixin.append(str(message.text or ""))
+    async def fake_weixin_push(message: UnifiedMessage) -> None:
+        relayed_weixin.append(str(message.raw_text or message.plain_text()))
 
     with TestClient(app) as client:
-        client.app.state.qq_ws_client = ConnectedQQClient()
-        client.app.state.qq_channel_service = MirrorQQService()
-        client.app.state.channel_dispatcher.register("weixin", fake_weixin_push)
+        client.app.state.channel_dispatcher.register("qq", fake_qq_push, platform="qq", is_external=True)
+        client.app.state.channel_dispatcher.register("weixin", fake_weixin_push, platform="weixin", is_external=True)
 
         with client.websocket_connect("/ws?token=test-token") as ws:
             ws.send_json({"text": "hidden session", "sender": "user", "session_id": "debug-session"})
             ws.receive_json()
             ws.receive_json()
 
-    assert mirrored_qq == []
-    assert mirrored_weixin == []
+    assert relayed_qq == []
+    assert relayed_weixin == []
 
 
 def test_proactive_messages_honor_target_channels(tmp_path: Path) -> None:
@@ -202,15 +177,15 @@ def test_proactive_messages_honor_target_channels(tmp_path: Path) -> None:
     qq_pushed: list[str] = []
     weixin_pushed: list[str] = []
 
-    async def fake_qq_push(message: Message) -> None:
-        qq_pushed.append(str(message.text or ""))
+    async def fake_qq_push(message: UnifiedMessage) -> None:
+        qq_pushed.append(str(message.raw_text or message.plain_text()))
 
-    async def fake_weixin_push(message: Message) -> None:
-        weixin_pushed.append(str(message.text or ""))
+    async def fake_weixin_push(message: UnifiedMessage) -> None:
+        weixin_pushed.append(str(message.raw_text or message.plain_text()))
 
     with TestClient(app) as client:
-        client.app.state.channel_dispatcher.register("qq", fake_qq_push)
-        client.app.state.channel_dispatcher.register("weixin", fake_weixin_push)
+        client.app.state.channel_dispatcher.register("qq", fake_qq_push, platform="qq", is_external=True)
+        client.app.state.channel_dispatcher.register("weixin", fake_weixin_push, platform="weixin", is_external=True)
 
         asyncio.run(
             client.app.state.pipeline.on_proactive_message(
@@ -220,7 +195,8 @@ def test_proactive_messages_honor_target_channels(tmp_path: Path) -> None:
                     session_id="main",
                     channel="system",
                     metadata={"target_channels": ["weixin"]},
-                )
+                ),
+                message_type="ai_reply",
             )
         )
 
