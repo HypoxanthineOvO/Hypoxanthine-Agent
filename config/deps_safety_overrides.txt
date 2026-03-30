@@ -1,0 +1,6 @@
+# Dependency safety policy
+#
+# Litellm has had reported malicious releases in some 1.82.7+ pip artifacts.
+# Pin to known-safe range unless explicitly upgraded after verification.
+
+litellm<1.82.7
