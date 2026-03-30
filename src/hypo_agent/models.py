@@ -209,7 +209,7 @@ class TaskScheduleConfig(BaseModel):
         return self
 
 
-class TrendRadarSummaryTaskConfig(TaskScheduleConfig):
+class HypoInfoDigestTaskConfig(TaskScheduleConfig):
     model_config = ConfigDict(extra="forbid")
 
     time: str | None = None
@@ -229,7 +229,7 @@ class TasksConfig(BaseModel):
 
     heartbeat: TaskScheduleConfig = Field(default_factory=TaskScheduleConfig)
     email_store: EmailStoreTaskConfig = Field(default_factory=EmailStoreTaskConfig)
-    trendradar_summary: TrendRadarSummaryTaskConfig = Field(default_factory=TrendRadarSummaryTaskConfig)
+    hypo_info_digest: HypoInfoDigestTaskConfig = Field(default_factory=HypoInfoDigestTaskConfig)
 
 
 class WhitelistRule(BaseModel):

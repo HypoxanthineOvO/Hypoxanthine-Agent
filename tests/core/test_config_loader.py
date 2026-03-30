@@ -13,6 +13,7 @@ from hypo_agent.core.config_loader import (
     load_runtime_model_config,
     load_tasks_config,
 )
+from hypo_agent.models import SecretsConfig
 
 
 def test_load_runtime_model_config_merges_models_and_secrets(tmp_path: Path) -> None:
@@ -179,7 +180,7 @@ providers:
         load_runtime_model_config(models_yaml, secrets_yaml)
 
 
-def test_load_tasks_config_accepts_heartbeat_email_store_and_trendradar_summary(tmp_path: Path) -> None:
+def test_load_tasks_config_accepts_heartbeat_email_store_and_hypo_info_digest(tmp_path: Path) -> None:
     tasks_yaml = tmp_path / "tasks.yaml"
     tasks_yaml.write_text(
         """
@@ -192,7 +193,7 @@ email_store:
   max_entries: 4000
   retention_days: 60
   warmup_hours: 72
-trendradar_summary:
+hypo_info_digest:
   enabled: true
   interval_minutes: 480
   time: "09:00,21:00"
@@ -209,9 +210,39 @@ trendradar_summary:
     assert tasks.email_store.max_entries == 4000
     assert tasks.email_store.retention_days == 60
     assert tasks.email_store.warmup_hours == 72
-    assert tasks.trendradar_summary.enabled is True
-    assert tasks.trendradar_summary.interval_minutes == 480
-    assert tasks.trendradar_summary.time == "09:00,21:00"
+    assert tasks.hypo_info_digest.enabled is True
+    assert tasks.hypo_info_digest.interval_minutes == 480
+    assert tasks.hypo_info_digest.time == "09:00,21:00"
+
+
+def test_load_tasks_config_accepts_hypo_info_digest(tmp_path: Path) -> None:
+    tasks_yaml = tmp_path / "tasks.yaml"
+    tasks_yaml.write_text(
+        """
+hearbeat:
+  enabled: true
+hypo_info_digest:
+  enabled: true
+  interval_minutes: 480
+  time: "09:00,21:00"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    tasks = load_tasks_config(tasks_yaml)
+
+    assert tasks.hypo_info_digest.enabled is True
+    assert tasks.hypo_info_digest.interval_minutes == 480
+    assert tasks.hypo_info_digest.time == "09:00,21:00"
+
+
+def test_secrets_config_accepts_services_hypo_info_default_shape() -> None:
+    config = SecretsConfig.model_validate(
+        {"providers": {}, "services": {"hypo_info": {"base_url": "http://localhost:8200"}}}
+    )
+    assert config.services is not None
+    assert config.services.hypo_info is not None
+    assert config.services.hypo_info.base_url == "http://localhost:8200"
 
 
 def test_load_tasks_config_accepts_heartbeat_cron_schedule(tmp_path: Path) -> None:
