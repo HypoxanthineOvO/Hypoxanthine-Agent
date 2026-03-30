@@ -18,7 +18,7 @@ email_store:
   max_entries: 5000
   retention_days: 90
   warmup_hours: 168
-trendradar_summary:
+hypo_info_digest:
   enabled: true
   interval_minutes: 480
-  time: "10:00,15:00,21:00"
+  time: "09:00,21:00"

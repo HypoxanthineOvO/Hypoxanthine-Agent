@@ -16,9 +16,6 @@ directory_whitelist:
       permissions:
         - read
         - write
-    - path: ~/trendradar/output
-      permissions:
-        - read
     - path: ${HYPO_AGENT_ROOT}/workflows
       permissions:
         - read

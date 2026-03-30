@@ -447,6 +447,17 @@ def test_default_persona_mentions_directory_index_knowledge_file(
     assert "memory/knowledge/directory_index.yaml" in rendered
 
 
+def test_runtime_configs_use_hypo_info_defaults() -> None:
+    tasks_text = Path("config/tasks.yaml").read_text(encoding="utf-8")
+    security_text = Path("config/security.yaml").read_text(encoding="utf-8")
+    skills_text = Path("config/skills.yaml").read_text(encoding="utf-8")
+
+    assert "hypo_info_digest:" in tasks_text
+    assert "trendradar_summary:" not in tasks_text
+    assert "~/trendradar/output" not in security_text
+    assert "output_root:" not in skills_text
+
+
 def test_load_narration_config_accepts_tool_levels(tmp_path: Path) -> None:
     narration_yaml = tmp_path / "narration.yaml"
     narration_yaml.write_text(

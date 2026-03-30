@@ -23,7 +23,6 @@ skills:
     service_name: hypo-agent
   info_reach:
     enabled: true
-    output_root: ~/trendradar/output
   export:
     enabled: true
   qq:
