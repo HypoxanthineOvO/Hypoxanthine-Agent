@@ -182,7 +182,7 @@ def _register_enabled_skills(
     auto_confirm = bool(reminder_cfg.get("auto_confirm", True))
     email_mark_as_read = bool(email_scanner_cfg.get("mark_as_read", True))
     info_max_items = int(info_cfg.get("max_items", 15))
-    trendradar_output_root = str(info_reach_cfg.get("output_root", "~/trendradar/output"))
+    _hypo_info_base_url = str(info_reach_cfg.get("base_url", "")).strip() or "http://localhost:8200"
     log_service_name = str(log_inspector_cfg.get("service_name", "hypo-agent"))
 
     if "tmux" in enabled_skills:
@@ -242,15 +242,13 @@ def _register_enabled_skills(
             )
         )
 
-    if "info_reach" in enabled_skills and structured_store is not None:
+    if "info_reach" in enabled_skills:
         skill_manager.register(
             InfoReachSkill(
-                structured_store=structured_store,
-                permission_manager=permission_manager,
-                model_router=model_router,
                 message_queue=message_queue,
                 heartbeat_service=heartbeat_service,
-                output_root=trendradar_output_root,
+                db_path=structured_store.db_path if structured_store is not None else None,
+                base_url=_hypo_info_base_url,
             )
         )
 
@@ -846,33 +844,33 @@ def create_app(
                             )
                         info_reach_skill = resolved_deps.skill_manager._skills.get("info_reach")
                         if (
-                            getattr(tasks_cfg, "trendradar_summary", None) is not None
+                            getattr(tasks_cfg, "hypo_info_digest", None) is not None
                             and info_reach_skill is not None
                             and hasattr(info_reach_skill, "run_scheduled_summary")
                         ):
-                            trend_cfg = tasks_cfg.trendradar_summary
-                            if bool(getattr(trend_cfg, "enabled", False)):
-                                fixed_times = str(getattr(trend_cfg, "time", "") or "").strip()
+                            digest_cfg = tasks_cfg.hypo_info_digest
+                            if bool(getattr(digest_cfg, "enabled", False)):
+                                fixed_times = str(getattr(digest_cfg, "time", "") or "").strip()
                                 if fixed_times and hasattr(resolved_deps.scheduler, "register_cron_job"):
                                     for hour, minute in _parse_fixed_times(fixed_times):
                                         resolved_deps.scheduler.register_cron_job(
-                                            f"trendradar_summary_{hour:02d}{minute:02d}",
+                                            f"hypo_info_digest_{hour:02d}{minute:02d}",
                                             f"{minute} {hour} * * *",
                                             info_reach_skill.run_scheduled_summary,
                                         )
                                 elif (
-                                    getattr(trend_cfg, "mode", "interval") == "cron"
+                                    getattr(digest_cfg, "mode", "interval") == "cron"
                                     and hasattr(resolved_deps.scheduler, "register_cron_job")
                                 ):
                                     resolved_deps.scheduler.register_cron_job(
-                                        "trendradar_summary",
-                                        str(getattr(trend_cfg, "cron", "") or "").strip(),
+                                        "hypo_info_digest",
+                                        str(getattr(digest_cfg, "cron", "") or "").strip(),
                                         info_reach_skill.run_scheduled_summary,
                                     )
                                 elif hasattr(resolved_deps.scheduler, "register_interval_job"):
                                     resolved_deps.scheduler.register_interval_job(
-                                        "trendradar_summary",
-                                        int(getattr(trend_cfg, "interval_minutes", 480) or 480),
+                                        "hypo_info_digest",
+                                        int(getattr(digest_cfg, "interval_minutes", 480) or 480),
                                         info_reach_skill.run_scheduled_summary,
                                     )
                     if (

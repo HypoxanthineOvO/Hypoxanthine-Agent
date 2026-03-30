@@ -507,18 +507,18 @@ def test_heartbeat_appends_registered_event_source_context_to_prompt(tmp_path: P
 
         async def fake_source() -> dict[str, Any]:
             return {
-                "name": "trendradar",
+                "name": "hypo_info",
                 "new_items": 1,
                 "items": [{"subscription": "ai-watch", "title": "阿里云 AI 产品涨价"}],
             }
 
-        service.register_event_source("trendradar", fake_source)
+        service.register_event_source("hypo_info", fake_source)
 
         result = await service.run()
 
         assert result["should_push"] is False
         inbound = queue.events[0]["message"]
-        assert "trendradar" in inbound.text
+        assert "hypo_info" in inbound.text
         assert "阿里云 AI 产品涨价" in inbound.text
 
     asyncio.run(_run())
@@ -550,13 +550,13 @@ def test_heartbeat_event_source_failure_is_isolated_and_reported(tmp_path: Path,
             return {"items": [{"title": "正常条目"}]}
 
         service.register_event_source("notion_todo", broken_source)
-        service.register_event_source("trendradar", working_source)
+        service.register_event_source("hypo_info", working_source)
 
         result = await service.run()
 
         assert result["should_push"] is False
         assert result["event_sources"]["notion_todo"]["status"] == "timeout"
-        assert result["event_sources"]["trendradar"]["status"] == "success"
+        assert result["event_sources"]["hypo_info"]["status"] == "success"
         inbound = queue.events[0]["message"]
         assert "正常条目" in inbound.text
         assert "notion api timeout" not in inbound.text

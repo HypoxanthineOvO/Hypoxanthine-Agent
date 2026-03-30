@@ -1611,8 +1611,8 @@ class ChatPipeline:
                 metadata=self._event_message_metadata(event),
             )
 
-        if event_type == "trendradar_trigger":
-            header = title or "TrendRadar 更新"
+        if event_type == "hypo_info_trigger":
+            header = title or "Hypo-Info 更新"
             body = summary or description
             text = header
             if body:

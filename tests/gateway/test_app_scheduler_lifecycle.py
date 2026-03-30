@@ -284,7 +284,7 @@ heartbeat:
         assert scheduler.cron_jobs == [("heartbeat", "*/10 * * * *")]
 
 
-def test_app_registers_trendradar_summary_jobs_from_tasks_config(tmp_path) -> None:
+def test_app_registers_hypo_info_digest_jobs_from_tasks_config(tmp_path) -> None:
     scheduler = RecordingScheduler()
     pipeline = RecordingPipeline()
 
@@ -294,7 +294,7 @@ def test_app_registers_trendradar_summary_jobs_from_tasks_config(tmp_path) -> No
         """
 heartbeat:
   enabled: false
-trendradar_summary:
+hypo_info_digest:
   enabled: true
   interval_minutes: 480
   time: "09:00,21:00"
@@ -323,8 +323,8 @@ trendradar_summary:
     with TestClient(app):
         assert scheduler.interval_jobs == []
         assert scheduler.cron_jobs == [
-            ("trendradar_summary_0900", "0 9 * * *"),
-            ("trendradar_summary_2100", "0 21 * * *"),
+            ("hypo_info_digest_0900", "0 9 * * *"),
+            ("hypo_info_digest_2100", "0 21 * * *"),
         ]
 
 
@@ -366,7 +366,7 @@ heartbeat:
         assert heartbeat_service.prompt_path == config_dir / "heartbeat_prompt.md"
 
 
-def test_app_registers_trendradar_summary_jobs_from_fixed_times(tmp_path) -> None:
+def test_app_registers_hypo_info_digest_jobs_from_fixed_times(tmp_path) -> None:
     scheduler = RecordingScheduler()
     pipeline = RecordingPipeline()
 
@@ -376,7 +376,7 @@ def test_app_registers_trendradar_summary_jobs_from_fixed_times(tmp_path) -> Non
         """
 heartbeat:
   enabled: false
-trendradar_summary:
+hypo_info_digest:
   enabled: true
   interval_minutes: 480
   time: "09:00,21:00"
@@ -403,8 +403,8 @@ trendradar_summary:
     app.state.config_dir = config_dir
 
     with TestClient(app):
-        assert ("trendradar_summary_0900", "0 9 * * *") in scheduler.cron_jobs
-        assert ("trendradar_summary_2100", "0 21 * * *") in scheduler.cron_jobs
+        assert ("hypo_info_digest_0900", "0 9 * * *") in scheduler.cron_jobs
+        assert ("hypo_info_digest_2100", "0 21 * * *") in scheduler.cron_jobs
 
 
 def test_app_ignores_legacy_email_scan_interval_config(tmp_path) -> None:

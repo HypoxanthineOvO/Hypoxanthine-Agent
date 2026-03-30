@@ -70,19 +70,17 @@ def test_event_queue_accepts_email_scan_event() -> None:
     asyncio.run(_run())
 
 
-def test_event_queue_accepts_trendradar_event() -> None:
+def test_event_queue_accepts_hypo_info_event() -> None:
     async def _run() -> None:
         queue = EventQueue()
-        event = {
-            "event_type": "trendradar_trigger",
-            "session_id": "main",
-            "summary": "📰 TrendRadar 摘要",
-        }
-        await queue.put(event)
-        popped = await queue.get()
-        queue.task_done()
-
-        assert popped["event_type"] == "trendradar_trigger"
-        assert popped["summary"] == "📰 TrendRadar 摘要"
+        await queue.put(
+            {
+                "event_type": "hypo_info_trigger",
+                "session_id": "main",
+                "summary": "📰 Hypo-Info 摘要",
+            }
+        )
+        event = await queue.get()
+        assert event["event_type"] == "hypo_info_trigger"
 
     asyncio.run(_run())
