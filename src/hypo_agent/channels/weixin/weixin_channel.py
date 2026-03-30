@@ -214,7 +214,7 @@ class WeixinChannel:
         callback = self._get_inbound_callback()
         if callable(callback):
             try:
-                result = callback(message, exclude_channels={"weixin"})
+                result = callback(message, message_type="user_message")
             except TypeError:
                 result = callback(message)
             if inspect.isawaitable(result):

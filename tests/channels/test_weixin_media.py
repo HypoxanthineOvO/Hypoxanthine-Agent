@@ -389,8 +389,7 @@ def test_weixin_adapter_renders_markdown_block_to_image_and_prefixes_source(tmp_
             )
         )
 
-        assert client.sent_text[0]["text"].startswith("[QQ] ")
-        assert "这里有代码" in client.sent_text[0]["text"]
+        assert client.sent_text[0]["text"] == "这里有代码："
         assert renderer.calls == [("print(1)", "code")]
         assert client.upload_requests[0]["media_type"] == 1
         assert client.sent_images[0]["to_user_id"] == "target@im.wechat"

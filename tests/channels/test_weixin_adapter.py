@@ -432,3 +432,69 @@ def test_weixin_adapter_degrades_mixed_image_message_without_context_token(tmp_p
         assert client.sent_images == []
 
     asyncio.run(_run())
+
+
+def test_weixin_adapter_flushes_deferred_text_after_partial_failure(tmp_path: Path, monkeypatch) -> None:
+    async def _run() -> None:
+        image_path = tmp_path / "table.png"
+        image_path.write_bytes(_PNG_1X1)
+        client = DummyClient()
+        client.last_context_token = "ctx-first"
+        client.fail_texts["文本B"] = 2
+        adapter = WeixinAdapter(
+            client=client,
+            target_user_id="user@im.wechat",
+            send_delay_seconds=0,
+        )
+
+        segments_queue = [
+            [
+                {"type": "text", "text": "文本A"},
+                {"type": "image", "source": str(image_path), "fallback_text": "[表格渲染失败，原始内容如下]\nA | B"},
+                {"type": "text", "text": "文本B"},
+            ],
+            [
+                {"type": "text", "text": "新的消息"},
+            ],
+        ]
+
+        async def fake_prepare_segments(_message, *, allow_image_upload: bool):
+            del allow_image_upload
+            return segments_queue.pop(0)
+
+        monkeypatch.setattr(adapter, "_prepare_segments", fake_prepare_segments)
+
+        first_result = await adapter.push(
+            Message(
+                text="第一次发送",
+                sender="assistant",
+                session_id="main",
+                channel="system",
+            )
+        )
+
+        assert first_result.success is False
+        assert first_result.segment_count == 3
+        assert first_result.failed_segments == 1
+        assert client.sent == [("user@im.wechat", "文本A")]
+        assert len(client.sent_images) == 1
+
+        client.fail_texts.clear()
+        second_result = await adapter.push(
+            Message(
+                text="第二次发送",
+                sender="assistant",
+                session_id="main",
+                channel="system",
+                metadata={"weixin": {"context_token": "ctx-second"}},
+            )
+        )
+
+        assert second_result.success is True
+        assert client.sent == [
+            ("user@im.wechat", "文本A"),
+            ("user@im.wechat", "文本B"),
+            ("user@im.wechat", "新的消息"),
+        ]
+
+    asyncio.run(_run())

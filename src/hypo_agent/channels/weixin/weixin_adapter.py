@@ -9,7 +9,6 @@ from urllib.parse import urlparse
 import httpx
 import structlog
 
-from hypo_agent.channels.qq_adapter import QQAdapter
 from hypo_agent.channels.weixin.crypto import (
     encode_aes_key_base64hex,
     encode_aes_key_hex,
@@ -17,7 +16,10 @@ from hypo_agent.channels.weixin.crypto import (
     generate_aes_key,
 )
 from hypo_agent.channels.weixin.ilink_client import ILinkAPIError, ILinkClient
+from hypo_agent.core.delivery import DeliveryResult
 from hypo_agent.core.platform_message_preparation import prepare_message_for_platform
+from hypo_agent.core.unified_message import UnifiedMessage, message_from_unified
+from hypo_agent.core.weixin_renderer import WeixinRenderer
 from hypo_agent.models import Attachment, Message
 
 logger = structlog.get_logger("hypo_agent.channels.weixin.adapter")
@@ -48,19 +50,20 @@ class WeixinAdapter:
         self._sleep = sleep_func
         self._on_message_sent = on_message_sent
         self._last_context_token = ""
-        self._formatter = QQAdapter(
-            napcat_http_url="http://localhost",
-            image_renderer=image_renderer,
-            message_limit=self.message_limit,
-        )
+        self._renderer = WeixinRenderer(image_renderer=image_renderer)
+        self._deferred_text_batches: dict[str, list[str]] = {}
+        self._last_delivery: DeliveryResult | None = None
 
-    async def __call__(self, message: Message) -> None:
-        await self.push(message)
+    async def __call__(self, message: Message | UnifiedMessage) -> DeliveryResult:
+        return await self.push(message)
 
-    async def push(self, message: Message) -> None:
+    async def push(self, message: Message | UnifiedMessage) -> DeliveryResult:
+        message = message_from_unified(message) if isinstance(message, UnifiedMessage) else message
         if not str(getattr(self.client, "bot_token", "") or "").strip():
             logger.error("weixin.adapter.no_token", skip=True, message_tag=message.message_tag)
-            return
+            result = DeliveryResult.failed("weixin", error="missing bot token")
+            self._last_delivery = result
+            return result
         target_user_id = self._resolve_target_user_id(message)
         context_token = await self._resolve_context_token(message)
         if not target_user_id:
@@ -72,123 +75,145 @@ class WeixinAdapter:
                 sender_id=message.sender_id,
                 client_user_id=str(getattr(self.client, "user_id", "") or ""),
             )
-            return
-        prepared_messages = prepare_message_for_platform(message, platform="weixin")
-        if not prepared_messages:
-            return
-        allow_image_upload = bool(context_token) or len(prepared_messages) <= 1
+            result = DeliveryResult.failed("weixin", error="missing target user")
+            self._last_delivery = result
+            return result
 
-        for message_index, prepared_message in enumerate(prepared_messages):
-            if message_index > 0 and self.send_delay_seconds > 0:
+        await self._flush_deferred_text_batches(
+            target_user_id=target_user_id,
+            context_token=context_token,
+        )
+        segments = await self._prepare_segments(
+            message,
+            allow_image_upload=bool(context_token),
+        )
+        if not segments:
+            result = DeliveryResult.ok("weixin", segment_count=0)
+            self._last_delivery = result
+            return result
+
+        failed_segments = 0
+        error: str | None = None
+        total_segments = len(segments)
+
+        for segment_index, segment in enumerate(segments):
+            if segment_index > 0 and self.send_delay_seconds > 0:
                 await self._sleep(self.send_delay_seconds)
             try:
-                if self._is_single_image_message(prepared_message):
-                    attachment = prepared_message.attachments[0]
-                    if not allow_image_upload:
-                        fallback_text = self._image_fallback_text(str(attachment.url or ""))
-                        logger.info(
-                            "weixin.adapter.image_degraded_without_context",
-                            target_user_id=target_user_id,
-                            image_ref=str(attachment.url or ""),
-                            fallback_text=fallback_text,
-                        )
-                        await self._send_text_chunk(
-                            target_user_id=target_user_id,
-                            text=fallback_text,
-                            context_token=context_token,
-                        )
-                        continue
-                    try:
-                        await self._send_attachment_image(
-                            attachment,
-                            target_user_id=target_user_id,
-                            context_token=context_token,
-                        )
-                    except Exception as exc:
-                        fallback_text = self._image_fallback_text(str(attachment.url or ""))
-                        logger.warning(
-                            "weixin.adapter.image_fallback",
-                            target_user_id=target_user_id,
-                            image_ref=str(attachment.url or ""),
-                            fallback_text=fallback_text,
-                            error=str(exc),
-                        )
-                        await self._send_text_chunk(
-                            target_user_id=target_user_id,
-                            text=fallback_text,
-                            context_token=context_token,
-                        )
-                    continue
-
-                rendered_message = prepared_message.model_copy(
-                    update={
-                        "text": self._prepend_source_prefix(
-                            prepared_message,
-                            str(prepared_message.text or ""),
-                        )
-                    }
-                )
-                segments = await self._formatter.format(rendered_message)
-                if not segments:
-                    continue
-                for segment_index, segment in enumerate(segments):
-                    if segment_index > 0 and self.send_delay_seconds > 0:
-                        await self._sleep(self.send_delay_seconds)
-                    await self._send_segment(
-                        segment,
-                        target_user_id=target_user_id,
-                        context_token=context_token,
-                    )
-                await self._remember_context_token(context_token)
-            except Exception as exc:
-                logger.exception(
-                    "weixin.adapter.message_failed",
-                    message_text=prepared_message.text,
-                    text_length=len(str(prepared_message.text or "")),
-                    text_bytes=len(str(prepared_message.text or "").encode("utf-8")),
-                    attachment_types=[attachment.type for attachment in prepared_message.attachments],
+                response = await self._send_segment(
+                    segment,
                     target_user_id=target_user_id,
-                    error=str(exc),
+                    context_token=context_token,
                 )
+                logger.info(
+                    "weixin.adapter.segment_sent",
+                    target_user_id=target_user_id,
+                    segment_index=segment_index + 1,
+                    total_segments=total_segments,
+                    segment_type=str(segment.get("type") or "").strip().lower(),
+                    ret=response.get("ret") if isinstance(response, dict) else None,
+                    errcode=response.get("errcode") if isinstance(response, dict) else None,
+                )
+            except Exception as exc:
+                error = str(exc)
+                failed_segments = total_segments - segment_index
+                logger.warning(
+                    "weixin.adapter.segment_failed",
+                    target_user_id=target_user_id,
+                    segment_index=segment_index + 1,
+                    total_segments=total_segments,
+                    segment_type=str(segment.get("type") or "").strip().lower(),
+                    error=error,
+                )
+                deferred_text = self._segments_to_text(segments[segment_index:])
+                if deferred_text:
+                    self._queue_deferred_text_batch(
+                        target_user_id=target_user_id,
+                        text=deferred_text,
+                        reason=error,
+                    )
+                break
+
+        if failed_segments:
+            result = DeliveryResult.failed(
+                "weixin",
+                segment_count=total_segments,
+                failed_segments=failed_segments,
+                error=error,
+            )
+            self._last_delivery = result
+            return result
+
+        result = DeliveryResult.ok("weixin", segment_count=total_segments)
+        self._last_delivery = result
+        return result
 
     def _format_text(self, message: Message) -> str:
-        rendered = message.model_copy(
-            update={"text": self._prepend_source_prefix(message, str(message.text or ""))}
-        )
-        return self._formatter.render_message_text(rendered)
+        return self._renderer.render_message_text(message)
 
     def _split_message(self, text: str, *, limit: int | None = None) -> list[str]:
-        return self._formatter.split_message(text, limit=limit)
+        effective_limit = self.message_limit if limit is None else max(1, int(limit))
+        if len(text) <= effective_limit:
+            return [text]
 
-    async def _send_segment(self, segment: dict, *, target_user_id: str, context_token: str) -> None:
+        chunks: list[str] = []
+        current = ""
+        for line in text.splitlines(keepends=True):
+            if len(line) > effective_limit:
+                if current:
+                    chunks.append(current)
+                    current = ""
+                for index in range(0, len(line), effective_limit):
+                    chunks.append(line[index : index + effective_limit])
+                continue
+
+            if len(current) + len(line) <= effective_limit:
+                current += line
+                continue
+            if current:
+                chunks.append(current)
+            current = line
+
+        if current:
+            chunks.append(current)
+        return chunks
+
+    async def _send_segment(
+        self,
+        segment: dict,
+        *,
+        target_user_id: str,
+        context_token: str,
+    ) -> dict[str, object]:
         segment_type = str(segment.get("type") or "").strip().lower()
         if segment_type == "text":
-            text = str(segment.get("data", {}).get("text") or "")
+            text = str(segment.get("text") or "")
             chunks = [chunk for chunk in self._split_message(text, limit=self.message_limit) if chunk.strip()]
+            last_response: dict[str, object] = {"ret": 0}
             for index, chunk in enumerate(chunks):
                 if index > 0 and self.send_delay_seconds > 0:
                     await self._sleep(self.send_delay_seconds)
                 if not chunk.strip():
                     continue
-                await self._send_text_chunk(
+                last_response = await self._send_text_chunk(
                     target_user_id=target_user_id,
                     text=chunk,
                     context_token=context_token,
                 )
-            return
+            return last_response
 
         if segment_type == "image":
-            raw = str(segment.get("data", {}).get("file") or "").strip()
+            raw = str(segment.get("source") or "").strip()
             if not raw:
-                return
+                return {"ret": 0}
             try:
-                await self._send_image_reference(
+                return await self._send_image_reference(
                     raw,
                     target_user_id=target_user_id,
                     context_token=context_token,
                 )
             except Exception as exc:
-                fallback_text = self._image_fallback_text(raw)
+                fallback_text = str(segment.get("fallback_text") or "").strip() or self._image_fallback_text(raw)
                 logger.warning(
                     "weixin.adapter.image_fallback",
                     target_user_id=target_user_id,
@@ -196,21 +221,20 @@ class WeixinAdapter:
                     fallback_text=fallback_text,
                     error=str(exc),
                 )
-                await self._send_text_chunk(
+                return await self._send_text_chunk(
                     target_user_id=target_user_id,
                     text=fallback_text,
                     context_token=context_token,
                 )
-            return
 
         if segment_type == "file":
-            data = dict(segment.get("data") or {})
-            label = str(data.get("name") or Path(str(data.get("file") or "")).name or "file").strip()
-            await self._send_text_chunk(
+            label = str(segment.get("name") or Path(str(segment.get("source") or "")).name or "file").strip()
+            return await self._send_text_chunk(
                 target_user_id=target_user_id,
                 text=f"[文件] {label}",
                 context_token=context_token,
             )
+        return {"ret": 0}
 
     async def _send_attachment_image(
         self,
@@ -218,8 +242,8 @@ class WeixinAdapter:
         *,
         target_user_id: str,
         context_token: str,
-    ) -> None:
-        await self._send_image_reference(
+    ) -> dict[str, object]:
+        return await self._send_image_reference(
             str(attachment.url or "").strip(),
             target_user_id=target_user_id,
             context_token=context_token,
@@ -231,7 +255,7 @@ class WeixinAdapter:
         *,
         target_user_id: str,
         context_token: str,
-    ) -> None:
+    ) -> dict[str, object]:
         raw = await self._load_image_bytes(image_ref)
         aes_key = generate_aes_key()
         encrypted = encrypt_media(raw, aes_key)
@@ -264,7 +288,7 @@ class WeixinAdapter:
                 encrypted_data=encrypted,
             ),
         )
-        await self._retry_image_operation(
+        response = await self._retry_image_operation(
             stage="send_image",
             target_user_id=target_user_id,
             image_ref=image_ref,
@@ -278,6 +302,7 @@ class WeixinAdapter:
         )
         await self._remember_context_token(context_token)
         self._record_message_sent()
+        return response if isinstance(response, dict) else {"ret": 0}
 
     async def _load_image_bytes(self, image_ref: str) -> bytes:
         raw_ref = str(image_ref or "").strip()
@@ -330,21 +355,6 @@ class WeixinAdapter:
         with urllib_request.urlopen(request, timeout=10.0) as response:
             return response.read()
 
-    def _prepend_source_prefix(self, message: Message, text: str) -> str:
-        source = str(message.channel or "").strip().lower()
-        if not text.strip():
-            return text
-        if source in {"", "weixin", "system"}:
-            return text
-        prefix_map = {
-            "webui": "[WebUI] ",
-            "qq": "[QQ] ",
-        }
-        prefix = prefix_map.get(source, f"[{source.upper()}] ")
-        if text.startswith(prefix):
-            return text
-        return f"{prefix}{text}"
-
     def _resolve_target_user_id(self, message: Message) -> str:
         explicit_target = self.target_user_id.strip()
         if explicit_target:
@@ -381,7 +391,10 @@ class WeixinAdapter:
 
     def _record_message_sent(self) -> None:
         if callable(self._on_message_sent):
-            self._on_message_sent()
+            try:
+                self._on_message_sent()
+            except TypeError:
+                self._on_message_sent(None)
 
     async def _retry_image_operation(
         self,
@@ -414,27 +427,33 @@ class WeixinAdapter:
             raise last_error
         raise AssertionError("unreachable")
 
-    async def _send_text_chunk(self, *, target_user_id: str, text: str, context_token: str) -> None:
+    async def _send_text_chunk(
+        self,
+        *,
+        target_user_id: str,
+        text: str,
+        context_token: str,
+    ) -> dict[str, object]:
         normalized = str(text or "").strip()
         if not normalized:
-            return
+            return {"ret": 0}
 
         try:
-            await self.client.send_message(
-                to_user_id=target_user_id,
+            response = await self._client_send_text(
+                target_user_id=target_user_id,
                 text=normalized,
                 context_token=context_token or None,
             )
         except ILinkAPIError as exc:
-            await self._handle_retryable_text_failure(
+            response = await self._handle_retryable_text_failure(
                 target_user_id=target_user_id,
                 text=normalized,
                 context_token=context_token,
                 error=exc,
             )
-            return
 
         self._record_message_sent()
+        return response
 
     async def _handle_retryable_text_failure(
         self,
@@ -443,7 +462,7 @@ class WeixinAdapter:
         text: str,
         context_token: str,
         error: ILinkAPIError,
-    ) -> None:
+    ) -> dict[str, object]:
         if not self._is_retryable_send_error(error):
             raise error
 
@@ -458,8 +477,8 @@ class WeixinAdapter:
             text_bytes=text_bytes,
         )
         try:
-            await self.client.send_message(
-                to_user_id=target_user_id,
+            response = await self._client_send_text(
+                target_user_id=target_user_id,
                 text=text,
                 context_token=None,
             )
@@ -478,31 +497,31 @@ class WeixinAdapter:
                     text_bytes=len(fallback_text.encode("utf-8")),
                 )
                 try:
-                    await self.client.send_message(
-                        to_user_id=target_user_id,
+                    response = await self._client_send_text(
+                        target_user_id=target_user_id,
                         text=fallback_text,
                         context_token=None,
                     )
                 except ILinkAPIError as sanitized_error:
                     if not self._is_retryable_send_error(sanitized_error):
                         raise sanitized_error
-                    await self._send_split_text_fallback(
+                    response = await self._send_split_text_fallback(
                         target_user_id=target_user_id,
                         text=fallback_text,
                         error=sanitized_error,
                     )
-                else:
-                    self._record_message_sent()
-                return
+                self._record_message_sent()
+                return response
 
-            await self._send_split_text_fallback(
+            response = await self._send_split_text_fallback(
                 target_user_id=target_user_id,
                 text=fallback_text,
                 error=retry_error,
             )
-            return
+            return response
 
         self._record_message_sent()
+        return response
 
     async def _send_split_text_fallback(
         self,
@@ -510,7 +529,7 @@ class WeixinAdapter:
         target_user_id: str,
         text: str,
         error: ILinkAPIError,
-    ) -> None:
+    ) -> dict[str, object]:
         normalized = str(text or "").strip()
         parts = self._split_text_by_utf8_bytes(normalized, limit_bytes=_WEIXIN_RETRY_SPLIT_BYTES)
         if len(parts) <= 1:
@@ -528,12 +547,35 @@ class WeixinAdapter:
         for index, part in enumerate(parts):
             if index > 0 and self.send_delay_seconds > 0:
                 await self._sleep(self.send_delay_seconds)
-            await self.client.send_message(
-                to_user_id=target_user_id,
+            await self._client_send_text(
+                target_user_id=target_user_id,
                 text=part,
                 context_token=None,
             )
             self._record_message_sent()
+        return {"ret": 0, "split_fallback": True, "part_count": len(parts)}
+
+    async def _client_send_text(
+        self,
+        *,
+        target_user_id: str,
+        text: str,
+        context_token: str | None,
+    ) -> dict[str, object]:
+        sender = getattr(self.client, "send_message_raw", None)
+        if callable(sender):
+            response = await sender(
+                to_user_id=target_user_id,
+                text=text,
+                context_token=context_token,
+            )
+            return response if isinstance(response, dict) else {"ret": 0}
+        await self.client.send_message(
+            to_user_id=target_user_id,
+            text=text,
+            context_token=context_token,
+        )
+        return {"ret": 0}
 
     def _sanitize_text_for_retry(self, text: str) -> str:
         normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
@@ -595,6 +637,152 @@ class WeixinAdapter:
         if current:
             parts.append(current)
         return parts
+
+    async def _prepare_segments(
+        self,
+        message: Message,
+        *,
+        allow_image_upload: bool,
+    ) -> list[dict[str, Any]]:
+        prepared_messages = prepare_message_for_platform(message, platform="weixin")
+        effective_allow_image_upload = allow_image_upload or len(prepared_messages) <= 1
+        segments: list[dict[str, Any]] = []
+        for prepared_message in prepared_messages:
+            if self._is_single_image_message(prepared_message):
+                attachment = prepared_message.attachments[0]
+                if not effective_allow_image_upload:
+                    fallback_text = self._image_fallback_text(str(attachment.url or ""))
+                    logger.info(
+                        "weixin.adapter.image_degraded_without_context",
+                        target_user_id=self._resolve_target_user_id(message),
+                        image_ref=str(attachment.url or ""),
+                        fallback_text=fallback_text,
+                    )
+                    segments.append(
+                        {
+                            "type": "text",
+                            "text": fallback_text,
+                            "preserve_boundary": True,
+                        }
+                    )
+                    continue
+                segments.append(
+                    {
+                        "type": "image",
+                        "source": str(attachment.url or "").strip(),
+                        "name": attachment.filename,
+                        "fallback_text": self._image_fallback_text(str(attachment.url or "")),
+                    }
+                )
+                continue
+            rendered_segments = await self._renderer.render(prepared_message)
+            if rendered_segments:
+                segments.extend(rendered_segments)
+        return self._merge_adjacent_text_segments(segments)
+
+    def _merge_adjacent_text_segments(self, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        for segment in segments:
+            if str(segment.get("type") or "").strip().lower() != "text":
+                merged.append(segment)
+                continue
+            text = str(segment.get("text") or "")
+            if not text:
+                continue
+            previous = merged[-1] if merged else None
+            if (
+                previous
+                and str(previous.get("type") or "").strip().lower() == "text"
+                and not previous.get("preserve_boundary")
+                and not segment.get("preserve_boundary")
+            ):
+                merged[-1] = {
+                    **previous,
+                    "text": f"{str(previous.get('text') or '')}\n{text}".strip(),
+                }
+                continue
+            merged.append({"type": "text", "text": text})
+        return merged
+
+    def _segments_to_text(self, segments: list[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        for segment in segments:
+            segment_type = str(segment.get("type") or "").strip().lower()
+            if segment_type == "text":
+                text = str(segment.get("text") or "").strip()
+                if text:
+                    parts.append(text)
+                continue
+            if segment_type == "image":
+                fallback_text = str(segment.get("fallback_text") or "").strip()
+                if fallback_text:
+                    parts.append(fallback_text)
+                    continue
+                parts.append(self._image_fallback_text(str(segment.get("source") or "")))
+                continue
+            if segment_type == "file":
+                label = str(segment.get("name") or Path(str(segment.get("source") or "")).name or "file").strip()
+                parts.append(f"[文件] {label}")
+        return "\n".join(part for part in parts if part).strip()
+
+    def _queue_deferred_text_batch(
+        self,
+        *,
+        target_user_id: str,
+        text: str,
+        reason: str,
+    ) -> None:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return
+        self._deferred_text_batches.setdefault(target_user_id, []).append(normalized)
+        logger.warning(
+            "weixin.adapter.deferred_text_queued",
+            target_user_id=target_user_id,
+            reason=reason,
+            queued_batches=len(self._deferred_text_batches.get(target_user_id, [])),
+        )
+
+    async def _flush_deferred_text_batches(
+        self,
+        *,
+        target_user_id: str,
+        context_token: str,
+    ) -> None:
+        if not context_token:
+            return
+        pending = list(self._deferred_text_batches.get(target_user_id, []))
+        if not pending:
+            return
+        remaining: list[str] = []
+        for index, text in enumerate(pending):
+            try:
+                await self._send_text_chunk(
+                    target_user_id=target_user_id,
+                    text=text,
+                    context_token=context_token,
+                )
+                logger.info(
+                    "weixin.adapter.deferred_text_flushed",
+                    target_user_id=target_user_id,
+                    batch_index=index + 1,
+                    batch_count=len(pending),
+                )
+            except Exception as exc:
+                remaining.append(text)
+                remaining.extend(pending[index + 1 :])
+                logger.warning(
+                    "weixin.adapter.deferred_text_flush_failed",
+                    target_user_id=target_user_id,
+                    batch_index=index + 1,
+                    batch_count=len(pending),
+                    error=str(exc),
+                )
+                break
+        if remaining:
+            self._deferred_text_batches[target_user_id] = remaining
+            return
+        self._deferred_text_batches.pop(target_user_id, None)
 
     def _read_image_size(self, payload: bytes) -> tuple[int, int]:
         if payload.startswith(b"\x89PNG\r\n\x1a\n") and len(payload) >= 24:
