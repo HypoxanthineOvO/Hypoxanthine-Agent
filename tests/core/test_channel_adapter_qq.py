@@ -72,7 +72,8 @@ def test_format_renderer_unavailable() -> None:
 
     assert len(segments) == 1
     assert segments[0]["type"] == "text"
-    assert "```python" in segments[0]["data"]["text"]
+    assert "[代码块渲染失败，原始内容如下]" in segments[0]["data"]["text"]
+    assert "print('x')" in segments[0]["data"]["text"]
 
 
 def test_format_multiple_blocks() -> None:

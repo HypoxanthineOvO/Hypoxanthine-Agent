@@ -476,3 +476,117 @@ def test_qqbot_send_message_uses_public_file_url_for_local_images(tmp_path: Path
     assert upload_call[2]["url"].startswith("https://bot.example.com/api/files?")
     assert "token=token-abc" in str(upload_call[2]["url"])
     assert "path=" in str(upload_call[2]["url"])
+
+
+def test_qqbot_send_message_merges_adjacent_text_segments_around_images(tmp_path: Path, monkeypatch) -> None:
+    from hypo_agent.channels.qq_bot_channel import QQBotChannelService
+
+    image_path = tmp_path / "table.png"
+    image_path.write_bytes(b"png")
+    send_order: list[tuple[str, dict[str, object]]] = []
+    image_calls: list[dict[str, object]] = []
+    text_calls: list[dict[str, object]] = []
+
+    class StubRenderer:
+        async def render(self, _message):
+            return [
+                {"type": "text", "text": "前文"},
+                {"type": "image", "source": str(image_path), "name": "table.png"},
+                {"type": "text", "text": "后文一"},
+                {"type": "text", "text": "后文二"},
+            ]
+
+    async def fake_resolve_openid(*, message, qq_meta):
+        del message, qq_meta
+        return "OPENID-C2C-001"
+
+    async def fake_send_image_with_fallback(**kwargs) -> None:
+        send_order.append(("image", kwargs))
+        image_calls.append(kwargs)
+
+    async def fake_send_with_retry(**kwargs) -> None:
+        send_order.append(("text", kwargs))
+        text_calls.append(kwargs)
+
+    service = QQBotChannelService(app_id="1029384756", app_secret="bot-secret-xyz")
+    service.renderer = StubRenderer()  # type: ignore[assignment]
+    monkeypatch.setattr(service, "_resolve_openid", fake_resolve_openid)
+    monkeypatch.setattr(service, "_send_image_with_fallback", fake_send_image_with_fallback)
+    monkeypatch.setattr(service, "_send_with_retry", fake_send_with_retry)
+
+    result = asyncio.run(
+        service.send_message(
+            Message(
+                text="ignored",
+                sender="assistant",
+                session_id="main",
+                channel="qq",
+                sender_id="OPENID-C2C-001",
+            )
+        )
+    )
+
+    assert result.success is True
+    assert result.segment_count == 4
+    assert image_calls == [
+        {
+            "route_kind": "c2c",
+            "openid": "OPENID-C2C-001",
+            "guild_id": None,
+            "msg_id": None,
+            "text": None,
+            "image_source": str(image_path),
+            "fallback_text": "[图片] table.png",
+        }
+    ]
+    assert text_calls == [
+        {
+            "route_kind": "c2c",
+            "openid": "OPENID-C2C-001",
+            "guild_id": None,
+            "msg_id": None,
+            "text": "前文",
+        },
+        {
+            "route_kind": "c2c",
+            "openid": "OPENID-C2C-001",
+            "guild_id": None,
+            "msg_id": None,
+            "text": "后文一\n后文二",
+        }
+    ]
+    assert send_order == [
+        (
+            "text",
+            {
+                "route_kind": "c2c",
+                "openid": "OPENID-C2C-001",
+                "guild_id": None,
+                "msg_id": None,
+                "text": "前文",
+            },
+        ),
+        (
+            "image",
+            {
+                "route_kind": "c2c",
+                "openid": "OPENID-C2C-001",
+                "guild_id": None,
+                "msg_id": None,
+                "text": None,
+                "image_source": str(image_path),
+                "fallback_text": "[图片] table.png",
+            },
+        ),
+        (
+            "text",
+            {
+                "route_kind": "c2c",
+                "openid": "OPENID-C2C-001",
+                "guild_id": None,
+                "msg_id": None,
+                "text": "后文一\n后文二",
+            },
+        ),
+    ]
+    assert all("[图片]" not in str(call["text"]) for call in text_calls)

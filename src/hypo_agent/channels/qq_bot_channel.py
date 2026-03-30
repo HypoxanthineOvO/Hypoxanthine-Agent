@@ -22,12 +22,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import httpx
 import structlog
 
+from hypo_agent.core.delivery import DeliveryResult
+from hypo_agent.core.qq_renderer import QQRenderer
 from hypo_agent.core.uploads import build_upload_path
-from hypo_agent.core.markdown_splitter import renderable_markdown_block, split_markdown_blocks
-from hypo_agent.core.platform_message_preparation import prepare_message_for_platform
-from hypo_agent.core.qq_text_renderer import render_qq_plaintext
 from hypo_agent.core.time_utils import normalize_utc_datetime, utc_now
-from hypo_agent.models import Attachment, Message
+from hypo_agent.core.unified_message import UnifiedMessage, message_from_unified
+from hypo_agent.models import Message
 
 logger = structlog.get_logger("hypo_agent.channels.qq_bot")
 
@@ -83,46 +83,6 @@ def _normalize_content(content: str) -> str:
     return normalized.strip()
 
 
-def _downgrade_markdown(text: str) -> str:
-    if not text:
-        return ""
-    parts: list[str] = []
-    for block in split_markdown_blocks(text):
-        if block["type"] == "text":
-            downgraded = render_qq_plaintext(block["content"]).replace("`", "")
-            if downgraded:
-                parts.append(downgraded)
-            continue
-        if block["type"] == "table":
-            rows: list[str] = []
-            for raw_line in block["content"].splitlines():
-                stripped = raw_line.strip()
-                if stripped.startswith("|") and stripped.endswith("|"):
-                    if set(stripped.replace("|", "").replace(":", "").replace("-", "").replace(" ", "")) == set():
-                        continue
-                    rows.append(" | ".join(cell.strip() for cell in stripped.strip("|").split("|")))
-                elif raw_line:
-                    rows.append(raw_line)
-            if rows:
-                parts.append("\n".join(rows))
-            continue
-        parts.append(renderable_markdown_block(block) or block["content"].strip("\n"))
-    return "\n".join(part for part in parts if part).strip()
-
-
-def _attachment_image_source(attachment: Attachment) -> str | None:
-    source = str(attachment.url or "").strip()
-    if not source:
-        return None
-    if _HTTP_URL_PATTERN.match(source) or _DATA_URL_PATTERN.match(source):
-        return source
-
-    path = Path(source).expanduser().resolve(strict=False)
-    if not path.exists() or not path.is_file():
-        return None
-    return str(path)
-
-
 @dataclass(slots=True)
 class QQBotInboundEvent:
     event_type: str
@@ -149,6 +109,7 @@ class QQBotChannelService:
         public_base_url: str = "",
         public_file_token: str = "",
         request_timeout_seconds: float = 15.0,
+        image_renderer: Any | None = None,
     ) -> None:
         self.app_id = str(app_id).strip()
         self.app_secret = str(app_secret).strip()
@@ -161,6 +122,7 @@ class QQBotChannelService:
         self.public_base_url = str(public_base_url or "").strip().rstrip("/")
         self.public_file_token = str(public_file_token or "").strip()
         self.request_timeout_seconds = max(1.0, request_timeout_seconds)
+        self.renderer = QQRenderer(image_renderer=image_renderer)
         self._last_message_at: datetime | None = None
         self._messages_received = 0
         self._messages_sent = 0
@@ -168,6 +130,7 @@ class QQBotChannelService:
         self._last_guild_id: str | None = None
         self._ws_connected = False
         self._connected_at: datetime | None = None
+        self._last_delivery: DeliveryResult | None = None
 
     @staticmethod
     def build_signature_hex(*, secret: str, timestamp: str, body: bytes) -> str:
@@ -255,7 +218,7 @@ class QQBotChannelService:
         callback = getattr(pipeline, "on_proactive_message", None)
         if callable(callback):
             try:
-                result = callback(inbound, exclude_channels={"qq"})
+                result = callback(inbound, message_type="user_message")
             except TypeError:
                 result = callback(inbound)
             if inspect.isawaitable(result):
@@ -269,8 +232,8 @@ class QQBotChannelService:
         )
         return True
 
-    async def push_proactive(self, message: Message) -> None:
-        await self.send_message(message)
+    async def push_proactive(self, message: Message | UnifiedMessage) -> DeliveryResult:
+        return await self.send_message(message)
 
     async def get_access_token(self) -> str:
         return await self._get_access_token()
@@ -284,7 +247,8 @@ class QQBotChannelService:
         )
         return str(payload.get("url") or "").strip()
 
-    async def send_message(self, message: Message) -> None:
+    async def send_message(self, message: Message | UnifiedMessage) -> DeliveryResult:
+        message = message_from_unified(message) if isinstance(message, UnifiedMessage) else message
         qq_meta = message.metadata.get("qq") if isinstance(message.metadata, dict) else {}
         if not isinstance(qq_meta, Mapping):
             qq_meta = {}
@@ -292,42 +256,99 @@ class QQBotChannelService:
         openid = await self._resolve_openid(message=message, qq_meta=qq_meta)
         if not openid:
             logger.warning("qq_bot.message.skip", reason="missing_openid", session_id=message.session_id)
-            return
+            result = DeliveryResult.failed("qq_bot", error="missing_openid")
+            self._last_delivery = result
+            return result
 
         guild_id = str(qq_meta.get("guild_id") or "").strip() or None
         msg_id = str(qq_meta.get("msg_id") or "").strip() or None
         route_kind = "dm" if guild_id else "c2c"
+        pending_text = ""
+        pending_segment_count = 0
+        total_segment_count = 0
+        delivered_segment_count = 0
 
-        for prepared_message in prepare_message_for_platform(message, platform="qq"):
-            text = _downgrade_markdown(str(prepared_message.text or "").strip())
-            attachment_summary = self._non_image_attachment_summary(prepared_message.attachments)
-            if attachment_summary:
-                text = self._join_text_parts(text, attachment_summary)
+        try:
+            for prepared_message in [message]:
+                rendered_segments = await self.renderer.render(prepared_message)
+                total_segment_count += len(rendered_segments)
+                if not rendered_segments:
+                    continue
+                for segment in rendered_segments:
+                    segment_type = str(segment.get("type") or "").strip().lower()
+                    if segment_type == "text":
+                        pending_text = self._join_text_parts(pending_text, str(segment.get("text") or ""))
+                        pending_segment_count += 1
+                        continue
+                    if segment_type == "file":
+                        label = str(segment.get("name") or Path(str(segment.get("source") or "")).name or "file").strip()
+                        pending_text = self._join_text_parts(pending_text, f"[文件] {label}")
+                        pending_segment_count += 1
+                        continue
+                    if segment_type != "image":
+                        continue
 
-            image_fallback_text = self._message_image_fallback_text(prepared_message)
-            image_source = self._resolve_image_source(prepared_message)
-            if image_source is not None:
-                await self._send_image_with_fallback(
+                    image_source = str(segment.get("source") or "").strip()
+                    if pending_segment_count:
+                        await self._send_with_retry(
+                            route_kind=route_kind,
+                            openid=openid,
+                            guild_id=guild_id,
+                            msg_id=msg_id,
+                            text=pending_text,
+                        )
+                        delivered_segment_count += pending_segment_count
+                        pending_text = ""
+                        pending_segment_count = 0
+                    if not image_source:
+                        await self._send_with_retry(
+                            route_kind=route_kind,
+                            openid=openid,
+                            guild_id=guild_id,
+                            msg_id=msg_id,
+                            text=self._segment_image_fallback_text(segment),
+                        )
+                        delivered_segment_count += 1
+                        continue
+                    await self._send_image_with_fallback(
+                        route_kind=route_kind,
+                        openid=openid,
+                        guild_id=guild_id,
+                        msg_id=msg_id,
+                        text=None,
+                        image_source=image_source,
+                        fallback_text=self._segment_image_fallback_text(segment),
+                    )
+                    delivered_segment_count += 1
+
+            if pending_segment_count:
+                await self._send_with_retry(
                     route_kind=route_kind,
                     openid=openid,
                     guild_id=guild_id,
                     msg_id=msg_id,
-                    text=text or None,
-                    image_source=image_source,
-                    fallback_text=image_fallback_text,
+                    text=pending_text,
                 )
-                continue
-
-            if not text:
-                continue
-
-            await self._send_with_retry(
-                route_kind=route_kind,
-                openid=openid,
-                guild_id=guild_id,
-                msg_id=msg_id,
-                text=text,
+                delivered_segment_count += pending_segment_count
+        except Exception as exc:
+            result = DeliveryResult.failed(
+                "qq_bot",
+                segment_count=total_segment_count,
+                failed_segments=max(1, total_segment_count - delivered_segment_count),
+                error=str(exc),
             )
+            self._last_delivery = result
+            logger.warning(
+                "qq_bot.message.delivery_failed",
+                openid=openid,
+                route_kind=route_kind,
+                error=str(exc),
+            )
+            return result
+
+        result = DeliveryResult.ok("qq_bot", segment_count=total_segment_count)
+        self._last_delivery = result
+        return result
 
     def get_status(self) -> dict[str, Any]:
         masked_app_id = ""
@@ -345,6 +366,7 @@ class QQBotChannelService:
             "last_message_at": self._last_message_at.isoformat() if self._last_message_at else None,
             "messages_received": self._messages_received,
             "messages_sent": self._messages_sent,
+            "last_delivery": self._last_delivery.to_status_payload() if self._last_delivery is not None else None,
         }
 
     def get_runtime_status(self) -> dict[str, Any]:
@@ -467,20 +489,6 @@ class QQBotChannelService:
         async for event in pipeline.stream_reply(inbound):
             await emit(event)
 
-    def _resolve_image_source(self, message: Message) -> str | None:
-        if message.image:
-            image_value = str(message.image).strip()
-            if image_value:
-                return image_value
-
-        for attachment in message.attachments:
-            if attachment.type != "image":
-                continue
-            source = _attachment_image_source(attachment)
-            if source is not None:
-                return source
-        return None
-
     async def _resolve_openid(
         self,
         *,
@@ -569,17 +577,6 @@ class QQBotChannelService:
         except Exception:
             logger.warning("qq_bot.target_openid.save_failed", exc_info=True)
 
-    def _non_image_attachment_summary(self, attachments: list[Attachment]) -> str:
-        labels: list[str] = []
-        for attachment in attachments:
-            if attachment.type == "image":
-                continue
-            label = str(attachment.filename or Path(str(attachment.url or "")).name or attachment.type).strip()
-            if not label:
-                label = attachment.type
-            labels.append(f"[文件] {label}")
-        return "\n".join(labels)
-
     def _image_fallback_text(self, image_source: str) -> str:
         raw = str(image_source or "").strip()
         if not raw:
@@ -591,19 +588,11 @@ class QQBotChannelService:
             return f"[图片] {name}" if name else "[图片]"
         return f"[图片] {Path(raw).name or 'image'}"
 
-    def _message_image_fallback_text(self, message: Message) -> str:
-        for attachment in message.attachments:
-            if attachment.type != "image":
-                continue
-            label = str(attachment.filename or "").strip()
-            if label:
-                return f"[图片] {label}"
-            url = str(attachment.url or "").strip()
-            if url:
-                return self._image_fallback_text(url)
-        if message.image:
-            return self._image_fallback_text(str(message.image))
-        return "[图片]"
+    def _segment_image_fallback_text(self, segment: Mapping[str, Any]) -> str:
+        label = str(segment.get("name") or "").strip()
+        if label:
+            return f"[图片] {label}"
+        return self._image_fallback_text(str(segment.get("source") or ""))
 
     def _join_text_parts(self, *parts: str) -> str:
         return "\n".join(part.strip() for part in parts if str(part or "").strip()).strip()

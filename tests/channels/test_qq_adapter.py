@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from urllib import request as urllib_request
 
 from hypo_agent.channels.qq_adapter import QQAdapter
+from hypo_agent.core.delivery import DeliveryResult
 from hypo_agent.models import Message
 
 
@@ -142,3 +144,72 @@ def test_qq_adapter_omits_authorization_header_when_token_empty(monkeypatch) -> 
 
     assert result == {"status": "ok"}
     assert captured["authorization"] is None
+
+
+def test_qq_adapter_sends_mixed_segments_in_single_napcat_message(monkeypatch) -> None:
+    adapter = QQAdapter(napcat_http_url="http://localhost:3008")
+    captured: dict[str, object] = {}
+
+    async def fake_format(_message) -> list[dict[str, object]]:
+        return [
+            {"type": "text", "data": {"text": "前文"}},
+            {"type": "image", "data": {"file": "file:///tmp/table.png"}},
+            {"type": "text", "data": {"text": "后文"}},
+        ]
+
+    async def fake_send_private_segments(*, user_id: str, segments: list[dict[str, object]]) -> DeliveryResult:
+        captured["user_id"] = user_id
+        captured["segments"] = segments
+        return DeliveryResult.ok("qq_napcat", segment_count=len(segments))
+
+    monkeypatch.setattr(adapter, "format", fake_format)
+    monkeypatch.setattr(adapter, "send_private_segments", fake_send_private_segments)
+
+    result = asyncio.run(
+        adapter.send_message(
+            user_id="10001",
+            message=Message(text="ignored", sender="assistant", session_id="main"),
+        )
+    )
+
+    assert result.success is True
+    assert captured["user_id"] == "10001"
+    assert captured["segments"] == [
+        {"type": "text", "data": {"text": "前文"}},
+        {"type": "image", "data": {"file": "file:///tmp/table.png"}},
+        {"type": "text", "data": {"text": "后文"}},
+    ]
+
+
+def test_qq_adapter_send_private_segments_posts_single_mixed_message(monkeypatch) -> None:
+    adapter = QQAdapter(napcat_http_url="http://localhost:3008")
+    captured: dict[str, object] = {}
+
+    def fake_post_json(path: str, payload: dict[str, object]) -> dict[str, object]:
+        captured["path"] = path
+        captured["payload"] = payload
+        return {"status": "ok"}
+
+    monkeypatch.setattr(adapter, "_post_json", fake_post_json)
+
+    result = asyncio.run(
+        adapter.send_private_segments(
+            user_id="10001",
+            segments=[
+                {"type": "text", "data": {"text": "前文"}},
+                {"type": "image", "data": {"file": "file:///tmp/table.png"}},
+                {"type": "text", "data": {"text": "后文"}},
+            ],
+        )
+    )
+
+    assert result.success is True
+    assert captured["path"] == "/send_private_msg"
+    assert captured["payload"] == {
+        "user_id": 10001,
+        "message": [
+            {"type": "text", "data": {"text": "前文"}},
+            {"type": "image", "data": {"file": "file:///tmp/table.png"}},
+            {"type": "text", "data": {"text": "后文"}},
+        ],
+    }

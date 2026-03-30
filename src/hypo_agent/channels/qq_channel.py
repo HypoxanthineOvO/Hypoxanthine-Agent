@@ -15,8 +15,10 @@ from typing_extensions import deprecated
 
 from hypo_agent.channels.onebot11 import parse_onebot_private_message
 from hypo_agent.channels.qq_adapter import QQAdapter
+from hypo_agent.core.delivery import DeliveryResult, combine_delivery_results, ensure_delivery_result
 from hypo_agent.core.time_utils import unix_seconds_to_utc_datetime, utc_now
 from hypo_agent.core.uploads import build_upload_path, get_uploads_dir, guess_mime_type, sanitize_upload_filename
+from hypo_agent.core.unified_message import UnifiedMessage, message_from_unified
 from hypo_agent.models import Attachment, Message
 
 logger = structlog.get_logger("hypo_agent.channels.qq")
@@ -80,7 +82,7 @@ class QQChannelService:
         callback = getattr(pipeline, "on_proactive_message", None)
         if callable(callback):
             try:
-                result = callback(inbound, exclude_channels={"qq"})
+                result = callback(inbound, message_type="user_message")
             except TypeError:
                 result = callback(inbound)
             if inspect.isawaitable(result):
@@ -88,27 +90,37 @@ class QQChannelService:
         await self._run_pipeline_for_user(user_id=user_id, inbound=inbound, pipeline=pipeline)
         return True
 
-    async def push_proactive(self, message: Message) -> None:
-        await self.send_message(message)
+    async def push_proactive(self, message: Message) -> DeliveryResult:
+        return await self.send_message(message)
 
-    async def send_message(self, message: Message) -> None:
-        outbound = self._prefixed_message(message)
-        sender_id = str(message.sender_id or "").strip()
+    async def send_message(self, message: Message | UnifiedMessage) -> DeliveryResult:
+        outbound = message_from_unified(message) if isinstance(message, UnifiedMessage) else message
+        sender_id = str(outbound.sender_id or "").strip()
         if sender_id and sender_id in self.allowed_users:
             target_users = [sender_id]
         else:
             target_users = sorted(self.allowed_users)
+        results: list[DeliveryResult] = []
         for user_id in target_users:
-            success = await self.adapter.send_message(user_id=user_id, message=outbound)
-            if success and callable(self._on_message_sent):
-                self._on_message_sent()
-            if not success:
+            raw_result = await self.adapter.send_message(user_id=user_id, message=outbound)
+            delivery = ensure_delivery_result(raw_result, channel="qq_napcat")
+            results.append(delivery)
+            if delivery.success and callable(self._on_message_sent):
+                try:
+                    callback_result = self._on_message_sent(delivery)
+                except TypeError:
+                    callback_result = self._on_message_sent()
+                if inspect.isawaitable(callback_result):
+                    await callback_result
+            if not delivery.success:
                 logger.warning(
                     "qq.message.send_failed",
                     user_id=user_id,
-                    session_id=message.session_id,
-                    source_channel=message.channel,
+                    session_id=outbound.session_id,
+                    source_channel=outbound.channel,
+                    error=delivery.error,
                 )
+        return combine_delivery_results("qq_napcat", results)
 
     def get_runtime_status(self) -> dict[str, Any]:
         payload = self.adapter.get_status()
@@ -232,16 +244,3 @@ class QQChannelService:
                 }
             )
         return segments
-
-    def _prefixed_message(self, message: Message) -> Message:
-        source = str(message.channel or "").strip().lower()
-        if source in {"", "qq", "system"}:
-            return message
-        prefix_map = {
-            "weixin": "[微信] ",
-        }
-        prefix = prefix_map.get(source, "")
-        text = str(message.text or "")
-        if not prefix or not text.strip() or text.startswith(prefix):
-            return message
-        return message.model_copy(update={"text": f"{prefix}{text}"})
