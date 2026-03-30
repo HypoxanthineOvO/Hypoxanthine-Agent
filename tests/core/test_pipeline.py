@@ -10,6 +10,7 @@ from hypo_agent.memory.semantic_memory import ChunkResult
 from hypo_agent.memory.structured_store import StructuredStore
 from hypo_agent.models import Attachment, Message
 from hypo_agent.models import SkillOutput
+from hypo_agent.core.unified_message import UnifiedMessage
 
 
 class StubSessionMemory:
@@ -418,20 +419,21 @@ def test_system_prompt_contains_time(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_pipeline_broadcasts_reply_for_qq_channel() -> None:
     memory = StubSessionMemory()
-    from hypo_agent.core.channel_dispatcher import ChannelDispatcher
+    from hypo_agent.core.channel_dispatcher import ChannelDispatcher, ChannelRelayPolicy
 
     dispatcher = ChannelDispatcher()
+    relay = ChannelRelayPolicy(dispatcher)
     webui_received: list[Message] = []
-    qq_received: list[Message] = []
+    qq_received: list[UnifiedMessage] = []
 
     async def webui_sink(message: Message) -> None:
         webui_received.append(message)
 
-    async def qq_sink(message: Message) -> None:
+    async def qq_sink(message: UnifiedMessage) -> None:
         qq_received.append(message)
 
-    dispatcher.register("webui", webui_sink)
-    dispatcher.register("qq", qq_sink)
+    dispatcher.register("webui", webui_sink, platform="webui", is_external=False)
+    dispatcher.register("qq", qq_sink, platform="qq", is_external=True)
 
     class StubRouter:
         async def stream(self, model_name, messages, *, session_id=None):
@@ -442,14 +444,14 @@ def test_pipeline_broadcasts_reply_for_qq_channel() -> None:
         chat_model="Gemini3Pro",
         session_memory=memory,
         history_window=20,
-        on_proactive_message=dispatcher.broadcast,
+        on_proactive_message=relay.relay_message,
     )
 
     async def _collect() -> None:
         inbound = Message(
             text="hello",
             sender="user",
-            session_id="s1",
+            session_id="main",
             channel="qq",
             sender_id="10001",
         )
@@ -463,24 +465,26 @@ def test_pipeline_broadcasts_reply_for_qq_channel() -> None:
     assert webui_received[0].text == "Hi"
     assert webui_received[0].channel == "qq"
     assert qq_received[0].channel == "qq"
+    assert qq_received[0].raw_text == "Hi"
 
 
-def test_pipeline_broadcasts_reply_excluding_qq_for_webui_origin() -> None:
+def test_pipeline_broadcasts_reply_to_external_channels_for_webui_origin() -> None:
     memory = StubSessionMemory()
-    from hypo_agent.core.channel_dispatcher import ChannelDispatcher
+    from hypo_agent.core.channel_dispatcher import ChannelDispatcher, ChannelRelayPolicy
 
     dispatcher = ChannelDispatcher()
+    relay = ChannelRelayPolicy(dispatcher)
     webui_received: list[Message] = []
-    qq_received: list[Message] = []
+    qq_received: list[UnifiedMessage] = []
 
     async def webui_sink(message: Message) -> None:
         webui_received.append(message)
 
-    async def qq_sink(message: Message) -> None:
+    async def qq_sink(message: UnifiedMessage) -> None:
         qq_received.append(message)
 
-    dispatcher.register("webui", webui_sink)
-    dispatcher.register("qq", qq_sink)
+    dispatcher.register("webui", webui_sink, platform="webui", is_external=False)
+    dispatcher.register("qq", qq_sink, platform="qq", is_external=True)
 
     class StubRouter:
         async def stream(self, model_name, messages, *, session_id=None):
@@ -491,14 +495,14 @@ def test_pipeline_broadcasts_reply_excluding_qq_for_webui_origin() -> None:
         chat_model="Gemini3Pro",
         session_memory=memory,
         history_window=20,
-        on_proactive_message=dispatcher.broadcast,
+        on_proactive_message=relay.relay_message,
     )
 
     async def _collect() -> None:
         inbound = Message(
             text="hello",
             sender="user",
-            session_id="s1",
+            session_id="main",
             channel="webui",
         )
         async for _ in pipeline.stream_reply(inbound):
@@ -509,7 +513,8 @@ def test_pipeline_broadcasts_reply_excluding_qq_for_webui_origin() -> None:
     assert len(webui_received) == 1
     assert webui_received[0].text == "OK"
     assert webui_received[0].channel == "webui"
-    assert qq_received == []
+    assert len(qq_received) == 1
+    assert qq_received[0].raw_text == "OK"
 
 
 def test_preference_injection(tmp_path: Path) -> None:

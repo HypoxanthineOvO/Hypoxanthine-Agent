@@ -12,6 +12,14 @@ from hypo_agent.core.config_loader import get_memory_dir
 logger = structlog.get_logger("hypo_agent.core.image_renderer")
 
 
+class ImageRenderError(RuntimeError):
+    def __init__(self, *, block_type: str, fallback_text: str, reason: str) -> None:
+        super().__init__(reason)
+        self.block_type = str(block_type or "markdown")
+        self.fallback_text = str(fallback_text or "")
+        self.reason = str(reason or "image render failed")
+
+
 class ImageRenderer:
     def __init__(
         self,
@@ -48,6 +56,23 @@ class ImageRenderer:
     def available(self) -> bool:
         return self._available
 
+    async def health_check(self) -> bool:
+        if not self.available or self._context is None:
+            return False
+        page: Any | None = None
+        try:
+            page = await self._context.new_page()
+            await page.set_content("<html><body>ok</body></html>", wait_until="domcontentloaded")
+            self._available = True
+            return True
+        except Exception:
+            self._available = False
+            logger.warning("image_renderer.health_check_failed", exc_info=True)
+            return False
+        finally:
+            if page is not None:
+                await page.close()
+
     async def _start_playwright(self) -> Any:
         from playwright.async_api import async_playwright
 
@@ -80,53 +105,62 @@ class ImageRenderer:
         )
 
     async def render_to_image(self, content: str, block_type: str = "markdown") -> str:
-        page = await self._prepare_page()
-        capture_page: Any | None = None
-        output_path = self._build_output_path(self.rendered_images_dir, suffix=".png")
+        normalized_content = str(content or "")
+        normalized_block_type = str(block_type or "markdown").strip().lower() or "markdown"
+        last_error: Exception | None = None
 
-        try:
-            await self._render(page, content=content, block_type=block_type)
-            snapshot_html = await self._prepare_for_capture(page)
-            capture_page = await self._build_capture_page(snapshot_html)
-            element = await capture_page.query_selector("#render-target")
-            if element is None:
-                raise RuntimeError("render target not found")
-            await element.screenshot(path=str(output_path))
-        finally:
-            if capture_page is not None:
-                await capture_page.close()
-            await page.close()
+        for attempt in range(2):
+            try:
+                if attempt > 0:
+                    recovered = await self._recover_renderer()
+                    if not recovered:
+                        break
+                output_path = await self._render_to_image_once(
+                    normalized_content,
+                    block_type=normalized_block_type,
+                )
+                self.cleanup_rendered_images()
+                return output_path
+            except Exception as exc:
+                last_error = exc
+                if attempt >= 1 or not self._should_retry_render(exc):
+                    break
+                logger.warning(
+                    "image_renderer.render_retry",
+                    block_type=normalized_block_type,
+                    error=str(exc),
+                )
 
-        self.cleanup_rendered_images()
-        return str(output_path)
+        fallback_text = self.build_fallback_text(
+            normalized_content,
+            block_type=normalized_block_type,
+        )
+        logger.warning(
+            "image_renderer.render_failed",
+            block_type=normalized_block_type,
+            error=str(last_error) if last_error is not None else "unknown",
+        )
+        raise ImageRenderError(
+            block_type=normalized_block_type,
+            fallback_text=fallback_text,
+            reason=str(last_error) if last_error is not None else "image renderer unavailable",
+        )
 
     async def render_to_pdf(self, content: str) -> str:
-        page = await self._prepare_page()
-        capture_page: Any | None = None
-        output_path = self._build_output_path(self.exports_dir, suffix=".pdf")
-
-        try:
-            await self._render(page, content=content, block_type="markdown")
-            snapshot_html = await self._prepare_for_capture(page)
-            capture_page = await self._build_capture_page(snapshot_html)
-            await capture_page.emulate_media(media="screen")
-            await capture_page.pdf(
-                path=str(output_path),
-                print_background=True,
-                width="800px",
-                margin={
-                    "top": "24px",
-                    "right": "24px",
-                    "bottom": "24px",
-                    "left": "24px",
-                },
-            )
-        finally:
-            if capture_page is not None:
-                await capture_page.close()
-            await page.close()
-
-        return str(output_path)
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                if attempt > 0:
+                    recovered = await self._recover_renderer()
+                    if not recovered:
+                        break
+                return await self._render_to_pdf_once(str(content or ""))
+            except Exception as exc:
+                last_error = exc
+                if attempt >= 1 or not self._should_retry_render(exc):
+                    break
+                logger.warning("image_renderer.pdf_retry", error=str(exc))
+        raise RuntimeError(str(last_error) if last_error is not None else "image renderer unavailable")
 
     def cleanup_rendered_images(self) -> None:
         if not self.rendered_images_dir.exists():
@@ -164,7 +198,22 @@ class ImageRenderer:
         if playwright is not None:
             await playwright.stop()
 
+    def build_fallback_text(self, content: str, *, block_type: str) -> str:
+        labels = {
+            "table": "表格",
+            "code": "代码块",
+            "math": "公式",
+            "mermaid": "Mermaid 图",
+            "diagram": "图表",
+            "markdown": "Markdown 内容",
+        }
+        label = labels.get(block_type, "内容")
+        body = str(content or "").strip() or "[空内容]"
+        return f"[{label}渲染失败，原始内容如下]\n{body}"
+
     async def _prepare_page(self) -> Any:
+        if (not self.available or self._context is None) and self._browser is None:
+            await self.initialize()
         if not self.available or self._context is None:
             raise RuntimeError("ImageRenderer is unavailable")
         if not self._template_path.exists():
@@ -229,3 +278,73 @@ class ImageRenderer:
         page = await self._context.new_page()
         await page.set_content(html, wait_until="domcontentloaded")
         return page
+
+    async def _render_to_image_once(self, content: str, *, block_type: str) -> str:
+        page: Any | None = None
+        capture_page: Any | None = None
+        output_path = self._build_output_path(self.rendered_images_dir, suffix=".png")
+        try:
+            page = await self._prepare_page()
+            await self._render(page, content=content, block_type=block_type)
+            snapshot_html = await self._prepare_for_capture(page)
+            capture_page = await self._build_capture_page(snapshot_html)
+            element = await capture_page.query_selector("#render-target")
+            if element is None:
+                raise RuntimeError("render target not found")
+            await element.screenshot(path=str(output_path))
+            return str(output_path)
+        finally:
+            if capture_page is not None:
+                await capture_page.close()
+            if page is not None:
+                await page.close()
+
+    async def _render_to_pdf_once(self, content: str) -> str:
+        page: Any | None = None
+        capture_page: Any | None = None
+        output_path = self._build_output_path(self.exports_dir, suffix=".pdf")
+        try:
+            page = await self._prepare_page()
+            await self._render(page, content=content, block_type="markdown")
+            snapshot_html = await self._prepare_for_capture(page)
+            capture_page = await self._build_capture_page(snapshot_html)
+            await capture_page.emulate_media(media="screen")
+            await capture_page.pdf(
+                path=str(output_path),
+                print_background=True,
+                width="800px",
+                margin={
+                    "top": "24px",
+                    "right": "24px",
+                    "bottom": "24px",
+                    "left": "24px",
+                },
+            )
+            return str(output_path)
+        finally:
+            if capture_page is not None:
+                await capture_page.close()
+            if page is not None:
+                await page.close()
+
+    async def _recover_renderer(self) -> bool:
+        await self.shutdown()
+        await self.initialize()
+        return self.available
+
+    def _should_retry_render(self, exc: Exception) -> bool:
+        if isinstance(exc, FileNotFoundError):
+            return False
+        message = str(exc).lower()
+        retry_markers = (
+            "closed",
+            "crash",
+            "destroyed",
+            "target page",
+            "target closed",
+            "browser has been closed",
+            "context has been closed",
+        )
+        if any(marker in message for marker in retry_markers):
+            return True
+        return not self.available

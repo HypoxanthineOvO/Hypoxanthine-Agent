@@ -4,7 +4,7 @@ import re
 from typing import Any
 
 _FENCE_OPEN_RE = re.compile(r"^```(?P<lang>[a-zA-Z0-9_+-]*)[^\n]*$")
-_TABLE_DIVIDER_RE = re.compile(r"^\|\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?$")
+_TABLE_DIVIDER_CELL_RE = re.compile(r"^:?-{3,}:?$")
 
 
 def split_markdown_blocks(text: str) -> list[dict[str, str]]:
@@ -100,25 +100,48 @@ def _is_math_block_line(stripped_line: str) -> bool:
 def _read_table_block(lines: list[str], start: int) -> tuple[str | None, int]:
     if start + 1 >= len(lines):
         return None, start
-    candidate_lines: list[str] = []
-    index = start
+
+    header_line = lines[start]
+    divider_line = lines[start + 1]
+    if not _is_table_header_line(header_line) or not _is_table_divider_line(divider_line):
+        return None, start
+
+    candidate_lines = [header_line, divider_line]
+    index = start + 2
     while index < len(lines):
         raw_line = lines[index]
         stripped = raw_line.strip()
-        if not (stripped.startswith("|") and stripped.endswith("|")):
+        if not stripped:
+            break
+        if _FENCE_OPEN_RE.match(stripped) or _is_math_block_line(stripped):
+            break
+        if not _is_table_row_line(raw_line):
             break
         candidate_lines.append(raw_line)
         index += 1
 
-    if len(candidate_lines) < 2:
-        return None, start
-
-    divider_index = None
-    for idx, item in enumerate(candidate_lines):
-        if _TABLE_DIVIDER_RE.match(item.strip()):
-            divider_index = idx
-            break
-    if divider_index != 1:
-        return None, start
-
     return "".join(candidate_lines), index
+
+
+def _is_table_header_line(raw_line: str) -> bool:
+    stripped = raw_line.strip()
+    return bool(stripped and "|" in stripped)
+
+
+def _is_table_divider_line(raw_line: str) -> bool:
+    stripped = raw_line.strip()
+    if not stripped or "|" not in stripped:
+        return False
+    cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+    if len(cells) < 2:
+        return False
+    return all(cell and _TABLE_DIVIDER_CELL_RE.match(cell) for cell in cells)
+
+
+def _is_table_row_line(raw_line: str) -> bool:
+    stripped = raw_line.strip()
+    if not stripped:
+        return False
+    if "|" not in stripped:
+        return False
+    return not _is_table_divider_line(raw_line)

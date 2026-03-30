@@ -360,6 +360,25 @@ def test_secrets_config_accepts_services_weixin() -> None:
     assert config.services.weixin.allowed_users == ["alice@im.wechat"]
 
 
+def test_secrets_config_accepts_services_feishu() -> None:
+    config = SecretsConfig.model_validate(
+        {
+            "providers": {},
+            "services": {
+                "feishu": {
+                    "app_id": "cli_xxx",
+                    "app_secret": "secret_xxx",
+                }
+            },
+        }
+    )
+
+    assert config.services is not None
+    assert config.services.feishu is not None
+    assert config.services.feishu.app_id == "cli_xxx"
+    assert config.services.feishu.app_secret == "secret_xxx"
+
+
 def test_secrets_config_accepts_services_tavily():
     config = SecretsConfig.model_validate(
         {

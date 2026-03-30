@@ -1221,24 +1221,15 @@ class ChatPipeline:
         callback = self.on_proactive_message
         if callback is None:
             return
-        exclude_channels: set[str] | None = None
-        exclude_client_ids: set[str] | None = None
-        channel = str(origin_channel or "").strip().lower()
-        if channel == "webui":
-            exclude_channels = {"qq"}
-            if origin_client_id:
-                exclude_client_ids = {origin_client_id}
         try:
             result = callback(
                 message,
-                exclude_channels=exclude_channels,
-                exclude_client_ids=exclude_client_ids,
+                message_type="ai_reply",
+                origin_channel=origin_channel,
+                origin_client_id=origin_client_id,
             )
         except TypeError:
-            try:
-                result = callback(message, exclude_channels=exclude_channels)
-            except TypeError:
-                result = callback(message)
+            result = callback(message)
         if inspect.isawaitable(result):
             await result
 
@@ -1668,6 +1659,6 @@ class ChatPipeline:
         if not normalized or "all" in normalized:
             return None
 
-        supported = {"webui", "qq", "weixin"}
+        supported = {"webui", "qq", "weixin", "feishu"}
         filtered = {item for item in normalized if item in supported}
         return filtered or None

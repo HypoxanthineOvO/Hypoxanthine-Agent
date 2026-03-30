@@ -232,6 +232,44 @@ def test_pipeline_event_consumer_preserves_target_channels_metadata() -> None:
     asyncio.run(_run())
 
 
+def test_pipeline_event_consumer_accepts_feishu_target_channel() -> None:
+    async def _run() -> None:
+        queue = EventQueue()
+        memory = StubSessionMemory()
+        pushed: list[Message] = []
+
+        async def on_proactive_message(message: Message) -> None:
+            pushed.append(message)
+
+        pipeline = ChatPipeline(
+            router=StubRouter(),
+            chat_model="Gemini3Pro",
+            session_memory=memory,
+            event_queue=queue,
+            on_proactive_message=on_proactive_message,
+        )
+
+        await pipeline.start_event_consumer()
+        await queue.put(
+            {
+                "event_type": "reminder_trigger",
+                "session_id": "feishu_oc_chat_123",
+                "title": "飞书提醒",
+                "channel": "feishu",
+            }
+        )
+        await asyncio.sleep(0.05)
+        await pipeline.stop_event_consumer()
+
+        assert len(memory.appended) == 1
+        assert memory.appended[0].metadata["target_channels"] == ["feishu"]
+        assert memory.appended[0].metadata["delivery_channel"] == "feishu"
+        assert len(pushed) == 1
+        assert pushed[0].metadata["target_channels"] == ["feishu"]
+
+    asyncio.run(_run())
+
+
 def test_pipeline_event_consumer_writes_email_scan_message() -> None:
     async def _run() -> None:
         queue = EventQueue()

@@ -31,6 +31,20 @@ def test_split_table() -> None:
     assert blocks[0]["type"] == "table"
 
 
+def test_split_table_without_outer_pipes() -> None:
+    blocks = split_markdown_blocks("A | B\n--- | ---\n1 | 2\n")
+
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "table"
+
+
+def test_split_table_with_mixed_pipe_styles() -> None:
+    blocks = split_markdown_blocks("A | B\n| --- | --- |\n| 1 | 2 |\n")
+
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "table"
+
+
 def test_split_mixed() -> None:
     content = (
         "# 标题\n\n"
@@ -50,6 +64,12 @@ def test_code_block_contains_table_syntax() -> None:
 
     assert len(blocks) == 1
     assert blocks[0]["type"] == "code"
+
+
+def test_setext_heading_is_not_detected_as_table() -> None:
+    blocks = split_markdown_blocks("Heading\n---\nbody\n")
+
+    assert [block["type"] for block in blocks] == ["text"]
 
 
 def test_no_content_lost() -> None:
