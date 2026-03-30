@@ -70,6 +70,7 @@ class HeartbeatService:
                 "should_push": False,
                 "summary": SILENT_SENTINEL,
                 "error": "overlap_skipped",
+                "event_sources": {},
             }
 
         async with self._run_lock:
@@ -96,10 +97,20 @@ class HeartbeatService:
             if not self._prompt_missing_reported:
                 self._prompt_missing_reported = True
                 await self._push_summary(summary)
-                return {"should_push": True, "summary": summary, "error": "prompt_missing"}
-            return {"should_push": False, "summary": SILENT_SENTINEL, "error": "prompt_missing"}
+                return {
+                    "should_push": True,
+                    "summary": summary,
+                    "error": "prompt_missing",
+                    "event_sources": {},
+                }
+            return {
+                "should_push": False,
+                "summary": SILENT_SENTINEL,
+                "error": "prompt_missing",
+                "event_sources": {},
+            }
 
-        event_source_context = await self._collect_event_source_context()
+        event_source_context, event_source_statuses = await self._collect_event_source_context()
         if event_source_context:
             prompt = (
                 f"{prompt}\n\n## 外部事件源预检\n"
@@ -168,7 +179,12 @@ class HeartbeatService:
                 timeout_seconds=self.timeout_seconds,
                 duration_ms=int((perf_counter() - started_at) * 1000),
             )
-            return {"should_push": True, "summary": summary, "error": "timeout"}
+            return {
+                "should_push": True,
+                "summary": summary,
+                "error": "timeout",
+                "event_sources": event_source_statuses,
+            }
         finally:
             self.last_heartbeat_at = datetime.now(UTC).isoformat()
 
@@ -184,7 +200,12 @@ class HeartbeatService:
                 duration_ms=duration_ms,
                 error=error_message,
             )
-            return {"should_push": True, "summary": summary, "error": "pipeline_error"}
+            return {
+                "should_push": True,
+                "summary": summary,
+                "error": "pipeline_error",
+                "event_sources": event_source_statuses,
+            }
 
         normalized = assistant_text.strip()
         if normalized == SILENT_SENTINEL:
@@ -193,7 +214,11 @@ class HeartbeatService:
                 session_id=self.default_session_id,
                 duration_ms=duration_ms,
             )
-            return {"should_push": False, "summary": SILENT_SENTINEL}
+            return {
+                "should_push": False,
+                "summary": SILENT_SENTINEL,
+                "event_sources": event_source_statuses,
+            }
 
         if not normalized:
             logger.info(
@@ -201,7 +226,11 @@ class HeartbeatService:
                 session_id=self.default_session_id,
                 duration_ms=duration_ms,
             )
-            return {"should_push": False, "summary": SILENT_SENTINEL}
+            return {
+                "should_push": False,
+                "summary": SILENT_SENTINEL,
+                "event_sources": event_source_statuses,
+            }
 
         await self._push_summary(normalized)
         logger.info(
@@ -209,7 +238,11 @@ class HeartbeatService:
             session_id=self.default_session_id,
             duration_ms=duration_ms,
         )
-        return {"should_push": True, "summary": normalized}
+        return {
+            "should_push": True,
+            "summary": normalized,
+            "event_sources": event_source_statuses,
+        }
 
     async def _push_summary(self, summary: str) -> None:
         cleaned = str(summary or "").strip()
@@ -249,22 +282,32 @@ class HeartbeatService:
             "active_tasks": active_tasks,
         }
 
-    async def _collect_event_source_context(self) -> str:
+    async def _collect_event_source_context(self) -> tuple[str, dict[str, dict[str, str | None]]]:
         if not self._event_sources:
-            return ""
+            return "", {}
         blocks: list[str] = []
+        statuses: dict[str, dict[str, str | None]] = {}
         for name, callback in self._event_sources.items():
             try:
                 payload = callback()
                 if inspect.isawaitable(payload):
                     payload = await payload
-            except Exception:
-                logger.exception("heartbeat.event_source.failed", source=name)
+            except Exception as exc:
+                status = "timeout" if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) else "failed"
+                error_message = str(exc).strip() or exc.__class__.__name__
+                statuses[name] = {"status": status, "error": error_message}
+                logger.warning(
+                    "heartbeat.event_source.failed",
+                    source=name,
+                    status=status,
+                    error=error_message,
+                )
                 continue
+            statuses[name] = {"status": "success", "error": None}
             rendered = self._render_event_source_payload(name=name, payload=payload)
             if rendered:
                 blocks.append(rendered)
-        return "\n\n".join(blocks).strip()
+        return "\n\n".join(blocks).strip(), statuses
 
     def _render_event_source_payload(self, *, name: str, payload: Any) -> str:
         if payload is None:

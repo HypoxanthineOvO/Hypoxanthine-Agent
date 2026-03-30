@@ -35,9 +35,16 @@
 - 如果 `nvidia-smi --query-compute-apps` 返回空：明确写“当前无 GPU compute 进程”。
 - 如果机器无 NVIDIA/无权限/命令不可用：明确写失败原因（stderr 关键行），不要静默跳过。
 
+## Notion ToDo（HYX 的计划通）
+- 执行 SOP：`Notion HYX 计划通 - 今日 ToDo 提取`
+- 只做一件事：从 Notion 数据库 `a19e5a0d-fd23-441e-9d55-9c5fc4a6206c` 提取“今天（Asia/Shanghai）新建”的 ToDo 列表。
+- 汇报规则：
+  - 若有条目：用一个小节 `今日 ToDo` 输出（每条一行：`YYYY-MM-DD - 标题`）。
+  - 若无条目：不需要单独汇报（避免打扰）。
+
 ## 邮件
 - 调用 scan_emails 扫描未读邮件。
-- 🔴 重要邮件：展开摘要，附件信息放在概要下方
+- 🔴 重要邮件：展开讲解邮件内容，附件信息放在概要下方
 - ⚪ 普通邮件：一句话概括
 - 被扫描的文件全部标记为已读。
 

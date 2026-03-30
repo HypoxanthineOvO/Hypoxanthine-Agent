@@ -522,3 +522,44 @@ def test_heartbeat_appends_registered_event_source_context_to_prompt(tmp_path: P
         assert "阿里云 AI 产品涨价" in inbound.text
 
     asyncio.run(_run())
+
+
+def test_heartbeat_event_source_failure_is_isolated_and_reported(tmp_path: Path, monkeypatch) -> None:
+    async def _run() -> None:
+        prompt_path = tmp_path / "heartbeat_prompt.md"
+        prompt_path.write_text("base prompt", encoding="utf-8")
+        queue = AutoRespondingQueue(
+            [
+                {"type": "assistant_chunk", "text": SILENT_SENTINEL},
+                {"type": "assistant_done"},
+            ]
+        )
+        logger = RecordingLogger()
+        monkeypatch.setattr(heartbeat_module, "logger", logger)
+        service = HeartbeatService(
+            message_queue=queue,
+            scheduler=StubScheduler(running=True),
+            default_session_id="main",
+            prompt_path=prompt_path,
+        )
+
+        async def broken_source() -> dict[str, Any]:
+            raise TimeoutError("notion api timeout")
+
+        async def working_source() -> dict[str, Any]:
+            return {"items": [{"title": "正常条目"}]}
+
+        service.register_event_source("notion_todo", broken_source)
+        service.register_event_source("trendradar", working_source)
+
+        result = await service.run()
+
+        assert result["should_push"] is False
+        assert result["event_sources"]["notion_todo"]["status"] == "timeout"
+        assert result["event_sources"]["trendradar"]["status"] == "success"
+        inbound = queue.events[0]["message"]
+        assert "正常条目" in inbound.text
+        assert "notion api timeout" not in inbound.text
+        assert logger.warning_calls[-1][0] == "heartbeat.event_source.failed"
+
+    asyncio.run(_run())
