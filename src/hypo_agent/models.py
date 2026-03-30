@@ -127,6 +127,13 @@ class WeixinServiceConfig(BaseModel):
     allowed_users: list[str] = Field(default_factory=list)
 
 
+class FeishuServiceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    app_id: str
+    app_secret: str
+
+
 class TavilyServiceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -167,6 +174,7 @@ class ServicesConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     email: EmailServiceConfig | None = None
+    feishu: FeishuServiceConfig | None = None
     hypo_coder: HypoCoderConfig | None = None
     hypo_info: HypoInfoConfig | None = None
     notion: NotionServiceConfig | None = None

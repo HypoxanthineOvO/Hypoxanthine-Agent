@@ -23,6 +23,7 @@ from hypo_agent.core.config_loader import (
 )
 from hypo_agent.channels.coder import CoderClient
 from hypo_agent.channels.coder.coder_webhook import router as coder_webhook_router
+from hypo_agent.channels.feishu_channel import FeishuChannel
 from hypo_agent.channels.probe import ProbeServer, router as probe_ws_router
 from hypo_agent.channels.qq_bot_channel import QQBotChannelService
 from hypo_agent.channels.qq_channel import QQChannelService
@@ -35,7 +36,8 @@ from hypo_agent.core.config_loader import (
     render_persona_system_prompt,
 )
 from hypo_agent.core.channel_adapter import WebUIAdapter
-from hypo_agent.core.channel_dispatcher import ChannelDispatcher
+from hypo_agent.core.channel_dispatcher import ChannelDispatcher, ChannelRelayPolicy
+from hypo_agent.core.delivery import DeliveryResult
 from hypo_agent.core.directory_index import refresh_directory_index
 from hypo_agent.core.event_queue import EventQueue
 from hypo_agent.core.heartbeat import HeartbeatService
@@ -62,11 +64,12 @@ from hypo_agent.gateway.upload_api import router as upload_api_router
 from hypo_agent.gateway.middleware import WsTokenAuthMiddleware
 from hypo_agent.gateway.qq_ws import router as qq_ws_router
 from hypo_agent.gateway.qq_ws_client import NapCatWebSocketClient
-from hypo_agent.gateway.settings import load_gateway_settings
+from hypo_agent.gateway.settings import ChannelsConfig, load_channel_settings, load_gateway_settings
 from hypo_agent.gateway.ws import broadcast_message, connection_manager, router as ws_router
 from hypo_agent.memory import MemoryGC, SemanticMemory, SessionMemory, StructuredStore
 from hypo_agent.models import (
     Message,
+    FeishuServiceConfig,
     QQBotServiceConfig,
     QQServiceConfig,
     SecurityConfig,
@@ -133,6 +136,7 @@ class AppDeps:
     coder_client: CoderClient | Any | None = None
     coder_webhook_secret: str | None = None
     coder_webhook_url: str | None = None
+    feishu_channel: FeishuChannel | None = None
     probe_server: ProbeServer | Any | None = None
     reload_config: Any | None = None
 
@@ -665,6 +669,25 @@ def _load_enabled_qq_bot_service_config(config_dir: Path) -> QQBotServiceConfig 
     return qq_bot_cfg
 
 
+def _load_feishu_service_config(config_dir: Path) -> FeishuServiceConfig | None:
+    secrets_path = config_dir / "secrets.yaml"
+    try:
+        secrets = load_secrets_config(secrets_path)
+    except FileNotFoundError:
+        return None
+    except Exception:
+        logger.exception("feishu.config.load_failed", path=str(secrets_path))
+        return None
+
+    services = secrets.services
+    feishu_cfg = services.feishu if services is not None else None
+    if feishu_cfg is None:
+        return None
+    if not str(feishu_cfg.app_id or "").strip() or not str(feishu_cfg.app_secret or "").strip():
+        return None
+    return feishu_cfg
+
+
 def _build_qq_channel_service(qq_cfg: QQServiceConfig) -> QQChannelService:
     allowed_users = {item.strip() for item in qq_cfg.allowed_users if item and item.strip()}
     return QQChannelService(
@@ -675,10 +698,15 @@ def _build_qq_channel_service(qq_cfg: QQServiceConfig) -> QQChannelService:
     )
 
 
-def _build_qq_bot_channel_service(qq_bot_cfg: QQBotServiceConfig) -> QQBotChannelService:
+def _build_qq_bot_channel_service(
+    qq_bot_cfg: QQBotServiceConfig,
+    *,
+    image_renderer: Any | None = None,
+) -> QQBotChannelService:
     return QQBotChannelService(
         app_id=qq_bot_cfg.app_id,
         app_secret=qq_bot_cfg.app_secret,
+        image_renderer=image_renderer,
     )
 
 
@@ -713,9 +741,11 @@ def create_app(
     pipeline: ChatPipeline | None = None,
     deps: AppDeps | None = None,
     security: SecurityConfig | None = None,
+    channels: ChannelsConfig | None = None,
 ) -> FastAPI:
     test_mode_enabled = is_test_mode()
     resolved_deps = deps or _build_default_deps(security)
+    resolved_channels = channels or load_channel_settings()
     if test_mode_enabled:
         _validate_test_mode_storage_isolation(deps=resolved_deps)
     if resolved_deps.event_queue is None:
@@ -878,6 +908,7 @@ def create_app(
                     resolved_deps.memory_gc.run,
                 )
         await app.state.pipeline.start_event_consumer()
+        await start_feishu_channel()
         await start_weixin_channel()
         await restart_qq_ws_client()
         app.state.directory_index_task = asyncio.create_task(run_directory_index_refresh())
@@ -900,6 +931,7 @@ def create_app(
             qq_ws_client = getattr(app.state, "qq_ws_client", None)
             if qq_ws_client is not None:
                 await qq_ws_client.stop()
+            await stop_feishu_channel()
             await stop_weixin_channel()
             await app.state.pipeline.stop_event_consumer()
             if resolved_deps.scheduler is not None:
@@ -963,13 +995,16 @@ def create_app(
     connection_manager.reset()
     app.state.ws_connection_manager = connection_manager
     app.state.channel_dispatcher = ChannelDispatcher()
+    app.state.channel_relay = ChannelRelayPolicy(app.state.channel_dispatcher)
     app.state.qq_channel_service = None
     app.state.qq_bot_channel_service = None
     app.state.qq_ws_client = None
     app.state.qq_ws_url = None
     app.state.qq_ws_token = ""
+    app.state.feishu_channel = resolved_deps.feishu_channel
     app.state.weixin_channel = None
     app.state.weixin_adapter = None
+    app.state.channel_settings = resolved_channels
     app.state.qq_config_dir_snapshot = None
     app.state.directory_index_task = None
     app.state.email_cache_warmup_task = None
@@ -1003,18 +1038,19 @@ def create_app(
         message: Message,
         *,
         exclude_client_ids: set[str] | None = None,
-    ) -> None:
+    ) -> DeliveryResult:
         await push_ws_message(
             message.model_dump(mode="json"),
             exclude_client_ids=exclude_client_ids,
         )
+        return DeliveryResult.ok("webui", segment_count=1)
 
-    app.state.channel_dispatcher.register("webui", push_webui_message)
-
-    def should_sync_webui_session_to_external(message: Message) -> bool:
-        if str(message.channel).strip().lower() != "webui":
-            return True
-        return str(message.session_id or "").strip() == "main"
+    app.state.channel_dispatcher.register(
+        "webui",
+        push_webui_message,
+        platform="webui",
+        is_external=False,
+    )
 
     def qq_runtime_connected() -> bool:
         service = getattr(app.state, "qq_channel_service", None)
@@ -1050,38 +1086,6 @@ def create_app(
                 if runtime_online is False:
                     return False
         return True
-
-    async def mirror_webui_message_to_qq(message: Message) -> None:
-        if str(message.channel).strip().lower() != "webui":
-            return
-        if not should_sync_webui_session_to_external(message):
-            return
-        service = getattr(app.state, "qq_channel_service", None)
-        if service is None or not qq_runtime_connected():
-            return
-        if not callable(getattr(service, "send_message", None)):
-            return
-
-        raw_text = str(message.text or "").strip()
-        if not raw_text:
-            return
-        if bool(message.metadata.get("ephemeral")):
-            return
-
-        prefix = "[WebUI] Assistant: "
-        if message.sender == "user":
-            prefix = "[WebUI] User: "
-        elif message.sender != "assistant":
-            return
-
-        await service.send_message(
-            Message(
-                text=f"{prefix}{raw_text}",
-                sender="assistant",
-                session_id=message.session_id,
-                channel="webui",
-            )
-        )
 
     async def emit_narration(
         payload: dict[str, Any],
@@ -1166,7 +1170,7 @@ def create_app(
         app.state.qq_config_dir_snapshot = str(config_dir.resolve(strict=False))
         if existing_service is not None and existing_snapshot is None:
             app.state.qq_channel_service = existing_service
-            app.state.channel_dispatcher.register("qq", existing_service.send_message)
+            app.state.channel_dispatcher.register("qq", existing_service.send_message, platform="qq", is_external=True)
             logger.info("qq.channel.prebound", config_dir=str(config_dir))
             return
         if external_channels_disabled_for(config_dir):
@@ -1204,10 +1208,11 @@ def create_app(
                 save_target_openid=save_target_openid,
                 public_base_url=qq_bot_cfg.public_base_url,
                 public_file_token=auth_token,
+                image_renderer=resolved_deps.image_renderer,
             )
             app.state.qq_bot_channel_service = service
             app.state.qq_channel_service = service
-            app.state.channel_dispatcher.register("qq", service.send_message)
+            app.state.channel_dispatcher.register("qq", service.send_message, platform="qq", is_external=True)
             logger.info(
                 "qq_bot.channel.enabled",
                 config_dir=str(config_dir),
@@ -1236,13 +1241,56 @@ def create_app(
         app.state.qq_channel_service = service
         app.state.qq_ws_url = qq_cfg.napcat_ws_url
         app.state.qq_ws_token = qq_cfg.napcat_ws_token
-        app.state.channel_dispatcher.register("qq", service.send_message)
+        app.state.channel_dispatcher.register("qq", service.send_message, platform="qq", is_external=True)
         logger.info(
             "qq.channel.enabled",
             config_dir=str(config_dir),
             napcat_ws_url=qq_cfg.napcat_ws_url,
             napcat_http_url=qq_cfg.napcat_http_url,
             allowed_users=len(service.allowed_users),
+        )
+
+    def refresh_feishu_channel() -> None:
+        app.state.channel_dispatcher.unregister("feishu")
+        config_dir = Path(getattr(app.state, "config_dir", Path("config")))
+        if external_channels_disabled_for(config_dir):
+            app.state.feishu_channel = None
+            logger.info("feishu.channel.disabled", reason="test_mode")
+            return
+
+        channel_settings = getattr(app.state, "channel_settings", ChannelsConfig())
+        if not bool(getattr(channel_settings.feishu, "enabled", False)):
+            app.state.feishu_channel = None
+            logger.info("feishu.channel.disabled", config_dir=str(config_dir))
+            return
+
+        feishu_cfg = _load_feishu_service_config(config_dir)
+        if feishu_cfg is None:
+            app.state.feishu_channel = None
+            logger.info("feishu.channel.disabled", reason="missing_config", config_dir=str(config_dir))
+            return
+
+        channel = resolved_deps.feishu_channel
+        if channel is None:
+            channel = FeishuChannel(
+                app_id=feishu_cfg.app_id,
+                app_secret=feishu_cfg.app_secret,
+                message_queue=resolved_deps.event_queue,
+                build_message=Message,
+                inbound_callback_getter=lambda: getattr(app.state.pipeline, "on_proactive_message", None),
+            )
+            resolved_deps.feishu_channel = channel
+        app.state.feishu_channel = channel
+        app.state.channel_dispatcher.register(
+            "feishu",
+            channel.push_proactive,
+            platform="feishu",
+            is_external=True,
+        )
+        logger.info(
+            "feishu.channel.configured",
+            config_dir=str(config_dir),
+            app_id_suffix=feishu_cfg.app_id[-4:],
         )
 
     def _load_enabled_weixin_service_config(config_dir: Path) -> WeixinServiceConfig | None:
@@ -1305,7 +1353,7 @@ def create_app(
             on_message_sent=channel.record_message_sent,
         )
         app.state.weixin_adapter = adapter
-        app.state.channel_dispatcher.register("weixin", adapter.push)
+        app.state.channel_dispatcher.register("weixin", adapter.push, platform="weixin", is_external=True)
         if not user_id:
             logger.warning(
                 "weixin.adapter.target_user_missing",
@@ -1317,6 +1365,18 @@ def create_app(
         app.state.channel_dispatcher.unregister("weixin")
         app.state.weixin_adapter = None
         channel = getattr(app.state, "weixin_channel", None)
+        if channel is not None:
+            await channel.stop()
+
+    async def start_feishu_channel() -> None:
+        channel = getattr(app.state, "feishu_channel", None)
+        if channel is None:
+            return
+        await channel.start()
+
+    async def stop_feishu_channel() -> None:
+        app.state.channel_dispatcher.unregister("feishu")
+        channel = getattr(app.state, "feishu_channel", None)
         if channel is not None:
             await channel.stop()
 
@@ -1398,33 +1458,22 @@ def create_app(
     async def on_proactive_message(
         message: Message,
         *,
+        message_type: str | None = None,
+        origin_channel: str | None = None,
+        origin_client_id: str | None = None,
         exclude_channels: set[str] | None = None,
         exclude_client_ids: set[str] | None = None,
     ) -> None:
-        merged_exclusions = {item for item in (exclude_channels or set()) if item}
-        target_channels_raw = message.metadata.get("target_channels")
-        target_channels = {
-            str(item).strip().lower()
-            for item in target_channels_raw
-            if str(item).strip()
-        } if isinstance(target_channels_raw, list) else None
-        if target_channels is not None:
-            external_channels = {"qq", "weixin"}
-            merged_exclusions.update(external_channels - target_channels)
-        if str(message.channel).strip().lower() == "webui":
-            if should_sync_webui_session_to_external(message):
-                merged_exclusions.add("qq")
-            else:
-                merged_exclusions.update({"qq", "weixin"})
-        await app.state.channel_dispatcher.broadcast(
+        await app.state.channel_relay.relay_message(
             message,
-            exclude_channels=merged_exclusions,
+            message_type=message_type,
+            origin_channel=origin_channel,
+            origin_client_id=origin_client_id,
+            exclude_channels=exclude_channels,
             exclude_client_ids=exclude_client_ids,
         )
-        await mirror_webui_message_to_qq(message)
 
     app.state.push_ws_message = push_ws_message
-    app.state.mirror_webui_message_to_qq = mirror_webui_message_to_qq
     setattr(app.state.pipeline, "on_proactive_message", on_proactive_message)
     app.state.emit_narration = emit_narration
     refresh_narration_observer()
@@ -1463,6 +1512,7 @@ def create_app(
         app.state.coder_client = deps.coder_client
         app.state.coder_webhook_secret = deps.coder_webhook_secret or ""
         app.state.coder_webhook_url = deps.coder_webhook_url or ""
+        app.state.channel_settings = getattr(settings, "channels", ChannelsConfig())
         app.state.pipeline = _build_default_pipeline(deps)
         app.state.semantic_memory = deps.semantic_memory
         app.state.persona_manager = deps.persona_manager
@@ -1471,6 +1521,9 @@ def create_app(
         app.state.output_compressor = deps.output_compressor
         refresh_narration_observer()
         await app.state.pipeline.start_event_consumer()
+        await stop_feishu_channel()
+        refresh_feishu_channel()
+        await start_feishu_channel()
         await stop_weixin_channel()
         refresh_weixin_channel()
         await start_weixin_channel()
@@ -1489,6 +1542,7 @@ def create_app(
             "probe",
             resolved_deps.probe_server.probe_heartbeat_callback,
         )
+    refresh_feishu_channel()
     refresh_qq_channel_service()
     refresh_weixin_channel()
     refresh_probe_server_config()
