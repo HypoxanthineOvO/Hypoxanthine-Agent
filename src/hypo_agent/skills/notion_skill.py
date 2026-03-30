@@ -197,7 +197,10 @@ class NotionSkill(BaseSkill):
                     status="success",
                     result=await self.notion_search(query, object_type=object_type),
                 )
-        except NotionUnavailableError:
+        except NotionUnavailableError as exc:
+            error_text = str(exc).strip()
+            if error_text:
+                return SkillOutput(status="error", error_info=f"{_SERVICE_UNAVAILABLE}：{error_text}")
             return SkillOutput(status="error", error_info=_SERVICE_UNAVAILABLE)
         except Exception as exc:
             logger.warning("notion_skill.execute_failed", tool_name=tool_name, error=str(exc))

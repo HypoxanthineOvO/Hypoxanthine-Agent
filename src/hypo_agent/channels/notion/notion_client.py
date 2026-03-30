@@ -13,6 +13,10 @@ class NotionUnavailableError(RuntimeError):
     """Raised when Notion API is unreachable, rate-limited beyond retry budget, or unauthorized."""
 
 
+class NotionTimeoutError(NotionUnavailableError):
+    """Raised when a Notion API call exceeds the per-request timeout budget."""
+
+
 class NotionClient:
     def __init__(
         self,
@@ -20,9 +24,11 @@ class NotionClient:
         *,
         notion_version: str = "2022-06-28",
         timeout_ms: int = 30_000,
+        api_timeout_seconds: float = 10.0,
         max_retries: int = 3,
     ) -> None:
         self.integration_secret = integration_secret
+        self.api_timeout_seconds = max(0.01, float(api_timeout_seconds))
         self.max_retries = max(1, int(max_retries))
         self.client = AsyncClient(
             options={
@@ -194,7 +200,9 @@ class NotionClient:
         last_exc: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
             try:
-                return await operation()
+                return await self._call_with_timeout(operation, action=action)
+            except NotionTimeoutError:
+                raise
             except APIResponseError as exc:
                 last_exc = exc
                 if exc.status == 429 or exc.code == APIErrorCode.RateLimited:
@@ -203,7 +211,11 @@ class NotionClient:
                         await asyncio.sleep(retry_after)
                         continue
                 raise self._wrap_api_error(exc, action=action) from exc
-            except (RequestTimeoutError, HTTPResponseError, httpx.HTTPError) as exc:
+            except RequestTimeoutError as exc:
+                raise NotionTimeoutError(f"Notion {action} 超时（{self._timeout_text()}）：{exc}") from exc
+            except httpx.TimeoutException as exc:
+                raise NotionTimeoutError(f"Notion {action} 超时（{self._timeout_text()}）：{exc}") from exc
+            except (HTTPResponseError, httpx.HTTPError) as exc:
                 last_exc = exc
                 if attempt < self.max_retries:
                     await asyncio.sleep(1)
@@ -220,7 +232,40 @@ class NotionClient:
             return NotionUnavailableError("Notion 资源不存在，或当前集成没有访问权限")
         if exc.status == 429 or exc.code == APIErrorCode.RateLimited:
             return NotionUnavailableError("Notion 请求过于频繁，请稍后重试")
-        return NotionUnavailableError(f"Notion {action} 失败：{exc.message}")
+        return NotionUnavailableError(f"Notion {action} 失败：{self._format_api_error(exc)}")
+
+    async def _call_with_timeout(
+        self,
+        operation: Callable[[], Awaitable[Any]],
+        *,
+        action: str,
+    ) -> Any:
+        try:
+            async with asyncio.timeout(self.api_timeout_seconds):
+                return await operation()
+        except TimeoutError as exc:
+            raise NotionTimeoutError(f"Notion {action} 超时（{self._timeout_text()}）") from exc
+
+    def _format_api_error(self, exc: APIResponseError) -> str:
+        detail = str(exc).strip() or "unknown error"
+        code = self._api_error_code_text(getattr(exc, "code", None))
+        if code:
+            return f"{code} - {detail}"
+        return detail
+
+    def _api_error_code_text(self, code: Any) -> str:
+        if code is None:
+            return ""
+        value = getattr(code, "value", None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return str(code).strip()
+
+    def _timeout_text(self) -> str:
+        timeout_seconds = self.api_timeout_seconds
+        if timeout_seconds.is_integer():
+            return f"{int(timeout_seconds)}秒"
+        return f"{timeout_seconds:g}秒"
 
 
 def _retry_after_seconds(headers: Any) -> int:

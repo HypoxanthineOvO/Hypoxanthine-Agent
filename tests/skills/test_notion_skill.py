@@ -325,3 +325,49 @@ def test_notion_unavailable_returns_friendly_message() -> None:
         assert "Notion 当前不可用" in result.error_info
 
     asyncio.run(_run())
+
+
+def test_query_db_api_error() -> None:
+    class ApiErrorClient(FakeNotionClient):
+        async def get_database(self, database_id: str) -> dict:
+            del database_id
+            raise NotionUnavailableError("Notion query database 失败：ValidationError - body.filter.or should be defined")
+
+    async def _run() -> None:
+        skill = NotionSkill(notion_client=ApiErrorClient())
+
+        result = await skill.execute(
+            "notion_query_db",
+            {"database_id": "22222222222222222222222222222222", "filter": '{"or": []}', "limit": 20},
+        )
+
+        assert result.status == "error"
+        assert "body.filter.or should be defined" in result.error_info
+
+    asyncio.run(_run())
+
+
+def test_query_db_timeout() -> None:
+    class TimeoutClient(FakeNotionClient):
+        async def query_database(
+            self,
+            database_id: str,
+            filter: dict | None = None,
+            sorts: list | None = None,
+            page_size: int = 50,
+        ) -> list[dict]:
+            del database_id, filter, sorts, page_size
+            raise NotionUnavailableError("Notion query database 超时（10秒）")
+
+    async def _run() -> None:
+        skill = NotionSkill(notion_client=TimeoutClient())
+
+        result = await skill.execute(
+            "notion_query_db",
+            {"database_id": "22222222222222222222222222222222", "limit": 20},
+        )
+
+        assert result.status == "error"
+        assert "超时" in result.error_info
+
+    asyncio.run(_run())
