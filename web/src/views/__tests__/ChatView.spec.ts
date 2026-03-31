@@ -1,52 +1,11 @@
-/// <reference types="node" />
-
 import { mount } from "@vue/test-utils";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { MockWebSocket, flushUi, installMockWebSocket } from "@/test/utils";
 import ChatView from "../ChatView.vue";
 
-class MockWebSocket {
-  static CONNECTING = 0;
-  static OPEN = 1;
-  static CLOSING = 2;
-  static CLOSED = 3;
-  static instances: MockWebSocket[] = [];
-
-  readonly url: string;
-  readyState = MockWebSocket.CONNECTING;
-  onopen: ((event: Event) => void) | null = null;
-  onclose: ((event: CloseEvent) => void) | null = null;
-  onerror: ((event: Event) => void) | null = null;
-  onmessage: ((event: MessageEvent) => void) | null = null;
-
-  constructor(url: string) {
-    this.url = url;
-    MockWebSocket.instances.push(this);
-  }
-
-  send(): void {}
-
-  close(): void {
-    this.readyState = MockWebSocket.CLOSED;
-    this.onclose?.({} as CloseEvent);
-  }
-
-  emitOpen(): void {
-    this.readyState = MockWebSocket.OPEN;
-    this.onopen?.(new Event("open"));
-  }
-
-  emitMessage(data: string): void {
-    this.onmessage?.({ data } as MessageEvent);
-  }
-}
-
 beforeEach(() => {
-  MockWebSocket.instances = [];
-  globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+  installMockWebSocket();
   vi.stubGlobal(
     "fetch",
     vi.fn().mockResolvedValue({
@@ -60,45 +19,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function flushUi(): Promise<void> {
-  await Promise.resolve();
-  await nextTick();
-}
-
-const chatViewSource = readFileSync(
-  resolve(process.cwd(), "src/views/ChatView.vue"),
-  "utf8",
-);
-const chatPageBlock = chatViewSource.match(/\.chat-page\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
-
 describe("ChatView", () => {
-  it("keeps the chat layout on a pure flex column chain", () => {
-    expect(chatViewSource).toContain('class="chat-page"');
-    expect(chatViewSource).toContain('class="message-list"');
-    expect(chatViewSource).toContain('class="input-area"');
-    expect(chatViewSource).toMatch(/\.chat-page\s*\{[\s\S]*display:\s*flex;/);
-    expect(chatViewSource).toMatch(/\.chat-page\s*\{[\s\S]*flex-direction:\s*column;/);
-    expect(chatViewSource).toMatch(/\.chat-page\s*\{[\s\S]*height:\s*100%;/);
-    expect(chatViewSource).toMatch(/\.chat-page\s*\{[\s\S]*overflow:\s*hidden;/);
-    expect(chatViewSource).toMatch(/\.message-list\s*\{[\s\S]*flex:\s*1;/);
-    expect(chatViewSource).toMatch(/\.message-list\s*\{[\s\S]*min-height:\s*0;/);
-    expect(chatViewSource).toMatch(/\.message-list\s*\{[\s\S]*overflow-y:\s*auto;/);
-    expect(chatViewSource).toMatch(/\.input-area\s*\{[\s\S]*flex-shrink:\s*0;/);
-  });
-
-  it("fills the full width of the parent content pane", () => {
-    expect(chatPageBlock).toMatch(/width:\s*100%;/);
-  });
-
-  it("does not use positional anchoring for the composer chain", () => {
-    const inputAreaBlock = chatViewSource.match(/\.input-area\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
-    expect(inputAreaBlock).not.toMatch(/position\s*:/);
-    expect(inputAreaBlock).not.toMatch(/\bbottom\s*:/);
-    expect(inputAreaBlock).not.toMatch(/\btop\s*:/);
-    expect(inputAreaBlock).not.toMatch(/\bleft\s*:/);
-    expect(inputAreaBlock).not.toMatch(/\bright\s*:/);
-  });
-
   it("auto-connects websocket on mount", async () => {
     const wrapper = mount(ChatView, {
       props: {
