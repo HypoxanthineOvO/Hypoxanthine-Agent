@@ -1,55 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ref } from "vue";
 
+import { MockWebSocket, installMockWebSocket } from "@/test/utils";
 import { useChatSocket } from "../useChatSocket";
 
-class MockWebSocket {
-  static instances: MockWebSocket[] = [];
-  static CONNECTING = 0;
-  static OPEN = 1;
-  static CLOSING = 2;
-  static CLOSED = 3;
-
-  readonly url: string;
-  onopen: ((event: Event) => void) | null = null;
-  onclose: ((event: CloseEvent) => void) | null = null;
-  onerror: ((event: Event) => void) | null = null;
-  onmessage: ((event: MessageEvent) => void) | null = null;
-  sent: string[] = [];
-  readyState = MockWebSocket.CONNECTING;
-
-  constructor(url: string) {
-    this.url = url;
-    MockWebSocket.instances.push(this);
-  }
-
-  send(data: string): void {
-    this.sent.push(data);
-  }
-
-  close(): void {
-    this.readyState = MockWebSocket.CLOSED;
-    this.onclose?.({} as CloseEvent);
-  }
-
-  emitOpen(): void {
-    this.readyState = MockWebSocket.OPEN;
-    this.onopen?.(new Event("open"));
-  }
-
-  emitMessage(data: string): void {
-    this.onmessage?.({ data } as MessageEvent);
-  }
-
-  emitClose(): void {
-    this.readyState = MockWebSocket.CLOSED;
-    this.onclose?.({} as CloseEvent);
-  }
-}
-
 beforeEach(() => {
-  MockWebSocket.instances = [];
-  globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+  installMockWebSocket();
 });
 
 describe("useChatSocket", () => {
