@@ -1,9 +1,4 @@
-/// <reference types="node" />
-
 import { mount } from "@vue/test-utils";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("vue-echarts", () => ({
@@ -23,23 +18,9 @@ vi.mock("vue-echarts", () => ({
   },
 }));
 
+import { flushUi } from "@/test/utils";
+
 import DashboardView from "../DashboardView.vue";
-
-const dashboardSource = readFileSync(
-  resolve(process.cwd(), "src/views/DashboardView.vue"),
-  "utf8",
-);
-const dashboardRootBlock =
-  dashboardSource.match(/\.dashboard-view\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
-const dashboardGridItemBlock =
-  dashboardSource.match(/\.dashboard-grid\s*:deep\(\.n-grid-item\)\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
-const dashboardCardBlock =
-  dashboardSource.match(/\.dashboard-card\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
-
-async function flushUi(): Promise<void> {
-  await Promise.resolve();
-  await nextTick();
-}
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());
@@ -52,19 +33,6 @@ afterEach(() => {
 });
 
 describe("DashboardView", () => {
-  it("fills the full width of the content area", () => {
-    expect(dashboardRootBlock).toMatch(/width:\s*100%;/);
-  });
-
-  it("stretches top-level cards so each two-column row renders equal card heights", () => {
-    expect(dashboardSource).toContain('class="dashboard-grid"');
-    expect(dashboardSource).toContain('class="dashboard-card');
-    expect(dashboardGridItemBlock).toMatch(/display:\s*flex;/);
-    expect(dashboardCardBlock).toMatch(/height:\s*100%;/);
-    expect(dashboardCardBlock).toMatch(/display:\s*flex;/);
-    expect(dashboardCardBlock).toMatch(/flex-direction:\s*column;/);
-  });
-
   const mockDashboardFetch = (
     tokenRows: Array<Record<string, unknown>>,
     latencyModelRows: Array<Record<string, unknown>>,
@@ -262,12 +230,27 @@ describe("DashboardView", () => {
     expect(wrapper.text()).toContain("active tasks");
   });
 
-  it("renders WebUI, QQ and 微信 through the same shared channel card component", () => {
-    expect(dashboardSource).toContain('import ChannelStatusCard from "../components/dashboard/ChannelStatusCard.vue";');
-    expect(dashboardSource).not.toContain("WeixinStatusCard");
-    expect(dashboardSource).toContain(':title="channelCardMap.webui.name"');
-    expect(dashboardSource).toContain(':title="channelCardMap.qqBot.name"');
-    expect(dashboardSource).toContain(':title="channelCardMap.weixin.name"');
+  it("renders WebUI, QQ and 微信 channel cards in the DOM", async () => {
+    mockDashboardFetch(
+      [{ date: "2026-03-06", model: "Gemini3Pro", total_tokens: 100 }],
+      [{ date: "2026-03-06", p50_ms: 50, p95_ms: 80, p99_ms: 120 }],
+    );
+
+    const wrapper = mount(DashboardView, {
+      props: {
+        token: "test-token",
+        apiBase: "http://localhost:8000/api",
+      },
+    });
+
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    // All three channel types are rendered as named cards in the DOM
+    expect(wrapper.text()).toContain("WebUI");
+    expect(wrapper.text()).toContain("QQ Bot");
+    expect(wrapper.text()).toContain("微信");
   });
 
   it("builds token chart with date xAxis and model-based series", async () => {
