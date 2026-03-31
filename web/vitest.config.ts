@@ -14,5 +14,11 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "lcov"],
+      include: ["src/**/*.{ts,vue}"],
+      exclude: ["src/test/**", "src/**/*.spec.ts"],
+    },
   },
 });

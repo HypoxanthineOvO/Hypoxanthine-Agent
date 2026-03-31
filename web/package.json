@@ -29,6 +29,7 @@
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^24.10.1",
     "@vitejs/plugin-vue": "^6.0.2",
+    "@vitest/coverage-v8": "^4.1.2",
     "@vitest/ui": "^4.0.18",
     "@vue/compiler-dom": "^3.5.29",
     "@vue/server-renderer": "^3.5.29",
