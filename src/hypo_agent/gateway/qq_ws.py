@@ -28,6 +28,6 @@ async def qq_onebot_ingress(ws: WebSocket) -> None:
             await service.handle_onebot_event(payload, pipeline=pipeline)
     except WebSocketDisconnect:
         return
-    except Exception:
+    except (OSError, RuntimeError, TypeError, ValueError):
         logger.exception("qq_ws.ingress.failed")
         await ws.close(code=1011)

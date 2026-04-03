@@ -18,6 +18,7 @@ from hypo_agent.core.unified_message import (
     prepend_text_prefix,
     unified_message_from_message,
 )
+from hypo_agent.exceptions import ChannelError
 from hypo_agent.models import Message
 
 logger = structlog.get_logger("hypo_agent.channel_dispatcher")
@@ -83,7 +84,7 @@ class ChannelDispatcher:
                     result = registration.sink(message)
                 if inspect.isawaitable(result):
                     await result
-            except Exception:
+            except ChannelError:
                 logger.exception(
                     "channel_dispatcher.broadcast_failed",
                     channel=registration.name,
@@ -237,7 +238,11 @@ class ChannelRelayPolicy:
                     continue
 
             delivered = message
-            if message.message_type == "user_message" and registration.platform != source_platform:
+            if (
+                message.message_type == "user_message"
+                and registration.platform != source_platform
+                and registration.platform != "webui"
+            ):
                 prefix = self._source_prefix(source_platform)
                 if prefix:
                     delivered = prepend_text_prefix(delivered, prefix)
@@ -322,7 +327,7 @@ class ChannelRelayPolicy:
                 result = registration.sink(payload)
             if inspect.isawaitable(result):
                 result = await result
-        except Exception:
+        except ChannelError:
             logger.exception(
                 "channel_relay.delivery_failed",
                 channel=registration.name,

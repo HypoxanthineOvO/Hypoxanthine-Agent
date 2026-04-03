@@ -2,9 +2,6 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from hypo_agent.gateway.app import create_app
-
-
 class StubPipeline:
     async def stream_reply(self, inbound):
         text = inbound.text or ""
@@ -39,13 +36,13 @@ class ToolEventPipeline:
     async def stream_reply(self, inbound):
         yield {
             "type": "tool_call_start",
-            "tool_name": "run_command",
+            "tool_name": "exec_command",
             "tool_call_id": "call_1",
             "session_id": inbound.session_id,
         }
         yield {
             "type": "tool_call_result",
-            "tool_name": "run_command",
+            "tool_name": "exec_command",
             "tool_call_id": "call_1",
             "status": "success",
             "result": {"stdout": "ok"},
@@ -84,9 +81,8 @@ class AttachmentPipeline:
             "session_id": inbound.session_id,
         }
 
-
-def _client(token: str = "test-token", pipeline=None) -> TestClient:
-    app = create_app(auth_token=token, pipeline=pipeline or StubPipeline())
+def _client(app_factory, token: str = "test-token", pipeline=None) -> TestClient:
+    app = app_factory(auth_token=token, pipeline=pipeline or StubPipeline())
     return TestClient(app)
 
 
@@ -96,24 +92,24 @@ def _assert_utc_timestamp(value: object) -> None:
     assert "T" in value
 
 
-def test_ws_rejects_missing_token() -> None:
-    with _client() as client:
+def test_ws_rejects_missing_token(app_factory) -> None:
+    with _client(app_factory) as client:
         with pytest.raises(WebSocketDisconnect) as exc_info:
             with client.websocket_connect("/ws"):
                 pass
         assert exc_info.value.code == 4401
 
 
-def test_ws_rejects_invalid_token() -> None:
-    with _client() as client:
+def test_ws_rejects_invalid_token(app_factory) -> None:
+    with _client(app_factory) as client:
         with pytest.raises(WebSocketDisconnect) as exc_info:
             with client.websocket_connect("/ws?token=wrong"):
                 pass
         assert exc_info.value.code == 4401
 
 
-def test_ws_streams_valid_message_payload() -> None:
-    with _client() as client:
+def test_ws_streams_valid_message_payload(app_factory) -> None:
+    with _client(app_factory) as client:
         with client.websocket_connect("/ws?token=test-token") as ws:
             ws.send_json({"text": "hello", "sender": "user", "session_id": "s1"})
             first = ws.receive_json()
@@ -130,8 +126,8 @@ def test_ws_streams_valid_message_payload() -> None:
             _assert_utc_timestamp(second.get("timestamp"))
 
 
-def test_ws_rejects_invalid_message_shape() -> None:
-    with _client() as client:
+def test_ws_rejects_invalid_message_shape(app_factory) -> None:
+    with _client(app_factory) as client:
         with client.websocket_connect("/ws?token=test-token") as ws:
             ws.send_json({"sender": "user"})
             with pytest.raises(WebSocketDisconnect) as exc_info:
@@ -139,8 +135,8 @@ def test_ws_rejects_invalid_message_shape() -> None:
             assert exc_info.value.code == 4400
 
 
-def test_ws_defaults_missing_session_id_to_main() -> None:
-    with _client() as client:
+def test_ws_defaults_missing_session_id_to_main(app_factory) -> None:
+    with _client(app_factory) as client:
         with client.websocket_connect("/ws?token=test-token") as ws:
             ws.send_json({"text": "hello", "sender": "user"})
             first = ws.receive_json()
@@ -157,8 +153,8 @@ def test_ws_defaults_missing_session_id_to_main() -> None:
             _assert_utc_timestamp(second.get("timestamp"))
 
 
-def test_ws_sends_error_event_on_pipeline_runtime_error() -> None:
-    with _client(pipeline=FailingPipeline()) as client:
+def test_ws_sends_error_event_on_pipeline_runtime_error(app_factory) -> None:
+    with _client(app_factory, pipeline=FailingPipeline()) as client:
         with client.websocket_connect("/ws?token=test-token") as ws:
             ws.send_json({"text": "hello", "sender": "user", "session_id": "s1"})
             event = ws.receive_json()
@@ -174,8 +170,8 @@ def test_ws_sends_error_event_on_pipeline_runtime_error() -> None:
             assert exc_info.value.code == 1011
 
 
-def test_ws_sends_retryable_timeout_error_event() -> None:
-    with _client(pipeline=TimeoutPipeline()) as client:
+def test_ws_sends_retryable_timeout_error_event(app_factory) -> None:
+    with _client(app_factory, pipeline=TimeoutPipeline()) as client:
         with client.websocket_connect("/ws?token=test-token") as ws:
             ws.send_json({"text": "hello", "sender": "user", "session_id": "s1"})
             event = ws.receive_json()
@@ -191,8 +187,8 @@ def test_ws_sends_retryable_timeout_error_event() -> None:
             assert exc_info.value.code == 1011
 
 
-def test_ws_forwards_tool_events_without_modification() -> None:
-    with _client(pipeline=ToolEventPipeline()) as client:
+def test_ws_forwards_tool_events_without_modification(app_factory) -> None:
+    with _client(app_factory, pipeline=ToolEventPipeline()) as client:
         with client.websocket_connect("/ws?token=test-token") as ws:
             ws.send_json({"text": "hello", "sender": "user", "session_id": "s1"})
             first = ws.receive_json()
@@ -207,8 +203,8 @@ def test_ws_forwards_tool_events_without_modification() -> None:
             _assert_utc_timestamp(fourth.get("timestamp"))
 
 
-def test_ws_broadcasts_server_timestamped_user_message_to_peer() -> None:
-    with _client() as client:
+def test_ws_broadcasts_server_timestamped_user_message_to_peer(app_factory) -> None:
+    with _client(app_factory) as client:
         with (
             client.websocket_connect("/ws?token=test-token") as sender,
             client.websocket_connect("/ws?token=test-token") as peer,
@@ -225,10 +221,10 @@ def test_ws_broadcasts_server_timestamped_user_message_to_peer() -> None:
             sender.receive_json()
 
 
-def test_ws_accepts_attachment_only_message_payload() -> None:
+def test_ws_accepts_attachment_only_message_payload(app_factory) -> None:
     pipeline = AttachmentPipeline()
 
-    with _client(pipeline=pipeline) as client:
+    with _client(app_factory, pipeline=pipeline) as client:
         with client.websocket_connect("/ws?token=test-token") as ws:
             ws.send_json(
                 {

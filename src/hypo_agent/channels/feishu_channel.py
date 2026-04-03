@@ -11,10 +11,13 @@ import structlog
 from hypo_agent.core.delivery import DeliveryResult, combine_delivery_results
 from hypo_agent.core.feishu_adapter import FeishuAdapter
 from hypo_agent.core.rich_response import RichResponse
+from hypo_agent.core.time_utils import utc_isoformat, utc_now
 from hypo_agent.core.unified_message import UnifiedMessage, message_from_unified
+from hypo_agent.exceptions import ChannelError
 from hypo_agent.models import Message
 
 logger = structlog.get_logger("hypo_agent.channels.feishu")
+_FEISHU_RUNTIME_ERRORS = (OSError, RuntimeError, TypeError, ValueError)
 
 try:  # pragma: no cover - optional dependency during tests
     import lark_oapi as lark
@@ -28,9 +31,9 @@ except ModuleNotFoundError:  # pragma: no cover - exercised via lazy startup pat
     CreateMessageRequestBody = None
 
 
-class FeishuAPIError(RuntimeError):
+class FeishuAPIError(ChannelError):
     def __init__(self, message: str, *, code: str | int | None = None) -> None:
-        super().__init__(message)
+        super().__init__(message, operation="feishu_api", code=str(code or "").strip() or None)
         self.code = str(code or "").strip() or None
 
 
@@ -97,6 +100,7 @@ class FeishuChannel:
         self._chat_to_session: dict[str, str] = {}
         self._messages_received = 0
         self._messages_sent = 0
+        self._last_message_at: str | None = None
 
     async def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -118,7 +122,7 @@ class FeishuChannel:
             if callable(stopper):
                 try:
                     await asyncio.to_thread(stopper)
-                except Exception:
+                except _FEISHU_RUNTIME_ERRORS:
                     logger.warning("feishu.channel.stop_failed", exc_info=True)
         thread = self._thread
         self._thread = None
@@ -200,6 +204,20 @@ class FeishuChannel:
             return self._session_to_chat[normalized_session_id]
         return None
 
+    def get_status(self) -> dict[str, Any]:
+        status = "disabled"
+        if self.app_id and self.app_secret:
+            thread = self._thread
+            status = "connected" if thread is not None and thread.is_alive() else "enabled"
+        return {
+            "status": status,
+            "app_id": f"••••{self.app_id[-4:]}" if len(self.app_id) >= 4 else ("••••" if self.app_id else ""),
+            "chat_count": len(self._chat_to_session),
+            "last_message_at": self._last_message_at,
+            "messages_received": self._messages_received,
+            "messages_sent": self._messages_sent,
+        }
+
     async def _handle_message_receive(self, data: Any) -> None:
         message = getattr(getattr(data, "event", None), "message", None)
         if message is None:
@@ -210,6 +228,7 @@ class FeishuChannel:
         session_id = self.bind_chat_session(chat_id=chat_id)
         sender_id = self._extract_sender_id(data)
         self._messages_received += 1
+        self._last_message_at = utc_isoformat(utc_now())
 
         logger.info(
             "feishu.message.received",
@@ -307,7 +326,7 @@ class FeishuChannel:
                 exc_info=True,
             )
             return DeliveryResult.failed("feishu", segment_count=1, error=str(exc))
-        except Exception as exc:
+        except _FEISHU_RUNTIME_ERRORS as exc:
             logger.warning(
                 "feishu.message.failed",
                 error_code="exception",
@@ -317,6 +336,7 @@ class FeishuChannel:
             return DeliveryResult.failed("feishu", segment_count=1, error=str(exc))
 
         self._messages_sent += 1
+        self._last_message_at = utc_isoformat(utc_now())
         logger.info("feishu.message.sent", receive_id=payload.get("receive_id"))
         return DeliveryResult.ok("feishu", segment_count=1)
 
@@ -385,7 +405,7 @@ class FeishuChannel:
                     reason="ws_client_exited",
                     attempt=attempt,
                 )
-            except Exception as exc:
+            except _FEISHU_RUNTIME_ERRORS as exc:
                 if self._stop_event.is_set():
                     break
                 attempt += 1

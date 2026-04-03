@@ -10,13 +10,7 @@ from hypo_agent.memory.structured_store import StructuredStore
 from hypo_agent.models import CircuitBreakerConfig, DirectoryWhitelist
 from hypo_agent.security.circuit_breaker import CircuitBreaker
 from hypo_agent.security.permission_manager import PermissionManager
-
-
-class DummyPipeline:
-    async def stream_reply(self, inbound):
-        del inbound
-        if False:  # pragma: no cover
-            yield {}
+from tests.shared import DummyPipeline
 
 
 class DummyEmailSkill:
@@ -105,6 +99,21 @@ class DummyWeixinChannel:
         return None
 
 
+class DummyFeishuChannel:
+    def get_status(self) -> dict:
+        return {
+            "status": "connected",
+            "app_id": "••••ishu",
+            "chat_count": 2,
+            "last_message_at": "2026-03-11T20:42:00+08:00",
+            "messages_received": 5,
+            "messages_sent": 4,
+        }
+
+    async def stop(self) -> None:
+        return None
+
+
 class DummyWsManager:
     def get_status(self) -> dict:
         return {
@@ -154,6 +163,17 @@ services:
     enabled: true
     token_path: memory/weixin_auth.json
     allowed_users: []
+  feishu:
+    app_id: "cli_test_ishu"
+    app_secret: "secret_test"
+""".strip(),
+        encoding="utf-8",
+    )
+    (config_dir / "config.yaml").write_text(
+        """
+channels:
+  feishu:
+    enabled: true
 """.strip(),
         encoding="utf-8",
     )
@@ -166,6 +186,7 @@ services:
         client.app.state.qq_channel_service = client.app.state.qq_bot_channel_service
         client.app.state.heartbeat_service = DummyHeartbeatService()
         client.app.state.weixin_channel = DummyWeixinChannel()
+        client.app.state.feishu_channel = DummyFeishuChannel()
         response = client.get("/api/channels/status", params={"token": "test-token"})
 
     assert response.status_code == 200
@@ -178,6 +199,9 @@ services:
     assert payload["channels"]["qq_bot"]["ws_connected"] is True
     assert payload["channels"]["weixin"]["status"] == "connected"
     assert payload["channels"]["weixin"]["bot_id"] == "wx-bot-1"
+    assert payload["channels"]["feishu"]["status"] == "connected"
+    assert payload["channels"]["feishu"]["app_id"] == "••••ishu"
+    assert payload["channels"]["feishu"]["chat_count"] == 2
     assert payload["channels"]["qq_bot"]["messages_received"] == 3
     assert payload["channels"]["email"]["status"] == "enabled"
     assert payload["channels"]["email"]["accounts"] == ["hyx021203@shanghaitech.edu.cn"]
@@ -193,9 +217,6 @@ def test_channels_status_returns_disabled_when_qq_not_enabled(tmp_path, monkeypa
     (config_dir / "skills.yaml").write_text(
         """
 skills:
-  qq:
-    enabled: false
-    deprecated: true
   qq_bot:
     enabled: false
   email_scanner:
@@ -225,8 +246,6 @@ def test_channels_status_prefers_qq_bot_config_over_legacy_skill_flag(tmp_path, 
     (config_dir / "skills.yaml").write_text(
         """
 skills:
-  qq:
-    enabled: true
   qq_bot:
     enabled: false
 """.strip(),
@@ -255,7 +274,7 @@ services:
     assert payload["channels"]["qq_bot"]["qq_bot_enabled"] is True
     assert payload["channels"]["qq_bot"]["qq_bot_app_id"] == "••••4756"
     assert payload["channels"]["qq_bot"]["status"] == "enabled"
-    assert payload["channels"]["qq_napcat"]["status"] == "disabled"
+    assert "qq_napcat" not in payload["channels"]
 
 
 def test_channels_status_returns_disabled_when_email_not_enabled(tmp_path, monkeypatch) -> None:
@@ -266,8 +285,6 @@ def test_channels_status_returns_disabled_when_email_not_enabled(tmp_path, monke
     (config_dir / "skills.yaml").write_text(
         """
 skills:
-  qq:
-    enabled: true
   email_scanner:
     enabled: false
 """.strip(),
@@ -289,15 +306,19 @@ def test_channels_status_marks_qq_disconnected_when_napcat_reports_offline(tmp_p
     client = _build_client(tmp_path)
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "skills.yaml").write_text(
+    (config_dir / "skills.yaml").write_text("skills: {}\n", encoding="utf-8")
+    (config_dir / "secrets.yaml").write_text(
         """
-skills:
+providers: {}
+services:
   qq:
-    enabled: true
+    napcat_ws_url: "ws://127.0.0.1:6099"
+    napcat_http_url: "http://127.0.0.1:3000"
+    bot_qq: "123456789"
+    allowed_users: []
 """.strip(),
         encoding="utf-8",
     )
-    (config_dir / "secrets.yaml").write_text("providers: {}\nservices: {}\n", encoding="utf-8")
 
     monkeypatch.setattr("hypo_agent.gateway.dashboard_api.connection_manager", DummyWsManager())
 

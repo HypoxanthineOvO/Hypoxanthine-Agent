@@ -14,6 +14,16 @@ router = APIRouter()
 logger = structlog.get_logger("hypo_agent.gateway.ws")
 
 
+def _error_fields(exc: Exception) -> dict[str, str]:
+    message = str(exc).strip()
+    if len(message) > 200:
+        message = f"{message[:197]}..."
+    return {
+        "error_type": type(exc).__name__,
+        "error_msg": message,
+    }
+
+
 class WsConnectionManager:
     def __init__(self) -> None:
         self._sockets: dict[str, WebSocket] = {}
@@ -50,7 +60,12 @@ class WsConnectionManager:
             try:
                 await ws.send_json(payload)
                 sent = True
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "ws.broadcast.client_removed",
+                    client_id=client_id,
+                    **_error_fields(exc),
+                )
                 stale.append(client_id)
         if sent:
             self.record_activity()
@@ -185,6 +200,11 @@ async def websocket_chat(ws: WebSocket) -> None:
     except WebSocketDisconnect:
         return
     except Exception as exc:  # pragma: no cover - defensive fallback
+        logger.exception(
+            "ws.error.failed",
+            session_id=session_id,
+            **_error_fields(exc),
+        )
         await _send_error_and_close(ws, session_id=session_id, exc=exc)
     finally:
         await connection_manager.disconnect(ws)

@@ -121,7 +121,7 @@ def test_qq_inbound_message_syncs_user_and_reply_to_webui(tmp_path: Path) -> Non
             inbound = ws.receive_json()
             outbound = ws.receive_json()
 
-    assert inbound["text"] == "[QQ] 你好，来自 QQ"
+    assert inbound["text"] == "你好，来自 QQ"
     assert inbound["sender"] == "user"
     assert inbound["channel"] == "qq"
     assert outbound["text"] == "QQ ASSISTANT REPLY"

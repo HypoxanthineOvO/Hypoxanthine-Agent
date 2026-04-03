@@ -92,7 +92,71 @@ def test_relay_policy_excludes_origin_platform_for_user_messages() -> None:
 
         assert qq_received == []
         assert len(webui_received) == 1
-        assert webui_received[0].text == "[QQ] 来自 QQ"
+        assert webui_received[0].text == "来自 QQ"
+        assert webui_received[0].channel == "qq"
+
+    asyncio.run(_run())
+
+
+def test_relay_policy_preserves_feishu_source_for_webui_without_text_prefix() -> None:
+    async def _run() -> None:
+        dispatcher = ChannelDispatcher()
+        policy = ChannelRelayPolicy(dispatcher)
+        webui_received: list[Message] = []
+
+        async def webui_sink(message: Message, *, exclude_client_ids=None) -> None:
+            del exclude_client_ids
+            webui_received.append(message)
+
+        dispatcher.register("webui", webui_sink, platform="webui", is_external=False)
+
+        await policy.relay_message(
+            Message(
+                text="同步一下",
+                sender="user",
+                session_id="main",
+                channel="feishu",
+                sender_id="ou_user_1",
+            ),
+            message_type="user_message",
+            origin_channel="feishu",
+        )
+
+        assert len(webui_received) == 1
+        assert webui_received[0].text == "同步一下"
+        assert webui_received[0].channel == "feishu"
+
+    asyncio.run(_run())
+
+
+def test_relay_policy_injects_feishu_source_prefix_for_cross_channel_user_messages() -> None:
+    async def _run() -> None:
+        dispatcher = ChannelDispatcher()
+        policy = ChannelRelayPolicy(dispatcher)
+        delivered: list[UnifiedMessage] = []
+
+        async def qq_sink(message: UnifiedMessage) -> None:
+            delivered.append(message)
+
+        dispatcher.register("qq", qq_sink, platform="qq", is_external=True)
+
+        await policy.relay_message(
+            Message(
+                text="同步一下",
+                sender="user",
+                session_id="main",
+                channel="feishu",
+                sender_id="ou_user_1",
+            ),
+            message_type="user_message",
+            origin_channel="feishu",
+        )
+
+        assert len(delivered) == 1
+        first_block = delivered[0].blocks[0]
+        assert isinstance(first_block, TextBlock)
+        assert first_block.text.startswith("[飞书] ")
+        assert delivered[0].raw_text == "[飞书] 同步一下"
 
     asyncio.run(_run())
 

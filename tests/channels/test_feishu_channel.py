@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 
 from hypo_agent.channels.feishu_channel import FeishuChannel
+from hypo_agent.core.channel_dispatcher import ChannelDispatcher, ChannelRelayPolicy
 from hypo_agent.models import Message
 
 
@@ -204,5 +205,51 @@ def test_feishu_channel_emit_does_not_send_normal_assistant_reply_directly() -> 
 
         assert api_client.reply_calls == []
         assert api_client.create_calls == []
+
+    asyncio.run(_run())
+
+
+def test_feishu_channel_inbound_message_relays_through_channel_policy() -> None:
+    async def _run() -> None:
+        queue = QueueStub()
+        api_client = ApiClientStub()
+        dispatcher = ChannelDispatcher()
+        relay = ChannelRelayPolicy(dispatcher)
+        qq_deliveries: list[str] = []
+        weixin_deliveries: list[str] = []
+
+        async def qq_sink(message) -> None:
+            qq_deliveries.append(str(message.raw_text or message.plain_text()))
+
+        async def weixin_sink(message) -> None:
+            weixin_deliveries.append(str(message.raw_text or message.plain_text()))
+
+        dispatcher.register("qq", qq_sink, platform="qq", is_external=True)
+        dispatcher.register("weixin", weixin_sink, platform="weixin", is_external=True)
+
+        async def on_message(message: Message, *, message_type: str | None = None) -> None:
+            await relay.relay_message(message, message_type=message_type)
+
+        channel = FeishuChannel(
+            app_id="app-id",
+            app_secret="app-secret",
+            message_queue=queue,
+            api_client=api_client,
+            inbound_callback_getter=lambda: on_message,
+        )
+        channel._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
+
+        event = _message_event(
+            chat_id="oc_chat_123",
+            message_id="om_relay_1",
+            message_type="text",
+            content='{"text":"同步一下"}',
+            open_id="ou_user_1",
+        )
+
+        await channel._handle_message_receive(event)  # type: ignore[attr-defined]
+
+        assert qq_deliveries == ["[飞书] 同步一下"]
+        assert weixin_deliveries == ["[飞书] 同步一下"]
 
     asyncio.run(_run())

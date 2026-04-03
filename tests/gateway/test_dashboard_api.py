@@ -12,13 +12,7 @@ from hypo_agent.memory.structured_store import StructuredStore
 from hypo_agent.models import CircuitBreakerConfig, DirectoryWhitelist
 from hypo_agent.security.circuit_breaker import CircuitBreaker
 from hypo_agent.security.permission_manager import PermissionManager
-
-
-class DummyPipeline:
-    async def stream_reply(self, inbound):
-        del inbound
-        if False:  # pragma: no cover
-            yield {}
+from tests.shared import DummyPipeline
 
 
 def _build_client(tmp_path: Path) -> TestClient:
@@ -80,8 +74,8 @@ def test_dashboard_token_latency_recent_and_skills_endpoints(tmp_path) -> None:
         asyncio.run(
             client.app.state.structured_store.record_tool_invocation(
                 session_id="s1",
-                tool_name="run_command",
-                skill_name="tmux",
+                tool_name="exec_command",
+                skill_name="exec",
                 params_json='{"command":"echo hi"}',
                 status="success",
                 result_summary="ok",
@@ -172,14 +166,14 @@ skills:
     assert row["status"] == "disabled"
 
 
-def test_dashboard_skills_shows_enabled_qq_channel_from_gateway_runtime(tmp_path) -> None:
+def test_dashboard_skills_does_not_treat_qq_channel_as_skill(tmp_path) -> None:
     client = _build_client(tmp_path)
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "skills.yaml").write_text(
         """
 skills:
-  qq:
+  exec:
     enabled: true
 """.strip(),
         encoding="utf-8",
@@ -195,9 +189,7 @@ skills:
 
     assert response.status_code == 200
     payload = response.json()
-    row = next(item for item in payload["data"] if item["name"] == "qq")
-    assert row["enabled"] is True
-    assert row["status"] == "healthy"
+    assert all(item["name"] != "qq" for item in payload["data"])
 
 
 def test_dashboard_stats_pass_since_filter_to_store(tmp_path) -> None:

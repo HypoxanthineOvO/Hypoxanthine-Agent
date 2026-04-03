@@ -8,14 +8,27 @@ import shutil
 from typing import Any, Literal
 
 from fastapi import APIRouter, Query, Request
+import structlog
 
 from hypo_agent.core.recent_logs import get_recent_logs
 from hypo_agent.core.config_loader import load_secrets_config
 from hypo_agent.core.skill_manager import SkillManager
+from hypo_agent.gateway.settings import load_channel_settings
 from hypo_agent.gateway.auth import require_api_token
 from hypo_agent.gateway.ws import connection_manager
 
 router = APIRouter(prefix="/api")
+logger = structlog.get_logger("hypo_agent.gateway.dashboard_api")
+
+
+def _error_fields(exc: Exception) -> dict[str, str]:
+    message = str(exc).strip()
+    if len(message) > 200:
+        message = f"{message[:197]}..."
+    return {
+        "error_type": type(exc).__name__,
+        "error_msg": message,
+    }
 
 
 def _parse_timestamp(value: str | None) -> datetime | None:
@@ -68,6 +81,31 @@ def _external_skill_runtime(request: Request, name: str) -> dict[str, Any] | Non
             "active": getattr(request.app.state, "qq_channel_service", None) is not None,
         }
     return None
+
+
+def _qq_enabled_from_secrets(config_dir: Path) -> bool:
+    secrets_path = config_dir / "secrets.yaml"
+    if not secrets_path.exists():
+        return False
+    try:
+        secrets = load_secrets_config(secrets_path)
+    except Exception as exc:
+        logger.warning(
+            "dashboard.channel_status.degraded",
+            channel="qq",
+            operation="load_qq_config",
+            **_error_fields(exc),
+        )
+        return False
+    services = secrets.services
+    qq_cfg = getattr(services, "qq", None) if services is not None else None
+    if qq_cfg is None:
+        return False
+    return bool(
+        str(getattr(qq_cfg, "napcat_ws_url", "") or "").strip()
+        and str(getattr(qq_cfg, "napcat_http_url", "") or "").strip()
+        and str(getattr(qq_cfg, "bot_qq", "") or "").strip()
+    )
 
 
 def _disabled_qq_napcat_status() -> dict[str, Any]:
@@ -125,6 +163,17 @@ def _disabled_weixin_status() -> dict[str, Any]:
     }
 
 
+def _disabled_feishu_status() -> dict[str, Any]:
+    return {
+        "status": "disabled",
+        "app_id": "",
+        "chat_count": 0,
+        "last_message_at": None,
+        "messages_received": 0,
+        "messages_sent": 0,
+    }
+
+
 def _disabled_heartbeat_status() -> dict[str, Any]:
     return {
         "status": "disabled",
@@ -168,7 +217,7 @@ async def channels_status(request: Request) -> dict[str, Any]:
     skill_manager = getattr(deps, "skill_manager", None)
     scheduler = getattr(request.app.state, "scheduler", None)
 
-    qq_enabled = configured_enabled.get("qq", False)
+    qq_enabled = _qq_enabled_from_secrets(config_dir)
     email_enabled = configured_enabled.get("email_scanner", False)
 
     qq_bot_config = None
@@ -176,7 +225,13 @@ async def channels_status(request: Request) -> dict[str, Any]:
     if secrets_path.exists():
         try:
             secrets = load_secrets_config(secrets_path)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "dashboard.channel_status.degraded",
+                channel="qq_bot",
+                operation="load_qq_bot_config",
+                **_error_fields(exc),
+            )
             qq_bot_config = None
         else:
             services = secrets.services
@@ -209,7 +264,13 @@ async def channels_status(request: Request) -> dict[str, Any]:
         if qq_bot_client is not None and hasattr(qq_bot_client, "get_status"):
             try:
                 transport_status = qq_bot_client.get_status()
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "dashboard.token_stats.degraded",
+                    channel="qq_bot",
+                    operation="qq_bot_transport_status",
+                    **_error_fields(exc),
+                )
                 transport_status = {}
             qq_bot_status = {
                 **qq_bot_status,
@@ -278,7 +339,13 @@ async def channels_status(request: Request) -> dict[str, Any]:
         try:
             services = load_secrets_config(secrets_path).services
             weixin_enabled = bool(services and services.weixin and services.weixin.enabled)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "dashboard.system_info.degraded",
+                channel="weixin",
+                operation="load_weixin_config",
+                **_error_fields(exc),
+            )
             weixin_enabled = False
     if weixin_enabled:
         channel = getattr(request.app.state, "weixin_channel", None)
@@ -294,10 +361,40 @@ async def channels_status(request: Request) -> dict[str, Any]:
                 "messages_sent": 0,
             }
 
+    feishu_status = _disabled_feishu_status()
+    feishu_enabled = False
+    config_path = config_dir / "config.yaml"
+    if config_path.exists():
+        try:
+            channel_settings = load_channel_settings(config_path)
+            feishu_enabled = bool(channel_settings.feishu.enabled)
+        except Exception as exc:
+            logger.warning(
+                "dashboard.system_info.degraded",
+                channel="feishu",
+                operation="load_feishu_config",
+                **_error_fields(exc),
+            )
+            feishu_enabled = False
+    if feishu_enabled:
+        channel = getattr(request.app.state, "feishu_channel", None)
+        if channel is not None and hasattr(channel, "get_status"):
+            feishu_status = channel.get_status()
+        else:
+            feishu_status = {
+                "status": "disconnected",
+                "app_id": "",
+                "chat_count": 0,
+                "last_message_at": None,
+                "messages_received": 0,
+                "messages_sent": 0,
+            }
+
     channels: dict[str, Any] = {
         "webui": connection_manager.get_status(),
         "qq_bot": qq_bot_status if qq_bot_enabled else _disabled_qq_bot_status(),
         "weixin": weixin_status,
+        "feishu": feishu_status,
         "email": email_status,
         "heartbeat": heartbeat_status,
     }
@@ -307,7 +404,7 @@ async def channels_status(request: Request) -> dict[str, Any]:
     relay = getattr(request.app.state, "channel_relay", None)
     last_delivery_for = getattr(relay, "last_delivery_for", None)
     if callable(last_delivery_for):
-        for channel_name in ("webui", "qq_bot", "qq_napcat", "weixin"):
+        for channel_name in ("webui", "qq_bot", "qq_napcat", "weixin", "feishu"):
             channel_payload = channels.get(channel_name)
             if isinstance(channel_payload, dict):
                 channel_payload["last_delivery"] = last_delivery_for(channel_name)

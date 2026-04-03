@@ -105,7 +105,7 @@ class NapCatWebSocketClient:
                 await self.run_once()
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
+            except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 self.status = "disconnected"
                 logger.warning("qq.ws.client.disconnected", url=self.url, error=str(exc))
 

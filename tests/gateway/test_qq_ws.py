@@ -3,10 +3,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from hypo_agent.channels.qq_channel import QQChannelService
-from hypo_agent.gateway.app import create_app
 from hypo_agent.models import Message
-
-
 class QueuePipelineStub:
     def __init__(self) -> None:
         self.inbounds: list[Message] = []
@@ -54,11 +51,12 @@ def _bind_service(app, allowed_users: set[str]) -> None:
 
     service.adapter.send_private_text = fake_send_private_text  # type: ignore[method-assign]
     app.state.qq_channel_service = service
+    app.state.qq_config_dir_snapshot = None
 
 
-def test_qq_ws_accepts_allowed_private_message_and_enqueues_pipeline() -> None:
+def test_qq_ws_accepts_allowed_private_message_and_enqueues_pipeline(app_factory) -> None:
     pipeline = QueuePipelineStub()
-    app = create_app(auth_token="test-token", pipeline=pipeline)
+    app = app_factory(pipeline=pipeline)
     _bind_service(app, {"10001"})
 
     with TestClient(app) as client:
@@ -78,9 +76,9 @@ def test_qq_ws_accepts_allowed_private_message_and_enqueues_pipeline() -> None:
     assert pipeline.inbounds[0].sender_id == "10001"
 
 
-def test_qq_ws_silently_ignores_non_whitelisted_user() -> None:
+def test_qq_ws_silently_ignores_non_whitelisted_user(app_factory) -> None:
     pipeline = QueuePipelineStub()
-    app = create_app(auth_token="test-token", pipeline=pipeline)
+    app = app_factory(pipeline=pipeline)
     _bind_service(app, {"10001"})
 
     with TestClient(app) as client:

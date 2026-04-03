@@ -4,6 +4,7 @@ import asyncio
 import json
 from typing import Any, Callable
 
+import httpx
 import structlog
 import websockets
 
@@ -16,6 +17,15 @@ QQBOT_C2C_INTENT = 1 << 25
 QQBOT_GROUP_AT_INTENT = 1 << 26
 QQBOT_DIRECT_MESSAGE_INTENT = 1 << 12
 DEFAULT_QQBOT_INTENTS = QQBOT_C2C_INTENT | QQBOT_GROUP_AT_INTENT | QQBOT_DIRECT_MESSAGE_INTENT
+_QQBOT_WS_ERRORS = (
+    httpx.HTTPError,
+    websockets.WebSocketException,
+    OSError,
+    RuntimeError,
+    TypeError,
+    ValueError,
+    json.JSONDecodeError,
+)
 
 
 class QQBotWebSocketClient:
@@ -114,7 +124,7 @@ class QQBotWebSocketClient:
                 await self.run_once()
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
+            except _QQBOT_WS_ERRORS as exc:
                 self.status = "disconnected"
                 logger.warning("qq_bot.ws_client.disconnected", error=str(exc))
 
@@ -222,7 +232,7 @@ class QQBotWebSocketClient:
                 await ws.send(json.dumps({"op": 1, "d": self.seq}))
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except _QQBOT_WS_ERRORS as exc:
             logger.warning("qq_bot.ws_client.heartbeat_failed", error=str(exc))
 
     async def _cancel_heartbeat(self) -> None:

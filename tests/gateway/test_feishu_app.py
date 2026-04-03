@@ -6,35 +6,30 @@ from hypo_agent.gateway.app import AppDeps, create_app
 from hypo_agent.gateway.settings import ChannelsConfig, FeishuChannelSettings
 from hypo_agent.memory.session import SessionMemory
 from hypo_agent.memory.structured_store import StructuredStore
-
-
-class PassivePipeline:
-    async def stream_reply(self, inbound):
-        del inbound
-        if False:  # pragma: no cover
-            yield {}
+from tests.fixtures import write_config_tree
+from tests.shared import PassivePipeline
 
 
 def _write_feishu_config(tmp_path: Path, *, enabled: bool) -> None:
-    config_dir = tmp_path / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "secrets.yaml").write_text(
-        """
-providers: {}
-services:
-  feishu:
-    app_id: "cli_test"
-    app_secret: "secret_test"
-""".strip(),
-        encoding="utf-8",
-    )
-    (config_dir / "config.yaml").write_text(
-        f"""
-channels:
-  feishu:
-    enabled: {"true" if enabled else "false"}
-""".strip(),
-        encoding="utf-8",
+    write_config_tree(
+        tmp_path / "config",
+        overrides={
+            "secrets": {
+                "services": {
+                    "feishu": {
+                        "app_id": "cli_test",
+                        "app_secret": "secret_test",
+                    }
+                }
+            },
+            "config": {
+                "channels": {
+                    "feishu": {
+                        "enabled": enabled,
+                    }
+                }
+            },
+        },
     )
 
 
