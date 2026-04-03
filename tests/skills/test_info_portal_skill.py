@@ -5,7 +5,22 @@ from datetime import UTC, datetime
 
 import httpx
 
-from hypo_agent.skills.info_skill import InfoSkill
+from hypo_agent.skills.info_portal_skill import InfoPortalSkill
+
+
+def test_info_portal_skill_exports_and_keeps_runtime_name() -> None:
+    skill = InfoPortalSkill(info_client=FakeInfoClient())
+    assert skill.name == "info"
+
+
+def test_info_portal_skill_has_passive_query_docstring() -> None:
+    assert "Hypo-Info 门户被动查询" in (InfoPortalSkill.__doc__ or "")
+
+
+def test_info_today_description_is_concise_function_summary() -> None:
+    skill = InfoPortalSkill(info_client=FakeInfoClient())
+    tools = {tool["function"]["name"]: tool["function"] for tool in skill.tools}
+    assert tools["info_today"]["description"] == "Get today's news digest, optionally filtered by section."
 
 
 class FakeInfoClient:
@@ -83,7 +98,7 @@ def test_info_today_formats_homepage_summary() -> None:
                 },
             ]
         }
-        skill = InfoSkill(
+        skill = InfoPortalSkill(
             info_client=client,
             now_fn=lambda: datetime(2026, 3, 26, 8, 0, 0, tzinfo=UTC),
         )
@@ -157,7 +172,7 @@ def test_info_today_section_uses_section_filtered_articles() -> None:
                 "url": "https://example.com/agent",
             },
         ]
-        skill = InfoSkill(
+        skill = InfoPortalSkill(
             info_client=client,
             now_fn=lambda: datetime(2026, 3, 26, 8, 0, 0, tzinfo=UTC),
         )
@@ -217,7 +232,7 @@ def test_info_today_truncates_long_results() -> None:
                 for index in range(1, 18)
             ]
         }
-        skill = InfoSkill(
+        skill = InfoPortalSkill(
             info_client=client,
             now_fn=lambda: datetime(2026, 3, 26, 8, 0, 0, tzinfo=UTC),
             max_items=15,
@@ -264,7 +279,7 @@ def test_info_search_filters_articles_by_query() -> None:
                 "url": "https://example.com/router",
             },
         ]
-        skill = InfoSkill(
+        skill = InfoPortalSkill(
             info_client=client,
             now_fn=lambda: datetime(2026, 3, 26, 8, 0, 0, tzinfo=UTC),
         )
@@ -331,7 +346,7 @@ def test_info_benchmark_formats_ranking_table() -> None:
                 "score": 89.4,
             },
         ]
-        skill = InfoSkill(info_client=client)
+        skill = InfoPortalSkill(info_client=client)
 
         output = await skill.execute("info_benchmark", {"top_n": 3})
 
@@ -365,7 +380,7 @@ def test_info_sections_formats_available_sections() -> None:
             {"name": "开源"},
             {"name": "学术"},
         ]
-        skill = InfoSkill(info_client=client)
+        skill = InfoPortalSkill(info_client=client)
 
         output = await skill.execute("info_sections", {})
 
@@ -380,7 +395,7 @@ def test_info_unavailable_returns_friendly_message() -> None:
     async def _run() -> None:
         client = FakeInfoClient()
         client.homepage_payload = httpx.ConnectError("connect failed")
-        skill = InfoSkill(info_client=client)
+        skill = InfoPortalSkill(info_client=client)
 
         output = await skill.execute("info_today", {})
 

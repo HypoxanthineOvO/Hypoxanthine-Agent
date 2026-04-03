@@ -15,8 +15,10 @@ import structlog
 
 from hypo_agent.core.channel_adapter import ChannelAdapter, WebUIAdapter
 from hypo_agent.core.rich_response import RichResponse
+from hypo_agent.core.skill_catalog import SkillManifest
 from hypo_agent.core.time_utils import utc_isoformat, utc_now
 from hypo_agent.core.uploads import guess_mime_type
+from hypo_agent.exceptions import HypoAgentError
 from hypo_agent.memory.semantic_memory import ChunkResult, estimate_token_count
 from hypo_agent.memory.session import SessionMemory
 from hypo_agent.models import Attachment, Message, SkillOutput
@@ -49,6 +51,12 @@ TOOL_USE_SYSTEM_PROMPT = (
     "When the user asks you to execute a command or run code, you MUST use "
     "the provided tools instead of describing the action in text. "
     "Always prefer using tools over explaining what you would do. "
+    "For filesystem tasks, do not assume permission is missing before trying. "
+    "If the user asks you to read or inspect files/directories, call tools such as "
+    "read_file or list_directory first. Only tell the user that access is denied "
+    "after a tool actually returns a permission error. "
+    "In this environment, ordinary file reads are usually allowed, while writes "
+    "require explicit permission. "
     "When the user expresses stable preferences/habits/personal details, "
     "you MUST call update_persona_memory(key, value) to persist them in long-term memory. "
     "If the user explicitly asks you to remember a preference, profile detail, or reply style, "
@@ -59,6 +67,17 @@ TOOL_USE_SYSTEM_PROMPT = (
     "You must first ask for confirmation, wait for the user's explicit approval, "
     "and never call save_sop in the same turn as the confirmation question. "
     "When a task looks repetitive or operational, use search_sop(query, top_k) to retrieve saved SOPs."
+    " After a tool returns, write the final user-facing reply in natural language. "
+    "Do not dump raw JSON, serialized tool payloads, or internal status wrappers unless the user explicitly asks for raw data."
+)
+
+REPLY_BOUNDARY_SYSTEM_PROMPT = (
+    "High priority reply rule: answer the user's direct request and then stop. "
+    "Do not append unsolicited follow-up questions, next-step suggestions, offers, or "
+    "service-style closings such as '要不要我帮你……'、'需要我继续……吗？'、'还有什么我可以帮你'. "
+    "Only provide options/next steps when the user explicitly asks for them. "
+    "Only ask a follow-up question when missing information blocks a correct answer, and "
+    "then ask at most one precise question."
 )
 
 KILL_SWITCH_MESSAGE = "⚠️ Kill Switch 已激活。所有执行已停止。发送 /resume 恢复。"
@@ -96,6 +115,11 @@ TOOL_STATUS_TEMPLATES: dict[str, dict[str, str]] = {
         "ok": "✅ 代码执行完成",
         "fail": "❌ 代码执行失败：{error}",
     },
+    "exec_command": {
+        "start": "⚡ 正在执行命令...",
+        "ok": "✅ 命令执行完成",
+        "fail": "❌ 命令执行失败：{error}",
+    },
     "web_search": {
         "start": "🔍 正在搜索...",
         "ok": "🔍 搜索完成",
@@ -108,6 +132,26 @@ TOOL_STATUS_TEMPLATES: dict[str, dict[str, str]] = {
     },
 }
 
+_PIPELINE_RECOVERABLE_ERRORS = (
+    HypoAgentError,
+    asyncio.TimeoutError,
+    TimeoutError,
+    OSError,
+    RuntimeError,
+    TypeError,
+    ValueError,
+)
+
+
+def _error_fields(exc: Exception) -> dict[str, str]:
+    message = str(exc).strip()
+    if len(message) > 200:
+        message = f"{message[:197]}..."
+    return {
+        "error_type": type(exc).__name__,
+        "error_msg": message,
+    }
+
 
 class ChatModelRouter(Protocol):
     def get_model_for_task(self, task_type: str) -> str: ...
@@ -118,6 +162,7 @@ class ChatModelRouter(Protocol):
         messages: list[dict[str, Any]],
         *,
         tools: list[dict[str, Any]] | None = None,
+        timeout_seconds: float | None = None,
     ) -> str: ...
 
     async def call_with_tools(
@@ -127,6 +172,7 @@ class ChatModelRouter(Protocol):
         *,
         tools: list[dict[str, Any]] | None = None,
         session_id: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]: ...
 
     async def stream(
@@ -136,6 +182,7 @@ class ChatModelRouter(Protocol):
         *,
         session_id: str | None = None,
         tools: list[dict[str, Any]] | None = None,
+        timeout_seconds: float | None = None,
     ) -> AsyncIterator[str]: ...
 
 
@@ -148,6 +195,7 @@ class ChatSkillManager(Protocol):
         params: dict[str, Any],
         *,
         session_id: str | None = None,
+        skill_name: str | None = None,
     ) -> SkillOutput: ...
 
 
@@ -175,6 +223,8 @@ class ChatPipeline:
         circuit_breaker: Any | None = None,
         max_react_rounds: int = 15,
         heartbeat_max_react_rounds: int | None = None,
+        heartbeat_model_timeout_seconds: int | None = 60,
+        heartbeat_allowed_tools: set[str] | None = None,
         slash_commands: SlashCommands | None = None,
         output_compressor: ChatOutputCompressor | None = None,
         channel_adapter: ChannelAdapter | None = None,
@@ -186,6 +236,7 @@ class ChatPipeline:
         sop_manager: Any | None = None,
         narration_observer: Any | None = None,
         on_narration: Any | None = None,
+        skill_catalog: Any | None = None,
     ) -> None:
         self.router = router
         self.chat_model = chat_model
@@ -196,6 +247,8 @@ class ChatPipeline:
         self.circuit_breaker = circuit_breaker
         self.max_react_rounds = max_react_rounds
         self.heartbeat_max_react_rounds = heartbeat_max_react_rounds
+        self.heartbeat_model_timeout_seconds = heartbeat_model_timeout_seconds
+        self.heartbeat_allowed_tools = set(heartbeat_allowed_tools or set())
         self.slash_commands = slash_commands
         self.output_compressor = output_compressor
         self.channel_adapter = channel_adapter or WebUIAdapter()
@@ -207,6 +260,7 @@ class ChatPipeline:
         self.sop_manager = sop_manager
         self.narration_observer = narration_observer
         self.on_narration = on_narration
+        self.skill_catalog = skill_catalog
         self._event_consumer_task: asyncio.Task[None] | None = None
         self._pending_sop_usage: set[str] = set()
 
@@ -269,12 +323,19 @@ class ChatPipeline:
         self,
         tool_name: str,
         arguments: dict[str, Any],
+        *,
+        skill_manifest: SkillManifest | None = None,
     ) -> dict[str, Any]:
+        updated = dict(arguments)
         if tool_name == "scan_emails" and self._current_internal_source() == "heartbeat":
-            updated = dict(arguments)
             updated.setdefault("triggered_by", "heartbeat")
-            return updated
-        return arguments
+        if (
+            skill_manifest is not None
+            and tool_name in {"exec_command", "exec_script"}
+            and skill_manifest.exec_profile
+        ):
+            updated.setdefault("exec_profile", skill_manifest.exec_profile)
+        return updated
 
     def _metadata_flag_enabled(self, metadata: dict[str, Any], key: str) -> bool:
         raw = metadata.get(key)
@@ -309,6 +370,87 @@ class ChatPipeline:
     def _should_force_final_response(self, round_num: int, *, max_react_rounds: int) -> bool:
         return max_react_rounds > 0 and round_num >= max(1, max_react_rounds - 1)
 
+    def _heartbeat_timeout_for(self, inbound: Message | None) -> float | None:
+        if not self._is_heartbeat_request(inbound):
+            return None
+        timeout_seconds = self.heartbeat_model_timeout_seconds
+        if timeout_seconds is None:
+            return None
+        return float(timeout_seconds)
+
+    def _filter_tools_for_inbound(
+        self,
+        tools: list[dict[str, Any]],
+        *,
+        inbound: Message | None,
+    ) -> list[dict[str, Any]]:
+        if not self._is_heartbeat_request(inbound) or not self.heartbeat_allowed_tools:
+            return tools
+        allowed = self.heartbeat_allowed_tools
+        return [
+            tool
+            for tool in tools
+            if str(tool.get("function", {}).get("name") or "").strip() in allowed
+        ]
+
+    def _method_supports_kwarg(self, method: Any, name: str) -> bool:
+        try:
+            return name in inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            return False
+
+    async def _router_call(
+        self,
+        model_name: str,
+        messages: list[dict[str, Any]],
+        *,
+        inbound: Message | None,
+    ) -> str:
+        kwargs: dict[str, Any] = {}
+        timeout_seconds = self._heartbeat_timeout_for(inbound)
+        if timeout_seconds is not None and self._method_supports_kwarg(self.router.call, "timeout_seconds"):
+            kwargs["timeout_seconds"] = timeout_seconds
+        return await self.router.call(model_name, messages, **kwargs)
+
+    async def _router_call_with_tools(
+        self,
+        model_name: str,
+        messages: list[dict[str, Any]],
+        *,
+        inbound: Message | None,
+        tools: list[dict[str, Any]] | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {}
+        if self._method_supports_kwarg(self.router.call_with_tools, "tools"):
+            kwargs["tools"] = tools
+        if self._method_supports_kwarg(self.router.call_with_tools, "session_id"):
+            kwargs["session_id"] = session_id
+        timeout_seconds = self._heartbeat_timeout_for(inbound)
+        if timeout_seconds is not None and self._method_supports_kwarg(self.router.call_with_tools, "timeout_seconds"):
+            kwargs["timeout_seconds"] = timeout_seconds
+        return await self.router.call_with_tools(model_name, messages, **kwargs)
+
+    async def _router_stream(
+        self,
+        model_name: str,
+        messages: list[dict[str, Any]],
+        *,
+        inbound: Message | None,
+        tools: list[dict[str, Any]] | None = None,
+        session_id: str | None = None,
+    ) -> AsyncIterator[str]:
+        kwargs: dict[str, Any] = {}
+        if self._method_supports_kwarg(self.router.stream, "tools"):
+            kwargs["tools"] = tools
+        if self._method_supports_kwarg(self.router.stream, "session_id"):
+            kwargs["session_id"] = session_id
+        timeout_seconds = self._heartbeat_timeout_for(inbound)
+        if timeout_seconds is not None and self._method_supports_kwarg(self.router.stream, "timeout_seconds"):
+            kwargs["timeout_seconds"] = timeout_seconds
+        async for chunk in self.router.stream(model_name, messages, **kwargs):
+            yield chunk
+
     async def _generate_round_limit_summary(
         self,
         react_messages: list[dict[str, Any]],
@@ -329,29 +471,47 @@ class ChatPipeline:
         )
 
         try:
+            decision_kwargs: dict[str, Any] = {}
+            if self._method_supports_kwarg(self.router.call_with_tools, "tools"):
+                decision_kwargs["tools"] = None
+            if self._method_supports_kwarg(self.router.call_with_tools, "session_id"):
+                decision_kwargs["session_id"] = session_id
+            if (
+                self.heartbeat_model_timeout_seconds is not None
+                and self._method_supports_kwarg(self.router.call_with_tools, "timeout_seconds")
+            ):
+                decision_kwargs["timeout_seconds"] = self.heartbeat_model_timeout_seconds
             decision = await self.router.call_with_tools(
                 self.chat_model,
                 final_messages,
-                tools=None,
-                session_id=session_id,
+                **decision_kwargs,
             )
             text = str(decision.get("text") or "").strip()
             if text:
                 return text
             if not (decision.get("tool_calls") or []):
                 streamed = ""
+                stream_kwargs: dict[str, Any] = {}
+                if self._method_supports_kwarg(self.router.stream, "session_id"):
+                    stream_kwargs["session_id"] = session_id
+                if self._method_supports_kwarg(self.router.stream, "tools"):
+                    stream_kwargs["tools"] = None
+                if (
+                    self.heartbeat_model_timeout_seconds is not None
+                    and self._method_supports_kwarg(self.router.stream, "timeout_seconds")
+                ):
+                    stream_kwargs["timeout_seconds"] = self.heartbeat_model_timeout_seconds
                 async for chunk in self.router.stream(
                     self.chat_model,
                     final_messages,
-                    session_id=session_id,
-                    tools=None,
+                    **stream_kwargs,
                 ):
                     if not chunk:
                         continue
                     streamed += chunk
                 if streamed.strip():
                     return streamed.strip()
-        except Exception:
+        except _PIPELINE_RECOVERABLE_ERRORS:
             logger.exception(
                 "react.round_limit.degrading_failed",
                 session_id=session_id,
@@ -399,10 +559,14 @@ class ChatPipeline:
             )
             return outbound
 
-        llm_messages = await self._build_llm_messages(inbound)
+        candidate_skills = self._match_skill_candidates(inbound)
+        llm_messages = await self._build_llm_messages(
+            inbound,
+            candidate_skills=candidate_skills,
+        )
         model_name = self._resolve_model_for_inbound(inbound)
         self._append_session_message(inbound)
-        text = await self.router.call(model_name, llm_messages)
+        text = await self._router_call(model_name, llm_messages, inbound=inbound)
         outbound = Message(
             text=text,
             sender="assistant",
@@ -479,7 +643,12 @@ class ChatPipeline:
 
             max_react_rounds = self._effective_max_react_rounds(inbound)
             use_tools = self.skill_manager is not None and max_react_rounds > 0
-            llm_messages = await self._build_llm_messages(inbound, use_tools=use_tools)
+            candidate_skills = self._match_skill_candidates(inbound)
+            llm_messages = await self._build_llm_messages(
+                inbound,
+                use_tools=use_tools,
+                candidate_skills=candidate_skills,
+            )
             model_name = self._resolve_model_for_inbound(inbound)
             self._append_session_message(inbound)
 
@@ -490,7 +659,10 @@ class ChatPipeline:
 
             if use_tools:
                 assert self.skill_manager is not None
-                tools = self.skill_manager.get_tools_schema()
+                tools = self._filter_tools_for_inbound(
+                    self.skill_manager.get_tools_schema(),
+                    inbound=inbound,
+                )
                 tool_names = [
                     str(tool.get("function", {}).get("name") or "")
                     for tool in tools
@@ -520,9 +692,10 @@ class ChatPipeline:
                         )
                         killed = True
                         break
-                    decision = await self.router.call_with_tools(
+                    decision = await self._router_call_with_tools(
                         model_name,
                         react_messages,
+                        inbound=inbound,
                         tools=tools,
                         session_id=inbound.session_id,
                     )
@@ -543,9 +716,10 @@ class ChatPipeline:
                                 session_id=inbound.session_id,
                             )
                         else:
-                            async for chunk in self.router.stream(
+                            async for chunk in self._router_stream(
                                 model_name,
                                 react_messages,
+                                inbound=inbound,
                                 session_id=inbound.session_id,
                                 tools=tools,
                             ):
@@ -580,9 +754,11 @@ class ChatPipeline:
                     for tool_call in tool_calls:
                         tool_name = self._extract_tool_name(tool_call)
                         tool_call_id = str(tool_call.get("id") or "")
+                        active_skill = self._select_active_skill_manifest(candidate_skills, tool_name)
                         arguments = self._augment_tool_arguments(
                             tool_name,
                             self._parse_tool_arguments(tool_call),
+                            skill_manifest=active_skill,
                         )
                         narration_task = self._schedule_narration_task(
                             inbound=inbound,
@@ -617,8 +793,9 @@ class ChatPipeline:
                                 tool_name,
                                 arguments,
                                 session_id=inbound.session_id,
+                                skill_name=active_skill.name if active_skill is not None else "direct",
                             )
-                        except Exception as exc:
+                        except HypoAgentError as exc:
                             await self._send_tool_status(
                                 tool_name=tool_name,
                                 status="fail",
@@ -647,11 +824,11 @@ class ChatPipeline:
                                 session_id=inbound.session_id,
                                 error=output.error_info,
                             )
-                        serialized_output = json.dumps(
-                            output.model_dump(mode="json"),
-                            ensure_ascii=False,
+                        serialized_output = json.dumps(output.model_dump(mode="json"), ensure_ascii=False)
+                        tool_content = self._tool_content_for_llm(
+                            output,
+                            serialized_output=serialized_output,
                         )
-                        tool_content = serialized_output
                         tool_result_for_event: Any = output.result
                         tool_metadata_for_event = dict(output.metadata)
                         tool_metadata_for_event["ephemeral"] = True
@@ -669,13 +846,15 @@ class ChatPipeline:
                                 "tool_call_id": tool_call_id,
                             }
                             tool_content, was_compressed = await self.output_compressor.compress_if_needed(
-                                serialized_output,
+                                tool_content,
                                 compression_metadata,
                             )
                             if was_compressed:
                                 tool_result_for_event = tool_content
                                 tool_metadata_for_event["compressed"] = True
-                                tool_metadata_for_event["original_chars"] = len(serialized_output)
+                                tool_metadata_for_event["original_chars"] = len(
+                                    self._tool_content_for_llm(output, serialized_output=serialized_output)
+                                )
                                 tool_metadata_for_event["compressed_chars"] = len(tool_content)
                                 compressed_meta = compression_metadata.get("compressed_meta")
                                 if isinstance(compressed_meta, dict):
@@ -756,9 +935,10 @@ class ChatPipeline:
                         session_id=inbound.session_id,
                     )
             else:
-                async for chunk in self.router.stream(
+                async for chunk in self._router_stream(
                     model_name,
                     llm_messages,
+                    inbound=inbound,
                     session_id=inbound.session_id,
                 ):
                     if self._kill_switch_active():
@@ -884,6 +1064,7 @@ class ChatPipeline:
         inbound: Message,
         *,
         use_tools: bool = False,
+        candidate_skills: list[SkillManifest] | None = None,
     ) -> list[dict[str, Any]]:
         text = self._message_text_for_llm(inbound)
         if not text and not self._has_image_attachments(inbound):
@@ -905,15 +1086,19 @@ class ChatPipeline:
         inbound_context = self._current_message_context(inbound)
         if inbound_context:
             llm_messages.append({"role": "system", "content": inbound_context})
-        prefs_context = self._preferences_context()
-        if prefs_context:
-            llm_messages.append({"role": "system", "content": prefs_context})
         semantic_context = await self._semantic_memory_context(
             text,
             skip_search=self._should_skip_semantic_memory(inbound),
         )
         if semantic_context:
             llm_messages.append({"role": "system", "content": semantic_context})
+        prefs_context = self._preferences_context()
+        if prefs_context:
+            llm_messages.append({"role": "system", "content": prefs_context})
+        skill_context = self._skill_instructions_context(candidate_skills or [])
+        if skill_context:
+            llm_messages.append({"role": "system", "content": skill_context})
+        llm_messages.append({"role": "system", "content": REPLY_BOUNDARY_SYSTEM_PROMPT})
 
         if not self._history_suppressed():
             history = self.session_memory.get_recent_messages(
@@ -940,6 +1125,52 @@ class ChatPipeline:
                     return prompt
         return self.persona_system_prompt
 
+    def _match_skill_candidates(self, inbound: Message) -> list[SkillManifest]:
+        if self.skill_catalog is None:
+            return []
+        matcher = getattr(self.skill_catalog, "match_candidates", None)
+        if not callable(matcher):
+            return []
+        try:
+            result = matcher(self._message_text_for_llm(inbound))
+        except Exception:
+            logger.warning("skill_catalog.match_failed", exc_info=True)
+            return []
+        return [item for item in result if isinstance(item, SkillManifest)]
+
+    def _skill_instructions_context(self, candidate_skills: list[SkillManifest]) -> str:
+        if not candidate_skills or self.skill_catalog is None:
+            return ""
+        loader = getattr(self.skill_catalog, "load_body", None)
+        if not callable(loader):
+            return ""
+        sections: list[str] = []
+        for manifest in candidate_skills:
+            try:
+                body = str(loader(manifest.name) or "").strip()
+            except Exception:
+                logger.warning("skill_catalog.load_body_failed", skill_name=manifest.name, exc_info=True)
+                continue
+            if body:
+                sections.append(f"[Skill: {manifest.name}]\n{body}")
+        if not sections:
+            return ""
+        return "Skill instructions:\n\n" + "\n\n".join(sections)
+
+    def _select_active_skill_manifest(
+        self,
+        candidate_skills: list[SkillManifest],
+        tool_name: str,
+    ) -> SkillManifest | None:
+        matching = [
+            manifest
+            for manifest in candidate_skills
+            if (not manifest.allowed_tools) or tool_name in manifest.allowed_tools
+        ]
+        if len(matching) == 1:
+            return matching[0]
+        return None
+
     async def _semantic_memory_context(self, query: str, *, skip_search: bool = False) -> str:
         if skip_search:
             self._pending_sop_usage = set()
@@ -957,7 +1188,7 @@ class ChatPipeline:
             results = search(query, top_k=5)
             if inspect.isawaitable(results):
                 results = await results
-        except Exception:
+        except _PIPELINE_RECOVERABLE_ERRORS:
             logger.exception("pipeline.semantic_memory.search_failed")
             self._pending_sop_usage = set()
             return ""
@@ -994,7 +1225,13 @@ class ChatPipeline:
         if manager is not None and hasattr(manager, "is_sop_path"):
             try:
                 return bool(manager.is_sop_path(file_path))
-            except Exception:
+            except _PIPELINE_RECOVERABLE_ERRORS as exc:
+                # FALLBACK: SOP path detection failure only disables metadata enrichment.
+                logger.warning(
+                    "pipeline.sop_read.degraded",
+                    file_path=file_path,
+                    **_error_fields(exc),
+                )
                 return False
         return "/knowledge/sop/" in file_path.replace("\\", "/")
 
@@ -1013,7 +1250,7 @@ class ChatPipeline:
             result = toucher(sorted(pending))
             if inspect.isawaitable(result):
                 await result
-        except Exception:
+        except _PIPELINE_RECOVERABLE_ERRORS:
             logger.exception("pipeline.sop_metadata_update_failed")
 
     def _track_sop_usage_from_tool_output(
@@ -1050,13 +1287,21 @@ class ChatPipeline:
 
         try:
             rows = lister(limit=20)
-        except Exception:
+        except _PIPELINE_RECOVERABLE_ERRORS as exc:
+            # FALLBACK: preference context is optional and can be omitted for this turn.
+            logger.warning(
+                "pipeline.preference_read.degraded",
+                **_error_fields(exc),
+            )
             return ""
 
         if not rows:
             return ""
 
-        lines = ["[User Preferences]"]
+        lines = ["[High Priority User Preferences]"]
+        lines.append(
+            "These preferences override any generic tendency to be overly helpful, proactive, or suggest next steps."
+        )
         for key, value in rows[:20]:
             if not key:
                 continue
@@ -1331,6 +1576,19 @@ class ChatPipeline:
         if inspect.isawaitable(result):
             await result
 
+    def _tool_content_for_llm(
+        self,
+        output: SkillOutput,
+        *,
+        serialized_output: str,
+    ) -> str:
+        result = output.result
+        if output.status == "success" and isinstance(result, str):
+            stripped = result.strip()
+            if stripped:
+                return stripped
+        return serialized_output
+
     async def _send_tool_status(
         self,
         *,
@@ -1400,7 +1658,7 @@ class ChatPipeline:
                 )
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except _PIPELINE_RECOVERABLE_ERRORS:
                 logger.exception(
                     "narration.emit.failed",
                     session_id=inbound.session_id,
@@ -1427,14 +1685,14 @@ class ChatPipeline:
             except TypeError:
                 try:
                     result = callback(payload)
-                except Exception:
+                except _PIPELINE_RECOVERABLE_ERRORS:
                     logger.exception(
                         "narration.callback.failed",
                         session_id=inbound.session_id,
                         tool_name=tool_name,
                     )
                     return
-            except Exception:
+            except _PIPELINE_RECOVERABLE_ERRORS:
                 logger.exception(
                     "narration.callback.failed",
                     session_id=inbound.session_id,
@@ -1444,7 +1702,7 @@ class ChatPipeline:
             if inspect.isawaitable(result):
                 try:
                     await result
-                except Exception:
+                except _PIPELINE_RECOVERABLE_ERRORS:
                     logger.exception(
                         "narration.callback.failed",
                         session_id=inbound.session_id,
@@ -1536,7 +1794,13 @@ class ChatPipeline:
                 emit_result = emitter(payload)
                 if inspect.isawaitable(emit_result):
                     await emit_result
-        except TimeoutError:
+        except TimeoutError as exc:
+            logger.warning(
+                "pipeline.error_converted",
+                session_id=inbound.session_id,
+                converted_type="LLM_TIMEOUT",
+                **_error_fields(exc),
+            )
             error_payload = {
                 "type": "error",
                 "code": "LLM_TIMEOUT",
@@ -1547,7 +1811,13 @@ class ChatPipeline:
             emit_result = emitter(error_payload)
             if inspect.isawaitable(emit_result):
                 await emit_result
-        except RuntimeError:
+        except RuntimeError as exc:
+            logger.warning(
+                "pipeline.error_converted",
+                session_id=inbound.session_id,
+                converted_type="LLM_RUNTIME_ERROR",
+                **_error_fields(exc),
+            )
             error_payload = {
                 "type": "error",
                 "code": "LLM_RUNTIME_ERROR",

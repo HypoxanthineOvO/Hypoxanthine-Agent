@@ -9,11 +9,13 @@ from typing import Any, Awaitable, Callable, Literal
 import structlog
 import yaml
 
+from hypo_agent.exceptions import HypoAgentError
 from hypo_agent.models import SkillOutput
 from hypo_agent.security.permission_manager import PermissionManager
 from hypo_agent.skills.base import BaseSkill
 
 logger = structlog.get_logger("hypo_agent.core.skill_manager")
+_SKILL_MANAGER_ERRORS = (HypoAgentError, OSError, RuntimeError, TypeError, ValueError)
 
 BuiltinToolHandler = Callable[..., Awaitable[SkillOutput] | SkillOutput]
 
@@ -37,6 +39,7 @@ class SkillManager:
         structured_store: Any | None = None,
     ) -> None:
         self._skills: dict[str, BaseSkill] = {}
+        self._skill_sources: dict[str, str] = {}
         self._tool_to_skill: dict[str, BaseSkill] = {}
         self._builtin_tools: dict[str, tuple[dict[str, Any], BuiltinToolHandler, str]] = {}
         self._circuit_breaker = circuit_breaker
@@ -45,11 +48,12 @@ class SkillManager:
         if skills:
             self.register_many(skills)
 
-    def register(self, skill: BaseSkill) -> None:
+    def register(self, skill: BaseSkill, *, source: str = "auto") -> None:
         if skill.name in self._skills:
             raise ValueError(f"Skill '{skill.name}' already registered")
 
         self._skills[skill.name] = skill
+        self._skill_sources[skill.name] = str(source or "auto")
         for tool in skill.tools:
             tool_name = self._read_tool_name(tool)
             if not tool_name:
@@ -57,10 +61,22 @@ class SkillManager:
             if tool_name in self._tool_to_skill:
                 raise ValueError(f"Tool '{tool_name}' already registered")
             self._tool_to_skill[tool_name] = skill
+        logger.info(
+            "skill_manager.register",
+            skill_name=skill.name,
+            source=self._skill_sources[skill.name],
+            tools=[self._read_tool_name(tool) for tool in skill.tools],
+        )
+        logger.info(
+            "skill.registered",
+            skill_name=skill.name,
+            source=self._skill_sources[skill.name],
+            tools=[self._read_tool_name(tool) for tool in skill.tools],
+        )
 
-    def register_many(self, skills: list[BaseSkill]) -> None:
+    def register_many(self, skills: list[BaseSkill], *, source: str = "auto") -> None:
         for skill in skills:
-            self.register(skill)
+            self.register(skill, source=source)
 
     def get_tools_schema(self) -> list[dict[str, Any]]:
         all_tools: list[dict[str, Any]] = []
@@ -92,10 +108,14 @@ class SkillManager:
                     "name": skill.name,
                     "description": skill.description,
                     "enabled": True,
+                    "source": self._skill_sources.get(skill.name, "auto"),
                     "tools": [self._read_tool_name(tool) for tool in skill.tools],
                 }
             )
         return items
+
+    def registration_snapshot(self) -> list[dict[str, Any]]:
+        return self.list_skills()
 
     @staticmethod
     def known_skill_names(path: Path | str = "config/skills.yaml") -> set[str]:
@@ -132,8 +152,15 @@ class SkillManager:
         params: dict[str, Any],
         *,
         session_id: str | None = None,
+        skill_name: str | None = None,
     ) -> SkillOutput:
-        logger.info("skill.invoke.start", tool_name=tool_name, session_id=session_id)
+        effective_skill_name = self._resolve_invocation_skill_name(tool_name, skill_name)
+        logger.info(
+            "skill.invoke.start",
+            tool_name=tool_name,
+            session_id=session_id,
+            skill_name=effective_skill_name,
+        )
         started_at = perf_counter()
 
         if self._circuit_breaker is not None:
@@ -145,6 +172,7 @@ class SkillManager:
                     "skill.invoke.blocked",
                     tool_name=tool_name,
                     session_id=session_id,
+                    skill_name=effective_skill_name,
                     reason=reason,
                 )
                 blocked = SkillOutput(status="error", error_info=reason)
@@ -152,6 +180,7 @@ class SkillManager:
                     tool_name=tool_name,
                     params=params,
                     session_id=session_id,
+                    skill_name=effective_skill_name,
                     status="blocked",
                     result=None,
                     error_info=reason,
@@ -160,12 +189,17 @@ class SkillManager:
                 self._attach_invocation_id(blocked, invocation_id)
                 return blocked
 
-            allowed, reason = self._circuit_breaker.can_execute(tool_name, session_id)
+            allowed, reason = self._breaker_can_execute(
+                tool_name,
+                session_id,
+                effective_skill_name,
+            )
             if not allowed:
                 logger.warning(
                     "skill.invoke.blocked",
                     tool_name=tool_name,
                     session_id=session_id,
+                    skill_name=effective_skill_name,
                     reason=reason,
                 )
                 status = "fused" if self._is_fused_reason(reason) else "error"
@@ -174,6 +208,7 @@ class SkillManager:
                     tool_name=tool_name,
                     params=params,
                     session_id=session_id,
+                    skill_name=effective_skill_name,
                     status="blocked",
                     result=None,
                     error_info=reason,
@@ -193,6 +228,7 @@ class SkillManager:
                 "skill.invoke.fail",
                 tool_name=tool_name,
                 session_id=session_id,
+                skill_name=effective_skill_name,
                 status=result.status,
                 error=result.error_info,
             )
@@ -200,6 +236,7 @@ class SkillManager:
                 tool_name=tool_name,
                 params=params,
                 session_id=session_id,
+                skill_name=effective_skill_name,
                 status="error",
                 result=None,
                 error_info=result.error_info,
@@ -222,6 +259,7 @@ class SkillManager:
                     "skill.invoke.blocked.permission",
                     tool_name=tool_name,
                     session_id=session_id,
+                    skill_name=effective_skill_name,
                     path=path,
                     operation=operation,
                     reason=reason,
@@ -234,6 +272,7 @@ class SkillManager:
                     tool_name=tool_name,
                     params=params,
                     session_id=session_id,
+                    skill_name=effective_skill_name,
                     status="blocked",
                     result=None,
                     error_info=reason,
@@ -251,20 +290,22 @@ class SkillManager:
             else:
                 assert skill is not None
                 result = await skill.execute(tool_name, params)
-        except Exception as exc:
+        except _SKILL_MANAGER_ERRORS as exc:
             logger.error(
                 "skill.invoke.exception",
                 tool_name=tool_name,
                 session_id=session_id,
+                skill_name=effective_skill_name,
                 error=str(exc),
             )
             if self._circuit_breaker is not None:
-                self._circuit_breaker.record_failure(tool_name, session_id)
+                self._breaker_record_failure(tool_name, session_id, effective_skill_name)
             result = SkillOutput(status="error", error_info=str(exc))
             logger.warning(
                 "skill.invoke.fail",
                 tool_name=tool_name,
                 session_id=session_id,
+                skill_name=effective_skill_name,
                 status=result.status,
                 error=result.error_info,
             )
@@ -272,6 +313,7 @@ class SkillManager:
                 tool_name=tool_name,
                 params=params,
                 session_id=session_id,
+                skill_name=effective_skill_name,
                 status="error",
                 result=None,
                 error_info=result.error_info,
@@ -282,7 +324,7 @@ class SkillManager:
 
         if not isinstance(result, SkillOutput):
             if self._circuit_breaker is not None:
-                self._circuit_breaker.record_failure(tool_name, session_id)
+                self._breaker_record_failure(tool_name, session_id, effective_skill_name)
             normalized = SkillOutput(
                 status="error",
                 error_info=(
@@ -295,6 +337,7 @@ class SkillManager:
                 "skill.invoke.fail",
                 tool_name=tool_name,
                 session_id=session_id,
+                skill_name=effective_skill_name,
                 status=normalized.status,
                 error=normalized.error_info,
             )
@@ -302,6 +345,7 @@ class SkillManager:
                 tool_name=tool_name,
                 params=params,
                 session_id=session_id,
+                skill_name=effective_skill_name,
                 status="error",
                 result=None,
                 error_info=normalized.error_info,
@@ -312,20 +356,30 @@ class SkillManager:
 
         if self._circuit_breaker is not None:
             if result.status == "success":
-                self._circuit_breaker.record_success(tool_name, session_id)
+                self._breaker_record_success(tool_name, session_id, effective_skill_name)
             else:
-                self._circuit_breaker.record_failure(tool_name, session_id)
-                allowed_after, reason_after = self._circuit_breaker.can_execute(tool_name, session_id)
+                self._breaker_record_failure(tool_name, session_id, effective_skill_name)
+                allowed_after, reason_after = self._breaker_can_execute(
+                    tool_name,
+                    session_id,
+                    effective_skill_name,
+                )
                 if (not allowed_after) and self._is_fused_reason(reason_after):
                     result = SkillOutput(status="fused", error_info=reason_after)
 
         if result.status == "success":
-            logger.info("skill.invoke.ok", tool_name=tool_name, session_id=session_id)
+            logger.info(
+                "skill.invoke.ok",
+                tool_name=tool_name,
+                session_id=session_id,
+                skill_name=effective_skill_name,
+            )
         else:
             logger.warning(
                 "skill.invoke.fail",
                 tool_name=tool_name,
                 session_id=session_id,
+                skill_name=effective_skill_name,
                 status=result.status,
                 error=result.error_info,
             )
@@ -334,6 +388,7 @@ class SkillManager:
             tool_name=tool_name,
             params=params,
             session_id=session_id,
+            skill_name=effective_skill_name,
             status=result.status,
             result=result.result,
             error_info=result.error_info,
@@ -366,6 +421,7 @@ class SkillManager:
         tool_name: str,
         params: dict[str, Any],
         session_id: str | None,
+        skill_name: str,
         status: str,
         result: Any,
         error_info: str | None,
@@ -375,10 +431,6 @@ class SkillManager:
             return None
 
         normalized_status = self._normalize_invocation_status(status)
-        skill = self._tool_to_skill.get(tool_name)
-        skill_name = skill.name if skill is not None else None
-        if skill_name is None and tool_name in self._builtin_tools:
-            skill_name = self._builtin_tools[tool_name][2]
         try:
             return await self._structured_store.record_tool_invocation(
                 session_id=session_id,
@@ -391,7 +443,7 @@ class SkillManager:
                 error_info=error_info,
                 compressed_meta_json=None,
             )
-        except Exception as exc:  # pragma: no cover - defensive safeguard
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:  # pragma: no cover - defensive safeguard
             logger.warning(
                 "skill_manager.record.failed",
                 tool_name=tool_name,
@@ -403,6 +455,58 @@ class SkillManager:
     def _is_fused_reason(self, reason: str) -> bool:
         lowered = reason.lower()
         return ("disabled" in lowered) or ("session circuit breaker" in lowered)
+
+    def _resolve_invocation_skill_name(
+        self,
+        tool_name: str,
+        skill_name: str | None,
+    ) -> str:
+        normalized = str(skill_name or "").strip()
+        if normalized:
+            return normalized
+        skill = self._tool_to_skill.get(tool_name)
+        if skill is not None:
+            return skill.name
+        builtin = self._builtin_tools.get(tool_name)
+        if builtin is not None:
+            return builtin[2]
+        return "direct"
+
+    def _breaker_can_execute(
+        self,
+        tool_name: str,
+        session_id: str | None,
+        skill_name: str,
+    ) -> tuple[bool, str]:
+        assert self._circuit_breaker is not None
+        try:
+            return self._circuit_breaker.can_execute(tool_name, session_id, skill_name)
+        except TypeError:
+            return self._circuit_breaker.can_execute(tool_name, session_id)
+
+    def _breaker_record_success(
+        self,
+        tool_name: str,
+        session_id: str | None,
+        skill_name: str,
+    ) -> None:
+        assert self._circuit_breaker is not None
+        try:
+            self._circuit_breaker.record_success(tool_name, session_id, skill_name)
+        except TypeError:
+            self._circuit_breaker.record_success(tool_name, session_id)
+
+    def _breaker_record_failure(
+        self,
+        tool_name: str,
+        session_id: str | None,
+        skill_name: str,
+    ) -> None:
+        assert self._circuit_breaker is not None
+        try:
+            self._circuit_breaker.record_failure(tool_name, session_id, skill_name)
+        except TypeError:
+            self._circuit_breaker.record_failure(tool_name, session_id)
 
     def _normalize_invocation_status(self, status: str) -> str:
         lowered = status.lower()
@@ -452,7 +556,7 @@ class SkillManager:
             )
             if inspect.isawaitable(result):
                 await result
-        except Exception as exc:  # pragma: no cover - defensive safeguard
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:  # pragma: no cover - defensive safeguard
             logger.warning(
                 "skill_manager.record_compressed_meta.failed",
                 invocation_id=invocation_id,

@@ -1,37 +1,55 @@
 default_timeout_seconds: 30
 skills:
-  tmux:
+  # Core execution backend. No SKILL.md; other skills depend on this directly.
+  exec:
     enabled: true
+    timeout_seconds: 60
+  # Legacy persistent terminal backend. No SKILL.md; kept as an optional backend only.
+  tmux:
+    enabled: false
     timeout_seconds: 30
+  # Core code sandbox backend. No SKILL.md; execution-only infrastructure.
   code_run:
     enabled: true
     timeout_seconds: 30
+  # Hybrid skill: guidance lives in skills/hybrid/coder/SKILL.md.
   coder:
     enabled: true
     default_model: o4-mini
+  # Core file I/O backend. No SKILL.md; execution-only infrastructure.
   filesystem:
     enabled: true
+  # Hybrid skill: guidance lives in skills/hybrid/agent-search/SKILL.md.
   agent_search:
     enabled: true
+  # Hybrid skill: guidance lives in skills/hybrid/info-portal/SKILL.md.
   info:
     enabled: true
     max_items: 15
+  # Hybrid skill: guidance lives in skills/hybrid/notion/SKILL.md.
   notion:
     enabled: true
+  # Pure skill now owned by SkillCatalog at skills/pure/log-inspector/SKILL.md.
   log_inspector:
-    enabled: true
+    enabled: false
     service_name: hypo-agent
+  # Hybrid skill: guidance lives in skills/hybrid/info-reach/SKILL.md.
   info_reach:
     enabled: true
+  # Export backend has no SkillCatalog entry yet; Python tool remains authoritative.
   export:
     enabled: true
-  qq:
-    enabled: true
+  # Hybrid skill: guidance lives in skills/hybrid/probe/SKILL.md.
   probe:
     enabled: true
+  # Core memory backend. No SKILL.md; runtime infrastructure.
+  memory:
+    enabled: true
+  # Python skill only for now; no SKILL.md yet.
   reminder:
     enabled: true
     auto_confirm: true
+  # Python skill only for now; no SKILL.md yet.
   email_scanner:
     enabled: true
     mark_as_read: true

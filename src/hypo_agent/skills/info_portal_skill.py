@@ -16,7 +16,14 @@ logger = structlog.get_logger("hypo_agent.skills.info_skill")
 _SERVICE_UNAVAILABLE = "Hypo-Info 当前不可用，请确认服务是否启动"
 
 
-class InfoSkill(BaseSkill):
+class InfoPortalSkill(BaseSkill):
+    """Hypo-Info 门户被动查询。
+
+    用户主动提问时使用，提供今日摘要、搜索、Benchmark、分区浏览等能力。
+
+    数据来自 Hypo-Info 前端 API。
+    """
+
     name = "info"
     description = "查询 Hypo-Info 的今日资讯、文章搜索、栏目列表和模型 Benchmark 排名。"
     required_permissions: list[str] = []
@@ -41,7 +48,7 @@ class InfoSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "info_today",
-                    "description": "获取今日资讯摘要（可指定分区：AI/开源/Cryo/学术等）",
+                    "description": "Get today's news digest, optionally filtered by section.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -54,7 +61,7 @@ class InfoSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "info_search",
-                    "description": "在 Hypo-Info 中搜索文章",
+                    "description": "Search Hypo-Info articles by keyword.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -74,7 +81,7 @@ class InfoSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "info_benchmark",
-                    "description": "获取最新的 LLM Benchmark 综合排名",
+                    "description": "Show the latest Hypo-Info LLM benchmark ranking.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -92,7 +99,7 @@ class InfoSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "info_sections",
-                    "description": "列出 Hypo-Info 的所有内容分区",
+                    "description": "List the available Hypo-Info content sections.",
                     "parameters": {
                         "type": "object",
                         "properties": {},
@@ -126,7 +133,7 @@ class InfoSkill(BaseSkill):
                 return SkillOutput(status="success", result=result)
         except (InfoClientUnavailable, httpx.HTTPError):
             return SkillOutput(status="error", error_info=_SERVICE_UNAVAILABLE)
-        except Exception as exc:
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning("info_skill.execute_failed", tool_name=tool_name, error=str(exc))
             return SkillOutput(status="error", error_info=str(exc))
 

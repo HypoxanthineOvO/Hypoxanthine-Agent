@@ -6,6 +6,7 @@ import asyncio
 import pytest
 
 from hypo_agent.core.pipeline import ChatPipeline
+from hypo_agent.core.skill_catalog import SkillManifest
 from hypo_agent.memory.semantic_memory import ChunkResult
 from hypo_agent.memory.structured_store import StructuredStore
 from hypo_agent.models import Attachment, Message
@@ -45,7 +46,9 @@ def test_pipeline_injects_recent_history_before_inbound() -> None:
             assert messages[1]["role"] == "system"
             assert "[Current Message Context]" in messages[1]["content"]
             assert "当前消息渠道: WebUI (webui)" in messages[1]["content"]
-            assert messages[2:] == [
+            assert messages[2]["role"] == "system"
+            assert "answer the user's direct request and then stop" in messages[2]["content"]
+            assert messages[3:] == [
                 {"role": "user", "content": "旧问题"},
                 {"role": "assistant", "content": "旧回答"},
                 {"role": "user", "content": "新问题"},
@@ -157,7 +160,9 @@ def test_pipeline_stream_reply_emits_chunk_and_done_events_and_persists() -> Non
             assert messages[1]["role"] == "system"
             assert "[Current Message Context]" in messages[1]["content"]
             assert "当前消息渠道: WebUI (webui)" in messages[1]["content"]
-            assert messages[2:] == [{"role": "user", "content": "hello"}]
+            assert messages[2]["role"] == "system"
+            assert "answer the user's direct request and then stop" in messages[2]["content"]
+            assert messages[3:] == [{"role": "user", "content": "hello"}]
             assert session_id == "s1"
             yield "He"
             yield "llo"
@@ -213,8 +218,8 @@ def test_pipeline_attaches_skill_output_attachments_to_final_message() -> None:
         def get_tools_schema(self):
             return [{"type": "function", "function": {"name": "export_to_file"}}]
 
-        async def invoke(self, tool_name, params, *, session_id=None):
-            del tool_name, params, session_id
+        async def invoke(self, tool_name, params, *, session_id=None, skill_name=None):
+            del tool_name, params, session_id, skill_name
             return SkillOutput(
                 status="success",
                 result="/tmp/export.pdf",
@@ -244,6 +249,201 @@ def test_pipeline_attaches_skill_output_attachments_to_final_message() -> None:
 
     assert any(event["type"] == "tool_call_result" for event in events)
     assert memory.appended[-1].attachments[0].filename == "export.pdf"
+
+
+def test_pipeline_invokes_tools_with_direct_skill_name() -> None:
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            if not hasattr(self, "called"):
+                self.called = 1
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_echo",
+                            "function": {
+                                "name": "echo",
+                                "arguments": "{\"text\":\"hello\"}",
+                            },
+                        }
+                    ],
+                }
+            return {"text": "done", "tool_calls": []}
+
+    class RecordingSkillManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict, str | None, str | None]] = []
+
+        def get_tools_schema(self):
+            return [{"type": "function", "function": {"name": "echo"}}]
+
+        async def invoke(self, tool_name, params, *, session_id=None, skill_name=None):
+            self.calls.append((tool_name, params, session_id, skill_name))
+            return SkillOutput(status="success", result={"echo": params["text"]})
+
+    skills = RecordingSkillManager()
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        skill_manager=skills,
+    )
+
+    async def _collect() -> None:
+        inbound = Message(text="say hello", sender="user", session_id="s1")
+        async for _ in pipeline.stream_reply(inbound):
+            pass
+
+    asyncio.run(_collect())
+
+    assert skills.calls == [("echo", {"text": "hello"}, "s1", "direct")]
+
+
+def test_pipeline_injects_skill_instructions_and_exec_profile() -> None:
+    memory = StubSessionMemory()
+
+    class StubCatalog:
+        def match_candidates(self, user_message: str):
+            assert "git" in user_message
+            return [
+                SkillManifest(
+                    name="git-workflow",
+                    description="Git workflow",
+                    category="pure",
+                    path=Path("/tmp/git-workflow"),
+                    allowed_tools=["exec_command"],
+                    backend="exec",
+                    exec_profile="git",
+                    triggers=["git"],
+                    risk="low",
+                    dependencies=["git"],
+                    compatibility="linux",
+                )
+            ]
+
+        def load_body(self, skill_name: str) -> str:
+            assert skill_name == "git-workflow"
+            return "Run git status first."
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.messages: list[dict] | None = None
+
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, tools, session_id
+            self.messages = messages
+            if not hasattr(self, "called"):
+                self.called = 1
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_exec",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"command\":\"git status --short\"}",
+                            },
+                        }
+                    ],
+                }
+            return {"text": "done", "tool_calls": []}
+
+    class RecordingSkillManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict, str | None, str | None]] = []
+
+        def get_tools_schema(self):
+            return [{"type": "function", "function": {"name": "exec_command"}}]
+
+        async def invoke(self, tool_name, params, *, session_id=None, skill_name=None):
+            self.calls.append((tool_name, params, session_id, skill_name))
+            return SkillOutput(status="success", result={"stdout": "ok"})
+
+    router = StubRouter()
+    skills = RecordingSkillManager()
+    pipeline = ChatPipeline(
+        router=router,
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        skill_manager=skills,
+        skill_catalog=StubCatalog(),
+    )
+
+    async def _collect() -> None:
+        inbound = Message(text="please inspect git changes", sender="user", session_id="s1")
+        async for _ in pipeline.stream_reply(inbound):
+            pass
+
+    asyncio.run(_collect())
+
+    assert any(
+        message["role"] == "system" and "Skill instructions" in str(message["content"])
+        for message in (router.messages or [])
+    )
+    assert skills.calls == [
+        (
+            "exec_command",
+            {"command": "git status --short", "exec_profile": "git"},
+            "s1",
+            "git-workflow",
+        )
+    ]
+
+
+def test_pipeline_invokes_tools_with_direct_skill_name() -> None:
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            if not hasattr(self, "called"):
+                self.called = 1
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_echo",
+                            "function": {
+                                "name": "echo",
+                                "arguments": "{\"text\":\"hello\"}",
+                            },
+                        }
+                    ],
+                }
+            return {"text": "done", "tool_calls": []}
+
+    class RecordingSkillManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict, str | None, str | None]] = []
+
+        def get_tools_schema(self):
+            return [{"type": "function", "function": {"name": "echo"}}]
+
+        async def invoke(self, tool_name, params, *, session_id=None, skill_name=None):
+            self.calls.append((tool_name, params, session_id, skill_name))
+            return SkillOutput(status="success", result={"echo": params["text"]})
+
+    skills = RecordingSkillManager()
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        skill_manager=skills,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="say hello", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    asyncio.run(_collect())
+
+    assert skills.calls == [("echo", {"text": "hello"}, "s1", "direct")]
 
 
 def test_pipeline_rejects_empty_text() -> None:
@@ -406,7 +606,7 @@ def test_system_prompt_contains_time(monkeypatch: pytest.MonkeyPatch) -> None:
         pipeline._build_llm_messages(Message(text="hi", sender="user", session_id="s1"))
     )
     system_messages = [item for item in messages if item["role"] == "system"]
-    assert len(system_messages) == 2
+    assert len(system_messages) == 3
     content = system_messages[0]["content"]
     assert "当前时间:" in content
     assert "2026-03-10T00:15:00+08:00" in content
@@ -415,6 +615,7 @@ def test_system_prompt_contains_time(monkeypatch: pytest.MonkeyPatch) -> None:
     assert tz_name
     assert "[Current Message Context]" in system_messages[1]["content"]
     assert "当前消息渠道: WebUI (webui)" in system_messages[1]["content"]
+    assert "answer the user's direct request and then stop" in system_messages[2]["content"]
 
 
 def test_pipeline_broadcasts_reply_for_qq_channel() -> None:
@@ -549,7 +750,7 @@ def test_preference_injection(tmp_path: Path) -> None:
         )
     )
     system_messages = [item for item in messages if item["role"] == "system"]
-    assert any("User Preferences" in item.get("content", "") for item in system_messages)
+    assert any("High Priority User Preferences" in item.get("content", "") for item in system_messages)
 
 
 def test_pipeline_includes_persona_system_prompt_when_provided() -> None:
@@ -576,6 +777,85 @@ def test_pipeline_includes_persona_system_prompt_when_provided() -> None:
     assert system_messages[0]["content"].startswith("[Persona]")
     assert "## 环境信息" in system_messages[0]["content"]
     assert "/home/heyx/Hypo-Agent" in system_messages[0]["content"]
+
+
+def test_pipeline_tool_prompt_tells_model_not_to_guess_file_permission_denials() -> None:
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        async def call(self, model_name, messages):
+            del model_name, messages
+            return "unused"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+    )
+
+    messages = asyncio.run(
+        pipeline._build_llm_messages(
+            Message(text="帮我读一下 /tmp/a.txt", sender="user", session_id="s1"),
+            use_tools=True,
+        )
+    )
+    system_messages = [item["content"] for item in messages if item["role"] == "system"]
+    tool_prompt = next(item for item in system_messages if "assistant with access to tools" in item)
+
+    assert "do not assume permission is missing before trying" in tool_prompt
+    assert "read_file or list_directory first" in tool_prompt
+    assert "Only tell the user that access is denied after a tool actually returns a permission error" in tool_prompt
+
+
+def test_pipeline_places_high_priority_preferences_after_semantic_memory(tmp_path: Path) -> None:
+    db_path = tmp_path / "hypo.db"
+
+    async def _seed() -> StructuredStore:
+        store = StructuredStore(db_path=db_path)
+        await store.init()
+        await store.set_preference("reply_boundary", "答完直接结束，不要追加反问")
+        return store
+
+    class StubSemanticMemory:
+        async def search(self, query: str, top_k: int = 5) -> list[ChunkResult]:
+            del query, top_k
+            return [
+                ChunkResult(
+                    file_path="memory/knowledge/persona/user_preferences.md",
+                    chunk_text="某条较弱的历史记忆。",
+                    score=0.9,
+                    chunk_index=0,
+                )
+            ]
+
+    memory = StubSessionMemory()
+    store = asyncio.run(_seed())
+    class StubRouter:
+        async def call(self, model_name, messages):
+            del model_name, messages
+            return "unused"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        structured_store=store,
+        semantic_memory=StubSemanticMemory(),
+    )
+
+    messages = asyncio.run(
+        pipeline._build_llm_messages(Message(text="hi", sender="user", session_id="s1"))
+    )
+    system_contents = [item["content"] for item in messages if item["role"] == "system"]
+    semantic_idx = next(i for i, item in enumerate(system_contents) if "[相关记忆]" in item)
+    prefs_idx = next(i for i, item in enumerate(system_contents) if "[High Priority User Preferences]" in item)
+    boundary_idx = next(
+        i for i, item in enumerate(system_contents) if "answer the user's direct request and then stop" in item
+    )
+
+    assert semantic_idx < prefs_idx < boundary_idx
 
 
 def test_pipeline_injects_semantic_memory_before_history() -> None:

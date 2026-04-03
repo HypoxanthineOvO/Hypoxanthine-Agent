@@ -1,0 +1,73 @@
+profiles:
+  git:
+    allow_prefixes:
+      - "git status"
+      - "git diff"
+      - "git log"
+      - "git show"
+      - "git branch"
+      - "git commit"
+      - "git pull"
+      - "git push"
+      - "git stash"
+      - "git add"
+      - "git checkout"
+      - "git merge"
+    deny_prefixes:
+      - "git push --force"
+      - "git reset --hard"
+  systemd:
+    allow_prefixes:
+      - "systemctl status"
+      - "systemctl list-units"
+      - "journalctl"
+    deny_prefixes:
+      - "systemctl stop"
+      - "systemctl disable"
+      - "shutdown"
+      - "reboot"
+  python-dev:
+    allow_prefixes:
+      - "uv sync"
+      - "uv run"
+      - "pytest"
+      - "ruff"
+      - "mypy"
+      - "pip list"
+    deny_prefixes: []
+  hypo-agent:
+    allow_prefixes:
+      - "HYPO_TEST_MODE=1 uv run python scripts/agent_cli.py"
+      - "uv run python scripts/agent_cli.py"
+      - "journalctl -u hypo-agent"
+      - "systemctl restart hypo-agent"
+    deny_prefixes:
+      - "uv run python scripts/agent_cli.py --port 8765"
+  host-inspect:
+    allow_prefixes:
+      - "df -h"
+      - "free -h"
+      - "ps aux"
+      - "ss -tlnp"
+      - "uptime"
+      - "uname -a"
+    deny_prefixes: []
+  log-inspect:
+    allow_prefixes:
+      - "journalctl"
+      - "sqlite3"
+      - "grep"
+      - "jq"
+      - "cat"
+      - "tail"
+      - "head"
+    deny_prefixes: []
+  default:
+    allow_prefixes:
+      - "*"
+    deny_prefixes:
+      - "rm -rf /"
+      - "shutdown"
+      - "reboot"
+      - "mkfs"
+      - "dd if="

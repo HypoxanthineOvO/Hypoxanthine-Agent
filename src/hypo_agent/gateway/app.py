@@ -51,6 +51,7 @@ from hypo_agent.core.scheduler import SchedulerService
 from hypo_agent.core.slash_commands import SlashCommandHandler
 from hypo_agent.core.sop_manager import SopManager
 from hypo_agent.core.skill_manager import SkillManager
+from hypo_agent.core.skill_catalog import SkillCatalog
 from hypo_agent.core.time_utils import utc_isoformat, utc_now
 from hypo_agent.gateway.config_api import router as config_api_router
 from hypo_agent.gateway.compressed_api import router as compressed_api_router
@@ -82,9 +83,10 @@ from hypo_agent.skills import (
     CodeRunSkill,
     CoderSkill,
     EmailScannerSkill,
+    ExecSkill,
     ExportSkill,
     FileSystemSkill,
-    InfoSkill,
+    InfoPortalSkill,
     InfoReachSkill,
     LogInspectorSkill,
     MemorySkill,
@@ -141,6 +143,15 @@ class AppDeps:
     reload_config: Any | None = None
 
 
+@dataclass(slots=True)
+class AppTestOverrides:
+    disable_external_channels: bool = False
+    weixin_channel_factory: Any | None = None
+    napcat_ws_client_factory: Any | None = None
+    qqbot_ws_client_factory: Any | None = None
+    skip_email_cache_warmup: bool = False
+
+
 def _register_enabled_skills(
     *,
     skill_manager: SkillManager,
@@ -169,29 +180,48 @@ def _register_enabled_skills(
         else set()
     )
     per_skill = skills_payload.get("skills", {})
+    exec_cfg = per_skill.get("exec", {}) if isinstance(per_skill, dict) else {}
     tmux_cfg = per_skill.get("tmux", {}) if isinstance(per_skill, dict) else {}
     code_run_cfg = per_skill.get("code_run", {}) if isinstance(per_skill, dict) else {}
     reminder_cfg = per_skill.get("reminder", {}) if isinstance(per_skill, dict) else {}
     email_scanner_cfg = per_skill.get("email_scanner", {}) if isinstance(per_skill, dict) else {}
     coder_cfg = per_skill.get("coder", {}) if isinstance(per_skill, dict) else {}
     info_cfg = per_skill.get("info", {}) if isinstance(per_skill, dict) else {}
-    info_reach_cfg = per_skill.get("info_reach", {}) if isinstance(per_skill, dict) else {}
     log_inspector_cfg = per_skill.get("log_inspector", {}) if isinstance(per_skill, dict) else {}
+    exec_timeout = int(exec_cfg.get("timeout_seconds", default_timeout))
     tmux_timeout = int(tmux_cfg.get("timeout_seconds", default_timeout))
     code_run_timeout = int(code_run_cfg.get("timeout_seconds", default_timeout))
     auto_confirm = bool(reminder_cfg.get("auto_confirm", True))
     email_mark_as_read = bool(email_scanner_cfg.get("mark_as_read", True))
     info_max_items = int(info_cfg.get("max_items", 15))
-    _hypo_info_base_url = str(info_reach_cfg.get("base_url", "")).strip() or "http://localhost:8200"
     log_service_name = str(log_inspector_cfg.get("service_name", "hypo-agent"))
+    registered_summaries: list[dict[str, Any]] = []
+
+    def _register(skill: Any, *, source: str = "config") -> None:
+        skill_manager.register(skill, source=source)
+        registered_summaries.append(
+            {
+                "name": skill.name,
+                "source": source,
+                "tools": [tool.get("function", {}).get("name", "") for tool in skill.tools],
+            }
+        )
+
+    if "exec" in enabled_skills:
+        _register(
+            ExecSkill(
+                default_timeout_seconds=exec_timeout,
+                exec_profiles_path=skills_config_path.parent / "exec_profiles.yaml",
+            )
+        )
 
     if "tmux" in enabled_skills:
-        skill_manager.register(
+        _register(
             TmuxSkill(default_timeout_seconds=tmux_timeout, permission_manager=permission_manager)
         )
 
     if "code_run" in enabled_skills:
-        skill_manager.register(
+        _register(
             CodeRunSkill(
                 permission_manager=permission_manager,
                 default_timeout_seconds=code_run_timeout,
@@ -208,7 +238,7 @@ def _register_enabled_skills(
                 ),
             )
         else:
-            skill_manager.register(
+            _register(
                 CoderSkill(
                     coder_client=coder_client,
                     webhook_url=coder_webhook_url,
@@ -216,25 +246,35 @@ def _register_enabled_skills(
             )
 
     if "filesystem" in enabled_skills:
-        skill_manager.register(FileSystemSkill(permission_manager=permission_manager))
+        _register(FileSystemSkill(permission_manager=permission_manager))
 
     if "agent_search" in enabled_skills:
-        skill_manager.register(AgentSearchSkill())
+        _register(AgentSearchSkill())
+
+    if "info_reach" in enabled_skills:
+        _register(
+            InfoReachSkill(
+                message_queue=message_queue,
+                heartbeat_service=heartbeat_service,
+                db_path=structured_store.db_path if structured_store is not None else None,
+                secrets_path=skills_config_path.parent / "secrets.yaml",
+            )
+        )
 
     if "info" in enabled_skills:
         try:
-            skill_manager.register(InfoSkill(max_items=info_max_items))
+            _register(InfoPortalSkill(max_items=info_max_items))
         except ValueError as exc:
             logger.warning("info_skill.disabled", reason=str(exc))
 
     if "notion" in enabled_skills:
         try:
-            skill_manager.register(NotionSkill(heartbeat_service=heartbeat_service))
+            _register(NotionSkill(heartbeat_service=heartbeat_service))
         except ValueError as exc:
             logger.warning("notion_skill.disabled", reason=str(exc))
 
     if "log_inspector" in enabled_skills and structured_store is not None:
-        skill_manager.register(
+        _register(
             LogInspectorSkill(
                 structured_store=structured_store,
                 permission_manager=permission_manager,
@@ -242,25 +282,15 @@ def _register_enabled_skills(
             )
         )
 
-    if "info_reach" in enabled_skills:
-        skill_manager.register(
-            InfoReachSkill(
-                message_queue=message_queue,
-                heartbeat_service=heartbeat_service,
-                db_path=structured_store.db_path if structured_store is not None else None,
-                base_url=_hypo_info_base_url,
-            )
-        )
-
     if "export" in enabled_skills and image_renderer is not None:
-        skill_manager.register(
+        _register(
             ExportSkill(
                 image_renderer=image_renderer,
             )
         )
 
     if "reminder" in enabled_skills and structured_store is not None and scheduler is not None:
-        skill_manager.register(
+        _register(
             ReminderSkill(
                 structured_store=structured_store,
                 scheduler=scheduler,
@@ -276,14 +306,20 @@ def _register_enabled_skills(
             message_queue=message_queue,
             mark_as_read=email_mark_as_read,
         )
-        skill_manager.register(email_skill)
+        _register(email_skill)
 
     if "probe" in enabled_skills and probe_server is not None:
-        skill_manager.register(ProbeSkill(probe_server=probe_server))
+        _register(ProbeSkill(probe_server=probe_server))
 
-    # Memory tools are safe and expected to be available for preference persistence.
-    if structured_store is not None:
-        skill_manager.register(MemorySkill(structured_store=structured_store))
+    if "memory" in enabled_skills and structured_store is not None:
+        _register(MemorySkill(structured_store=structured_store))
+
+    logger.info(
+        "skills.registered",
+        config_path=str(skills_config_path),
+        count=len(registered_summaries),
+        skills=registered_summaries,
+    )
 
 
 def _default_security() -> SecurityConfig:
@@ -369,6 +405,21 @@ def _load_hypo_coder_runtime(
 
 
 def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
+    heartbeat_allowed_tools = {
+        "exec_command",
+        "read_file",
+        "list_directory",
+        "get_directory_index",
+        "scan_emails",
+        "search_emails",
+        "list_reminders",
+        "get_recent_logs",
+        "get_tool_history",
+        "get_error_summary",
+        "get_session_history",
+        "search_sop",
+    }
+
     async def on_stream_success(event: dict[str, Any]) -> None:
         session_id = event.get("session_id")
         requested_model = event.get("requested_model")
@@ -388,6 +439,8 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
 
     runtime_config = load_runtime_model_config()
     router = ModelRouter(runtime_config, on_stream_success=on_stream_success)
+    skill_catalog = SkillCatalog(get_agent_root() / "skills")
+    skill_catalog.scan()
     persona_path = Path("config/persona.yaml")
     knowledge_dir = get_memory_dir() / "knowledge"
     if deps.semantic_memory is None:
@@ -593,6 +646,8 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
         skill_manager=deps.skill_manager,
         structured_store=deps.structured_store,
         max_react_rounds=15,
+        heartbeat_model_timeout_seconds=60,
+        heartbeat_allowed_tools=heartbeat_allowed_tools,
         slash_commands=slash_commands,
         output_compressor=deps.output_compressor,
         channel_adapter=WebUIAdapter(),
@@ -601,6 +656,7 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
         persona_manager=deps.persona_manager,
         semantic_memory=deps.semantic_memory,
         sop_manager=deps.sop_manager,
+        skill_catalog=skill_catalog,
     )
 
 
@@ -627,10 +683,6 @@ def _ensure_pipeline_lifecycle_hooks(pipeline_obj: Any) -> None:
 
 
 def _load_enabled_qq_service_config(config_dir: Path) -> QQServiceConfig | None:
-    enabled_skills = SkillManager.find_enabled_skills(config_dir / "skills.yaml")
-    if "qq" not in enabled_skills:
-        return None
-
     secrets_path = config_dir / "secrets.yaml"
     try:
         secrets = load_secrets_config(secrets_path)
@@ -643,6 +695,12 @@ def _load_enabled_qq_service_config(config_dir: Path) -> QQServiceConfig | None:
     services = secrets.services
     qq_cfg = services.qq if services is not None else None
     if qq_cfg is None:
+        return None
+    if not str(qq_cfg.napcat_ws_url or "").strip():
+        return None
+    if not str(qq_cfg.napcat_http_url or "").strip():
+        return None
+    if not str(qq_cfg.bot_qq or "").strip():
         return None
 
     return qq_cfg
@@ -740,10 +798,12 @@ def create_app(
     deps: AppDeps | None = None,
     security: SecurityConfig | None = None,
     channels: ChannelsConfig | None = None,
+    test_overrides: AppTestOverrides | None = None,
 ) -> FastAPI:
     test_mode_enabled = is_test_mode()
     resolved_deps = deps or _build_default_deps(security)
     resolved_channels = channels or load_channel_settings()
+    resolved_test_overrides = test_overrides or AppTestOverrides()
     if test_mode_enabled:
         _validate_test_mode_storage_isolation(deps=resolved_deps)
     if resolved_deps.event_queue is None:
@@ -816,7 +876,13 @@ def create_app(
             if tasks_path.exists():
                 try:
                     tasks_cfg = load_tasks_config(tasks_path)
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "app.tasks_config.load_failed",
+                        path=str(tasks_path),
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
                     tasks_cfg = None
                 app.state.tasks_config = tasks_cfg
                 if tasks_cfg is not None:
@@ -826,7 +892,12 @@ def create_app(
                             "heartbeat_max_react_rounds",
                             tasks_cfg.heartbeat.max_rounds,
                         )
-                    except Exception:
+                    except Exception as exc:
+                        logger.warning(
+                            "app.pipeline.heartbeat_round_limit_skipped",
+                            error_type=type(exc).__name__,
+                            error=str(exc),
+                        )
                         pass
                     heartbeat_prompt_path = (
                         Path(getattr(app.state, "config_dir", Path("config")))
@@ -1008,6 +1079,7 @@ def create_app(
     app.state.email_cache_warmup_task = None
     app.state.narration_observer = None
     app.state.tasks_config = None
+    app.state.test_overrides = resolved_test_overrides
 
     if test_mode_enabled:
         logger.warning(
@@ -1018,6 +1090,8 @@ def create_app(
         )
 
     def external_channels_disabled_for(config_dir: Path) -> bool:
+        if resolved_test_overrides.disable_external_channels:
+            return True
         if test_mode_enabled:
             return True
         if not os.getenv("PYTEST_CURRENT_TEST"):
@@ -1068,7 +1142,12 @@ def create_app(
         if hasattr(client, "get_status"):
             try:
                 status = client.get_status()
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "app.qq_transport.status_check_failed",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
                 return False
             transport_connected = str(status.get("status") or "").strip().lower() == "connected"
         else:
@@ -1321,7 +1400,8 @@ def create_app(
             logger.info("weixin.channel.disabled", config_dir=str(config_dir))
             return
 
-        app.state.weixin_channel = WeixinChannel(
+        weixin_channel_factory = resolved_test_overrides.weixin_channel_factory or WeixinChannel
+        app.state.weixin_channel = weixin_channel_factory(
             config=weixin_cfg,
             message_queue=resolved_deps.event_queue,
             build_message=Message,
@@ -1386,7 +1466,10 @@ def create_app(
 
         qq_bot_service = getattr(app.state, "qq_bot_channel_service", None)
         if qq_bot_service is not None:
-            client = QQBotWebSocketClient(
+            qqbot_ws_client_factory = (
+                resolved_test_overrides.qqbot_ws_client_factory or QQBotWebSocketClient
+            )
+            client = qqbot_ws_client_factory(
                 service_getter=lambda: getattr(app.state, "qq_bot_channel_service", None),
                 pipeline_getter=lambda: getattr(app.state, "pipeline", None),
             )
@@ -1399,7 +1482,10 @@ def create_app(
         if service is None or not url:
             return
 
-        client = NapCatWebSocketClient(
+        napcat_ws_client_factory = (
+            resolved_test_overrides.napcat_ws_client_factory or NapCatWebSocketClient
+        )
+        client = napcat_ws_client_factory(
             url=url,
             bot_qq=str(getattr(service, "bot_qq", "") or ""),
             token=str(getattr(app.state, "qq_ws_token", "") or ""),
@@ -1422,6 +1508,8 @@ def create_app(
             )
 
     async def run_email_cache_warmup() -> None:
+        if resolved_test_overrides.skip_email_cache_warmup:
+            return
         tasks_cfg = getattr(app.state, "tasks_config", None)
         if tasks_cfg is None or not getattr(tasks_cfg.email_store, "enabled", False):
             return

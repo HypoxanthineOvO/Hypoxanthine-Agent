@@ -153,12 +153,14 @@ skills:
     assert enabled == {"email_scanner"}
 
 
-def test_repo_skills_config_enables_qq() -> None:
+def test_repo_skills_config_enables_memory() -> None:
     config = Path(__file__).resolve().parents[2] / "config" / "skills.yaml"
 
     enabled = SkillManager.find_enabled_skills(config)
 
-    assert "qq" in enabled
+    assert "exec" in enabled
+    assert "memory" in enabled
+    assert "qq" not in enabled
 
 
 def test_repo_skills_config_enables_probe() -> None:
@@ -171,15 +173,31 @@ def test_repo_skills_config_enables_probe() -> None:
 
 def test_skill_manager_invoke_checks_circuit_breaker_before_execution() -> None:
     class BlockedCircuitBreaker:
-        def can_execute(self, tool_name: str, session_id: str | None):
+        def can_execute(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ):
             assert tool_name == "echo"
             assert session_id == "s1"
+            assert skill_name == "echo"
             return False, "blocked for test"
 
-        def record_success(self, tool_name: str, session_id: str | None) -> None:
+        def record_success(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ) -> None:
             raise AssertionError("record_success should not be called when blocked")
 
-        def record_failure(self, tool_name: str, session_id: str | None) -> None:
+        def record_failure(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ) -> None:
             raise AssertionError("record_failure should not be called when blocked")
 
     manager = SkillManager(circuit_breaker=BlockedCircuitBreaker())
@@ -204,17 +222,33 @@ def test_skill_manager_records_circuit_breaker_success_and_failure() -> None:
 
     class RecorderCircuitBreaker:
         def __init__(self) -> None:
-            self.successes: list[tuple[str, str | None]] = []
-            self.failures: list[tuple[str, str | None]] = []
+            self.successes: list[tuple[str, str | None, str | None]] = []
+            self.failures: list[tuple[str, str | None, str | None]] = []
 
-        def can_execute(self, tool_name: str, session_id: str | None):
+        def can_execute(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ):
+            del skill_name
             return True, ""
 
-        def record_success(self, tool_name: str, session_id: str | None) -> None:
-            self.successes.append((tool_name, session_id))
+        def record_success(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ) -> None:
+            self.successes.append((tool_name, session_id, skill_name))
 
-        def record_failure(self, tool_name: str, session_id: str | None) -> None:
-            self.failures.append((tool_name, session_id))
+        def record_failure(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ) -> None:
+            self.failures.append((tool_name, session_id, skill_name))
 
     breaker = RecorderCircuitBreaker()
     manager = SkillManager(circuit_breaker=breaker)
@@ -226,8 +260,8 @@ def test_skill_manager_records_circuit_breaker_success_and_failure() -> None:
 
     assert success.status == "success"
     assert failure.status == "error"
-    assert breaker.successes == [("echo", "s1")]
-    assert breaker.failures == [("always_fail", "s1")]
+    assert breaker.successes == [("echo", "s1", "echo")]
+    assert breaker.failures == [("always_fail", "s1", "fail_skill")]
 
 
 def test_skill_manager_respects_global_kill_switch() -> None:
@@ -244,13 +278,29 @@ def test_skill_manager_respects_global_kill_switch() -> None:
 
 def test_skill_manager_blocks_when_permission_denied() -> None:
     class AllowBreaker:
-        def can_execute(self, tool_name: str, session_id: str | None):
+        def can_execute(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ):
+            del skill_name
             return True, ""
 
-        def record_success(self, tool_name: str, session_id: str | None) -> None:
+        def record_success(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ) -> None:
             return None
 
-        def record_failure(self, tool_name: str, session_id: str | None) -> None:
+        def record_failure(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ) -> None:
             return None
 
     class DeniedPermissionManager:
@@ -275,13 +325,29 @@ def test_skill_manager_blocks_when_permission_denied() -> None:
 
 def test_skill_manager_allows_when_permission_granted() -> None:
     class AllowBreaker:
-        def can_execute(self, tool_name: str, session_id: str | None):
+        def can_execute(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ):
+            del skill_name
             return True, ""
 
-        def record_success(self, tool_name: str, session_id: str | None) -> None:
+        def record_success(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ) -> None:
             return None
 
-        def record_failure(self, tool_name: str, session_id: str | None) -> None:
+        def record_failure(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ) -> None:
             return None
 
     class AllowedPermissionManager:
@@ -352,13 +418,29 @@ def test_skill_manager_records_tool_invocations() -> None:
 
 def test_skill_manager_records_blocked_tool_invocations() -> None:
     class BlockedCircuitBreaker:
-        def can_execute(self, tool_name: str, session_id: str | None):
+        def can_execute(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ):
+            del skill_name
             return False, "blocked for test"
 
-        def record_success(self, tool_name: str, session_id: str | None) -> None:
+        def record_success(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ) -> None:
             raise AssertionError("record_success should not be called")
 
-        def record_failure(self, tool_name: str, session_id: str | None) -> None:
+        def record_failure(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ) -> None:
             raise AssertionError("record_failure should not be called")
 
     class RecordingStructuredStore:
@@ -383,6 +465,55 @@ def test_skill_manager_records_blocked_tool_invocations() -> None:
     assert record["error_info"] == "blocked for test"
     assert record["skill_name"] == "echo"
     assert output.metadata["invocation_id"] == 99
+
+
+def test_skill_manager_passes_logical_skill_name_to_circuit_breaker() -> None:
+    class RecordingCircuitBreaker:
+        def __init__(self) -> None:
+            self.can_execute_calls: list[tuple[str, str | None, str | None]] = []
+            self.success_calls: list[tuple[str, str | None, str | None]] = []
+
+        def can_execute(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ):
+            self.can_execute_calls.append((tool_name, session_id, skill_name))
+            return True, ""
+
+        def record_success(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ) -> None:
+            self.success_calls.append((tool_name, session_id, skill_name))
+
+        def record_failure(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ) -> None:
+            raise AssertionError("record_failure should not be called")
+
+    breaker = RecordingCircuitBreaker()
+    manager = SkillManager(circuit_breaker=breaker)
+    manager.register(EchoSkill())
+
+    output = asyncio.run(
+        manager.invoke(
+            "echo",
+            {"text": "hello"},
+            session_id="s1",
+            skill_name="git-workflow",
+        )
+    )
+
+    assert output.status == "success"
+    assert breaker.can_execute_calls == [("echo", "s1", "git-workflow")]
+    assert breaker.success_calls == [("echo", "s1", "git-workflow")]
 
 
 def test_skill_manager_invokes_registered_builtin_tool() -> None:

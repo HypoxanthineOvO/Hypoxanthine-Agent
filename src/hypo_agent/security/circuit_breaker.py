@@ -22,11 +22,18 @@ class CircuitBreaker:
 
         self._tool_failures: dict[tuple[str | None, str], int] = {}
         self._tool_fused: set[tuple[str | None, str]] = set()
+        self._skill_failures: dict[tuple[str | None, str, str], int] = {}
+        self._skill_fused: set[tuple[str | None, str, str]] = set()
         self._session_failures: dict[str, int] = {}
         self._session_blocked_until: dict[str, datetime] = {}
         self._global_kill_switch = bool(config.global_kill_switch)
 
-    def can_execute(self, tool_name: str, session_id: str | None) -> tuple[bool, str]:
+    def can_execute(
+        self,
+        tool_name: str,
+        session_id: str | None,
+        skill_name: str | None = None,
+    ) -> tuple[bool, str]:
         now = self._now_fn()
 
         if self._global_kill_switch:
@@ -54,15 +61,40 @@ class CircuitBreaker:
                 ).format(tool_name=tool_name),
             )
 
+        normalized_skill = self._normalize_skill_name(skill_name)
+        if self.config.skill_level_enabled and normalized_skill:
+            skill_key = (session_id, tool_name, normalized_skill)
+            if skill_key in self._skill_fused:
+                return (
+                    False,
+                    (
+                        "Tool '{tool_name}' for logical skill '{skill_name}' has been disabled after "
+                        f"{self._skill_failure_threshold()} consecutive failures this session."
+                    ).format(tool_name=tool_name, skill_name=normalized_skill),
+                )
+
         return True, ""
 
-    def record_success(self, tool_name: str, session_id: str | None) -> None:
+    def record_success(
+        self,
+        tool_name: str,
+        session_id: str | None,
+        skill_name: str | None = None,
+    ) -> None:
         tool_key = (session_id, tool_name)
         self._tool_failures[tool_key] = 0
+        normalized_skill = self._normalize_skill_name(skill_name)
+        if normalized_skill:
+            self._skill_failures[(session_id, tool_name, normalized_skill)] = 0
         if session_id:
             self._session_blocked_until.pop(session_id, None)
 
-    def record_failure(self, tool_name: str, session_id: str | None) -> None:
+    def record_failure(
+        self,
+        tool_name: str,
+        session_id: str | None,
+        skill_name: str | None = None,
+    ) -> None:
         now = self._now_fn()
         cooldown_deadline = now + timedelta(seconds=self.config.cooldown_seconds)
 
@@ -78,6 +110,23 @@ class CircuitBreaker:
                 session_id=session_id,
                 max_failures=self.config.tool_level_max_failures,
             )
+
+        normalized_skill = self._normalize_skill_name(skill_name)
+        if self.config.skill_level_enabled and normalized_skill:
+            skill_key = (session_id, tool_name, normalized_skill)
+            next_skill_count = self._skill_failures.get(skill_key, 0) + 1
+            self._skill_failures[skill_key] = next_skill_count
+            threshold = self._skill_failure_threshold()
+            if next_skill_count >= threshold:
+                self._skill_fused.add(skill_key)
+                self._skill_failures[skill_key] = 0
+                logger.warning(
+                    "circuit_breaker.skill_fused",
+                    tool_name=tool_name,
+                    skill_name=normalized_skill,
+                    session_id=session_id,
+                    max_failures=threshold,
+                )
 
         if session_id is None:
             return
@@ -98,3 +147,12 @@ class CircuitBreaker:
 
     def get_global_kill_switch(self) -> bool:
         return self._global_kill_switch
+
+    def _normalize_skill_name(self, skill_name: str | None) -> str:
+        return str(skill_name or "").strip()
+
+    def _skill_failure_threshold(self) -> int:
+        configured = self.config.skill_level_max_failures
+        if configured is None:
+            return self.config.tool_level_max_failures
+        return max(1, int(configured))

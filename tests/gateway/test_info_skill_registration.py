@@ -59,3 +59,156 @@ skills:
             },
         )
     ]
+
+
+def test_build_default_deps_registers_info_reach_with_default_hypo_info_base_url(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "skills.yaml").write_text(
+        """
+default_timeout_seconds: 30
+skills:
+  info_reach:
+    enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+    (config_dir / "secrets.yaml").write_text("providers: {}\nservices: {}\n", encoding="utf-8")
+
+    security = SecurityConfig.model_validate(
+        {
+            "directory_whitelist": {"rules": [], "default_policy": "readonly"},
+            "circuit_breaker": {},
+        }
+    )
+    monkeypatch.chdir(tmp_path)
+
+    deps = _build_default_deps(security)
+
+    assert deps.skill_manager is not None
+    skill = deps.skill_manager._skills["info_reach"]
+    assert skill._client._base_url == "http://localhost:8200"
+
+
+def test_build_default_deps_registers_info_reach_with_secrets_hypo_info_base_url(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "skills.yaml").write_text(
+        """
+default_timeout_seconds: 30
+skills:
+  info_reach:
+    enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+    (config_dir / "secrets.yaml").write_text(
+        """
+providers: {}
+services:
+  hypo_info:
+    base_url: "http://localhost:9100"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    security = SecurityConfig.model_validate(
+        {
+            "directory_whitelist": {"rules": [], "default_policy": "readonly"},
+            "circuit_breaker": {},
+        }
+    )
+    monkeypatch.chdir(tmp_path)
+
+    deps = _build_default_deps(security)
+
+    assert deps.skill_manager is not None
+    skill = deps.skill_manager._skills["info_reach"]
+    assert skill._client._base_url == "http://localhost:9100"
+
+
+def test_build_default_deps_registers_info_reach_before_info_when_both_enabled(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "skills.yaml").write_text(
+        """
+default_timeout_seconds: 30
+skills:
+  info:
+    enabled: true
+  info_reach:
+    enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+    (config_dir / "secrets.yaml").write_text(
+        """
+providers: {}
+services:
+  hypo_info:
+    base_url: "http://localhost:9100"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    security = SecurityConfig.model_validate(
+        {
+            "directory_whitelist": {"rules": [], "default_policy": "readonly"},
+            "circuit_breaker": {},
+        }
+    )
+    monkeypatch.chdir(tmp_path)
+
+    deps = _build_default_deps(security)
+
+    assert deps.skill_manager is not None
+    assert list(deps.skill_manager._skills.keys())[:2] == ["info_reach", "info"]
+
+
+def test_build_default_deps_registers_info_runtime_key_with_info_portal_skill(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "skills.yaml").write_text(
+        """
+default_timeout_seconds: 30
+skills:
+  info:
+    enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+    (config_dir / "secrets.yaml").write_text(
+        """
+providers: {}
+services:
+  hypo_info:
+    base_url: "http://localhost:9100"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    security = SecurityConfig.model_validate(
+        {
+            "directory_whitelist": {"rules": [], "default_policy": "readonly"},
+            "circuit_breaker": {},
+        }
+    )
+    monkeypatch.chdir(tmp_path)
+
+    deps = _build_default_deps(security)
+
+    assert deps.skill_manager is not None
+    skill = deps.skill_manager._skills["info"]
+    assert skill.__class__.__name__ == "InfoPortalSkill"

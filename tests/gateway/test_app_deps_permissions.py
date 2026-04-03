@@ -8,6 +8,7 @@ from hypo_agent.gateway.app import AppDeps, _build_default_deps, create_app
 from hypo_agent.memory.session import SessionMemory
 from hypo_agent.memory.structured_store import StructuredStore
 from hypo_agent.models import SecurityConfig
+from tests.fixtures import write_config_tree
 
 
 class PassivePipeline:
@@ -27,6 +28,9 @@ def test_build_default_deps_injects_permission_manager_into_skills(
         """
 default_timeout_seconds: 30
 skills:
+  exec:
+    enabled: true
+    timeout_seconds: 60
   tmux:
     enabled: false
   code_run:
@@ -36,6 +40,18 @@ skills:
   agent_search:
     enabled: true
   log_inspector:
+    enabled: true
+  info:
+    enabled: false
+  notion:
+    enabled: false
+  info_reach:
+    enabled: false
+  export:
+    enabled: false
+  probe:
+    enabled: false
+  memory:
     enabled: true
   reminder:
     enabled: true
@@ -68,10 +84,12 @@ skills:
     assert deps.skill_manager is not None
     assert deps.skill_manager._permission_manager is deps.permission_manager
     assert deps.skill_manager._structured_store is deps.structured_store
+    assert deps.skill_manager._skills["exec"].default_timeout_seconds == 60
     assert deps.skill_manager._skills["code_run"].permission_manager is deps.permission_manager
     assert deps.skill_manager._skills["filesystem"].permission_manager is deps.permission_manager
     assert deps.skill_manager._skills["agent_search"].secrets_path == Path("config/secrets.yaml")
     assert deps.skill_manager._skills["log_inspector"].structured_store is deps.structured_store
+    assert deps.skill_manager._skills["memory"].structured_store is deps.structured_store
     assert deps.skill_manager._skills["reminder"].structured_store is deps.structured_store
     assert deps.skill_manager._skills["reminder"].scheduler is deps.scheduler
     assert deps.skill_manager._skills["reminder"].auto_confirm is True
@@ -168,25 +186,30 @@ def _write_qq_config(tmp_path: Path, *, enabled: bool) -> None:
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "skills.yaml").write_text(
-        f"""
+        """
 default_timeout_seconds: 30
 skills:
-  qq:
-    enabled: {"true" if enabled else "false"}
+  memory:
+    enabled: true
 """.strip(),
         encoding="utf-8",
     )
-    (config_dir / "secrets.yaml").write_text(
+    services_text = (
         """
 providers: {}
 services:
   qq:
-    napcat_ws_url: ws://127.0.0.1:6099
-    napcat_http_url: http://127.0.0.1:3000
+    napcat_ws_url: "ws://127.0.0.1:6099"
+    napcat_http_url: "http://127.0.0.1:3000"
     bot_qq: "123456789"
-    allowed_users:
-      - "10001"
-""".strip(),
+    allowed_users: ["10001"]
+""".strip()
+        if enabled
+        else "providers: {}\nservices: {}\n"
+    )
+    (config_dir / "secrets.yaml").write_text(services_text, encoding="utf-8")
+    (config_dir / "config.yaml").write_text(
+        "channels:\n  feishu:\n    enabled: false\n",
         encoding="utf-8",
     )
 
@@ -318,3 +341,73 @@ services:
         assert app.state.weixin_adapter is not None
         assert app.state.weixin_adapter.target_user_id == ""
         assert getattr(app.state.weixin_adapter.client, "user_id", "") == "cached@im.wechat"
+
+
+def test_create_app_supports_injected_weixin_channel_factory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "secrets.yaml").write_text(
+        """
+providers: {}
+services:
+  weixin:
+    enabled: true
+    token_path: "memory/weixin_auth.json"
+    allowed_users: []
+""".strip(),
+        encoding="utf-8",
+    )
+    token_dir = tmp_path / "memory"
+    token_dir.mkdir(parents=True, exist_ok=True)
+    (token_dir / "weixin_auth.json").write_text(
+        """
+{
+  "bot_token": "bot-token",
+  "user_id": "",
+  "bot_id": "bot-1"
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    from hypo_agent.gateway.app import AppTestOverrides
+
+    created: list[dict[str, object]] = []
+
+    class FakeWeixinChannel:
+        def __init__(self, **kwargs) -> None:
+            created.append(kwargs)
+            self.client = SimpleNamespace(bot_token="bot-token", user_id="", bot_id="bot-1")
+
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+        def record_message_sent(self) -> None:
+            return None
+
+    app = create_app(
+        auth_token="test-token",
+        pipeline=PassivePipeline(),
+        deps=AppDeps(
+            session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+            structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        ),
+        test_overrides=AppTestOverrides(
+            weixin_channel_factory=FakeWeixinChannel,
+        ),
+    )
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(app):
+        assert created
+        assert app.state.weixin_channel is not None
+        assert type(app.state.weixin_channel).__name__ == "FakeWeixinChannel"
+        assert app.state.weixin_adapter is not None

@@ -35,7 +35,7 @@ class StubSkillManager:
             {
                 "type": "function",
                 "function": {
-                    "name": "run_command",
+                    "name": "exec_command",
                     "parameters": {"type": "object"},
                 },
             }
@@ -47,8 +47,9 @@ class StubSkillManager:
         params: dict,
         *,
         session_id: str | None = None,
+        skill_name: str | None = None,
     ) -> SkillOutput:
-        self.calls.append((tool_name, params, session_id))
+        self.calls.append((tool_name, params, session_id, skill_name))
         return self.output
 
 
@@ -162,7 +163,7 @@ def test_pipeline_stream_reply_runs_tool_and_emits_tool_events() -> None:
                             "id": "call_1",
                             "type": "function",
                             "function": {
-                                "name": "run_command",
+                                "name": "exec_command",
                                 "arguments": "{\"command\": \"echo hi\"}",
                             },
                         }
@@ -191,8 +192,9 @@ def test_pipeline_stream_reply_runs_tool_and_emits_tool_events() -> None:
     assert events[1]["status"] == "success"
     assert events[1]["metadata"]["ephemeral"] is True
     assert events[-1]["type"] == "assistant_done"
-    assert skills.calls[0][0] == "run_command"
+    assert skills.calls[0][0] == "exec_command"
     assert skills.calls[0][1]["command"] == "echo hi"
+    assert skills.calls[0][3] == "direct"
 
 
 def test_pipeline_stream_reply_logs_tool_names_before_react_rounds(monkeypatch) -> None:
@@ -258,7 +260,87 @@ def test_pipeline_stream_reply_logs_tool_names_before_react_rounds(monkeypatch) 
         "save_sop",
         "search_sop",
     ]
-    assert debug_event["tool_count"] == 3
+
+
+def test_pipeline_heartbeat_filters_high_risk_tools_and_sets_timeout() -> None:
+    memory = StubSessionMemory()
+
+    class HeartbeatSkillManager(StubSkillManager):
+        def get_tools_schema(self) -> list[dict]:
+            return [
+                {
+                    "type": "function",
+                    "function": {"name": "exec_command", "parameters": {"type": "object"}},
+                },
+                {
+                    "type": "function",
+                    "function": {"name": "tmux_send", "parameters": {"type": "object"}},
+                },
+                {
+                    "type": "function",
+                    "function": {"name": "write_file", "parameters": {"type": "object"}},
+                },
+                {
+                    "type": "function",
+                    "function": {"name": "list_reminders", "parameters": {"type": "object"}},
+                },
+            ]
+
+    skills = HeartbeatSkillManager()
+    captured: dict[str, object] = {}
+
+    class StubRouter:
+        async def call_with_tools(
+            self,
+            model_name,
+            messages,
+            *,
+            tools=None,
+            session_id=None,
+            timeout_seconds=None,
+        ):
+            del model_name, messages, session_id
+            captured["tool_names"] = [tool["function"]["name"] for tool in tools or []]
+            captured["timeout_seconds"] = timeout_seconds
+            return {"text": "", "tool_calls": []}
+
+        async def stream(
+            self,
+            model_name,
+            messages,
+            *,
+            session_id=None,
+            tools=None,
+            timeout_seconds=None,
+        ):
+            del model_name, messages, session_id, tools, timeout_seconds
+            yield "heartbeat ok"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="GPT",
+        session_memory=memory,
+        skill_manager=skills,
+        heartbeat_allowed_tools={"exec_command", "list_reminders"},
+        heartbeat_model_timeout_seconds=60,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(
+            text="heartbeat",
+            sender="user",
+            session_id="main",
+            channel="system",
+            message_tag="heartbeat",
+            metadata={"source": "heartbeat"},
+        )
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+
+    assert events[-1]["type"] == "assistant_done"
+    assert captured["tool_names"] == ["exec_command", "list_reminders"]
+    assert captured["timeout_seconds"] == 60.0
 
 
 def test_pipeline_marks_sop_usage_after_search_sop_tool_result() -> None:
@@ -285,8 +367,9 @@ def test_pipeline_marks_sop_usage_after_search_sop_tool_result() -> None:
             params: dict,
             *,
             session_id: str | None = None,
+            skill_name: str | None = None,
         ) -> SkillOutput:
-            self.calls.append((tool_name, params, session_id))
+            self.calls.append((tool_name, params, session_id, skill_name))
             return SkillOutput(
                 status="success",
                 result={
@@ -351,7 +434,7 @@ def test_pipeline_marks_sop_usage_after_search_sop_tool_result() -> None:
     events = asyncio.run(_collect())
 
     assert events[-1]["type"] == "assistant_done"
-    assert skills.calls == [("search_sop", {"query": "怎么重启 Hypo-Agent", "top_k": 3}, "s1")]
+    assert skills.calls == [("search_sop", {"query": "怎么重启 Hypo-Agent", "top_k": 3}, "s1", "direct")]
     assert sop_manager.touched == [[
         "/tmp/memory/knowledge/sop/重启 Hypo-Agent 服务流程.md"
     ]]
@@ -487,7 +570,7 @@ def test_pipeline_stream_reply_respects_max_react_rounds() -> None:
                         "id": "loop",
                         "type": "function",
                         "function": {
-                            "name": "run_command",
+                            "name": "exec_command",
                             "arguments": "{\"command\": \"echo hi\"}",
                         },
                     }
@@ -536,7 +619,7 @@ def test_pipeline_stream_reply_gracefully_degrades_before_round_limit() -> None:
                         "id": "loop",
                         "type": "function",
                         "function": {
-                            "name": "run_command",
+                            "name": "exec_command",
                             "arguments": "{\"command\": \"uptime\"}",
                         },
                     }
@@ -614,7 +697,7 @@ def test_pipeline_stream_reply_uses_heartbeat_specific_round_limit() -> None:
                         "id": f"call_{len(self.tools_history)}",
                         "type": "function",
                         "function": {
-                            "name": "run_command",
+                            "name": "exec_command",
                             "arguments": "{\"command\": \"uptime\"}",
                         },
                     }
@@ -678,7 +761,7 @@ def test_pipeline_stream_reply_emits_error_when_tool_blocked() -> None:
                             "id": "blocked_1",
                             "type": "function",
                             "function": {
-                                "name": "run_command",
+                                "name": "exec_command",
                                 "arguments": "{\"command\": \"echo hi\"}",
                             },
                         }
@@ -793,7 +876,7 @@ def test_pipeline_stream_reply_compresses_tool_output_before_tool_message() -> N
                             "id": "call_1",
                             "type": "function",
                             "function": {
-                                "name": "run_command",
+                                "name": "exec_command",
                                 "arguments": "{\"command\": \"echo big\"}",
                             },
                         }
@@ -858,7 +941,7 @@ def test_pipeline_stream_reply_keeps_tool_output_uncompressed_when_compressor_di
                             "id": "call_1",
                             "type": "function",
                             "function": {
-                                "name": "run_command",
+                                "name": "exec_command",
                                 "arguments": "{\"command\": \"echo big\"}",
                             },
                         }
@@ -895,6 +978,66 @@ def test_pipeline_stream_reply_keeps_tool_output_uncompressed_when_compressor_di
             "role": "tool",
             "tool_call_id": "call_1",
             "content": json.dumps(original_output.model_dump(mode="json"), ensure_ascii=False),
+        }
+    ]
+
+
+def test_pipeline_stream_reply_passes_string_tool_result_to_llm_without_json_wrapper() -> None:
+    memory = StubSessionMemory()
+    original_output = SkillOutput(status="success", result="整理后的资讯摘要")
+    skills = StubSkillManager(output=original_output)
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.last_messages: list[dict] = []
+
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, tools, session_id
+            self.calls += 1
+            self.last_messages = messages
+            if self.calls == 1:
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"command\": \"echo digest\"}",
+                            },
+                        }
+                    ],
+                }
+            return {"text": "done", "tool_calls": []}
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            del model_name, messages, session_id, tools
+            raise AssertionError("stream should not be called")
+            yield ""  # pragma: no cover
+
+    router = StubRouter()
+    pipeline = ChatPipeline(
+        router=router,
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skills,
+        output_compressor=None,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="run", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    asyncio.run(_collect())
+
+    tool_messages = [message for message in router.last_messages if message.get("role") == "tool"]
+    assert tool_messages == [
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "整理后的资讯摘要",
         }
     ]
 
@@ -952,7 +1095,7 @@ def test_pipeline_stream_reply_persists_compressed_meta_with_invocation_id() -> 
                             "id": "call_1",
                             "type": "function",
                             "function": {
-                                "name": "run_command",
+                                "name": "exec_command",
                                 "arguments": "{\"command\": \"echo big\"}",
                             },
                         }
@@ -1030,7 +1173,7 @@ def test_pipeline_appends_compression_marker_when_missing_from_llm_reply() -> No
                             "id": "call_1",
                             "type": "function",
                             "function": {
-                                "name": "run_command",
+                                "name": "exec_command",
                                 "arguments": "{\"command\": \"echo big\"}",
                             },
                         }

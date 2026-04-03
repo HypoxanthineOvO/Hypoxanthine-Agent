@@ -5,6 +5,8 @@ from typing import Any
 
 from hypo_agent.models import SkillOutput
 
+DEFAULT_MAX_OUTPUT_CHARS = 262144
+
 
 class BaseSkill(ABC):
     name: str
@@ -19,4 +21,3 @@ class BaseSkill(ABC):
     @abstractmethod
     async def execute(self, tool_name: str, params: dict[str, Any]) -> SkillOutput:
         """Execute a tool call and return normalized skill output."""
-
