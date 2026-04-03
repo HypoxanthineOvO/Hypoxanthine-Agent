@@ -228,6 +228,36 @@ def test_info_query_description_marks_internal_push_usage(tmp_path: Path) -> Non
     assert "raw JSON" in tools["info_query"]["description"]
 
 
+def test_info_reach_execute_formats_subscription_results_for_llm(tmp_path: Path) -> None:
+    skill = InfoReachSkill(db_path=tmp_path / "hypo.db")
+
+    created = asyncio.run(
+        skill.execute(
+            "info_subscribe",
+            {
+                "name": "ai-watch",
+                "keywords": ["Agent", "推理"],
+                "categories": ["AI"],
+                "schedule": "daily",
+            },
+        )
+    )
+    listed = asyncio.run(skill.execute("info_list_subscriptions", {}))
+    deleted = asyncio.run(skill.execute("info_delete_subscription", {"name": "ai-watch"}))
+
+    assert created.status == "success"
+    assert isinstance(created.result, str)
+    assert "ai-watch" in created.result
+    assert "Agent" in created.result
+    assert listed.status == "success"
+    assert isinstance(listed.result, str)
+    assert "ai-watch" in listed.result
+    assert "daily" in listed.result
+    assert deleted.status == "success"
+    assert isinstance(deleted.result, str)
+    assert "ai-watch" in deleted.result
+
+
 # ---------------------------------------------------------------------------
 # Task 3: subscriptions, migration, heartbeat
 # ---------------------------------------------------------------------------

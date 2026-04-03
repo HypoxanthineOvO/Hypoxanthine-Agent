@@ -270,14 +270,28 @@ class InfoReachSkill(BaseSkill):
                 result = await self.info_subscribe(
                     name=name, keywords=keywords, categories=categories, schedule=schedule
                 )
-                return SkillOutput(status="success", result=result)
+                return SkillOutput(
+                    status="success",
+                    result=self._format_subscription_saved(result),
+                    metadata={"subscription": result},
+                )
             if tool_name == "info_list_subscriptions":
-                return SkillOutput(status="success", result=await self.info_list_subscriptions())
+                result = await self.info_list_subscriptions()
+                return SkillOutput(
+                    status="success",
+                    result=self._format_subscription_list(result),
+                    metadata={"subscriptions": result},
+                )
             if tool_name == "info_delete_subscription":
                 name = str(params.get("name") or "").strip()
                 if not name:
                     return SkillOutput(status="error", error_info="name is required")
-                return SkillOutput(status="success", result=await self.info_delete_subscription(name=name))
+                result = await self.info_delete_subscription(name=name)
+                return SkillOutput(
+                    status="success",
+                    result=self._format_subscription_deleted(result),
+                    metadata={"subscription": result},
+                )
         except HypoInfoError as exc:
             return SkillOutput(status="error", error_info=f"Hypo-Info 错误：{exc}")
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
@@ -557,6 +571,45 @@ class InfoReachSkill(BaseSkill):
         if isinstance(value, str) and value.strip():
             return [value.strip()]
         return []
+
+    def _format_subscription_saved(self, payload: dict[str, Any]) -> str:
+        name = str(payload.get("name") or "").strip() or "未命名订阅"
+        keywords = self._normalize_string_list(payload.get("keywords"))
+        categories = self._normalize_string_list(payload.get("categories"))
+        schedule = str(payload.get("schedule") or "daily").strip() or "daily"
+        lines = [f"已保存资讯订阅「{name}」。"]
+        if keywords:
+            lines.append(f"关键词：{'、'.join(keywords)}")
+        if categories:
+            lines.append(f"分类：{'、'.join(categories)}")
+        lines.append(f"频率：{schedule}")
+        return "\n".join(lines)
+
+    def _format_subscription_list(self, payload: dict[str, Any]) -> str:
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list) or not items:
+            return "当前没有已保存的资讯订阅。"
+        lines = ["当前资讯订阅："]
+        for index, item in enumerate(items, start=1):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip() or f"订阅 {index}"
+            keywords = self._normalize_string_list(item.get("keywords"))
+            categories = self._normalize_string_list(item.get("categories"))
+            schedule = str(item.get("schedule") or "daily").strip() or "daily"
+            lines.append(f"{index}. {name}")
+            if keywords:
+                lines.append(f"   关键词：{'、'.join(keywords)}")
+            if categories:
+                lines.append(f"   分类：{'、'.join(categories)}")
+            lines.append(f"   频率：{schedule}")
+        return "\n".join(lines)
+
+    def _format_subscription_deleted(self, payload: dict[str, Any]) -> str:
+        name = str(payload.get("name") or "").strip() or "该订阅"
+        if bool(payload.get("deleted")):
+            return f"已删除资讯订阅「{name}」。"
+        return f"未找到名为「{name}」的资讯订阅。"
 
     def _resolve_base_url(self, explicit_base_url: str | None) -> str:
         if explicit_base_url and str(explicit_base_url).strip():
