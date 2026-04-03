@@ -70,7 +70,12 @@ class FileSystemSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "read_file",
-                    "description": "Read file content with format-aware extraction",
+                    "description": (
+                        "Read file content with format-aware extraction. Use this first when "
+                        "the user asks to inspect or read a file; do not assume access is "
+                        "denied before trying. If the path is blocked, the tool will return "
+                        "an explicit permission error."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {"path": {"type": "string"}},
@@ -82,7 +87,11 @@ class FileSystemSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "write_file",
-                    "description": "Create or overwrite a text file",
+                    "description": (
+                        "Create or overwrite a text file. Use this for explicit file edits; "
+                        "writes require directory write permission and the tool will report "
+                        "permission errors explicitly."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -97,7 +106,11 @@ class FileSystemSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "list_directory",
-                    "description": "List directory entries with depth support",
+                    "description": (
+                        "List directory entries with depth support. Use this to inspect a "
+                        "directory before claiming you cannot access it; blocked paths will "
+                        "return an explicit permission error."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -262,7 +275,7 @@ class FileSystemSkill(BaseSkill):
                         "truncated": truncated,
                     },
                 )
-        except Exception as exc:
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
             message = str(exc)
             if message.startswith("Cannot read encrypted PDF:"):
                 return SkillOutput(status="error", error_info=message)

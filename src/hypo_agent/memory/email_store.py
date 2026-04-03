@@ -9,6 +9,8 @@ from typing import Any
 
 from hypo_agent.core.config_loader import get_memory_dir
 
+_EMAIL_STORE_LOAD_ERRORS = (OSError, json.JSONDecodeError, TypeError, ValueError)
+
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
@@ -98,7 +100,7 @@ class EmailStore:
             return None
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+        except _EMAIL_STORE_LOAD_ERRORS:
             return None
         if not isinstance(payload, dict):
             return None
@@ -225,7 +227,7 @@ class EmailStore:
             return {}
         try:
             payload = json.loads(self.index_path.read_text(encoding="utf-8"))
-        except Exception:
+        except _EMAIL_STORE_LOAD_ERRORS:
             return {}
         if not isinstance(payload, dict):
             return {}
@@ -276,7 +278,7 @@ class EmailStore:
             if body_path.exists():
                 try:
                     body_path.unlink()
-                except Exception:
+                except OSError:
                     pass
         return cleaned_index, {
             "removed_expired": removed_expired,

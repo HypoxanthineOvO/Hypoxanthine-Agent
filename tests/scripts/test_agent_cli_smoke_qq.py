@@ -88,3 +88,60 @@ def test_agent_cli_smoke_refuses_when_8765_is_listening(monkeypatch, capsys) -> 
     captured = capsys.readouterr()
     assert result == 2
     assert "请先停止生产进程或确认隔离" in captured.out
+
+
+def test_default_smoke_session_id_is_ephemeral() -> None:
+    module = _load_agent_cli_module()
+
+    session_id = module._default_smoke_session_id()
+
+    assert session_id.startswith("smoke-")
+    assert session_id != "main"
+    assert len(session_id) == len("smoke-") + 8
+
+
+def test_agent_cli_smoke_refuses_outside_test_mode_without_force(monkeypatch, capsys) -> None:
+    module = _load_agent_cli_module()
+    monkeypatch.delenv("HYPO_TEST_MODE", raising=False)
+
+    result = asyncio.run(module.cmd_smoke(port=8765, session_id="smoke-12345678", force=False))
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "--force" in captured.out
+
+
+def test_cleanup_smoke_session_data_removes_session_rows_and_file(tmp_path: Path) -> None:
+    module = _load_agent_cli_module()
+    db_path = tmp_path / "hypo.db"
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    session_file = sessions_dir / "smoke-deadbeef.jsonl"
+    session_file.write_text('{"text":"hello"}\n', encoding="utf-8")
+
+    store = module.StructuredStore(db_path=db_path)
+    asyncio.run(store.upsert_session("smoke-deadbeef"))
+    asyncio.run(
+        store.record_tool_invocation(
+            session_id="smoke-deadbeef",
+            tool_name="noop",
+            skill_name="test",
+            params_json="{}",
+            status="success",
+            result_summary="ok",
+            duration_ms=1.0,
+            error_info="",
+        )
+    )
+
+    asyncio.run(
+        module._cleanup_smoke_session_data(
+            "smoke-deadbeef",
+            db_path=db_path,
+            sessions_dir=sessions_dir,
+        )
+    )
+
+    assert not session_file.exists()
+    assert asyncio.run(store.list_sessions()) == []
+    assert asyncio.run(store.list_tool_invocations(session_id="smoke-deadbeef")) == []

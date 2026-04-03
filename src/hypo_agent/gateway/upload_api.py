@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from email import policy
+from email.parser import BytesParser
+from io import BytesIO
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile
-from starlette.datastructures import UploadFile as StarletteUploadFile
+from starlette.datastructures import Headers, UploadFile as StarletteUploadFile
 
 from hypo_agent.core.uploads import (
     build_upload_path,
@@ -32,6 +35,10 @@ async def _extract_uploads(request: Request) -> list[UploadFile]:
             max_files=MAX_UPLOAD_FILES,
             max_part_size=MAX_UPLOAD_BYTES,
         )
+    except Exception as exc:
+        if "python-multipart" not in str(exc):
+            raise
+        return await _extract_uploads_from_body(request)
     except HTTPException as exc:
         detail = str(exc.detail or "")
         if exc.status_code == 400 and "Part exceeded maximum size" in detail:
@@ -42,6 +49,44 @@ async def _extract_uploads(request: Request) -> list[UploadFile]:
 
     uploads = [item for item in form.getlist("file") if isinstance(item, StarletteUploadFile)]
     return [item for item in uploads if item.filename is not None]
+
+
+async def _extract_uploads_from_body(request: Request) -> list[UploadFile]:
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" not in content_type.lower():
+        raise HTTPException(status_code=400, detail="No files uploaded")
+
+    message = BytesParser(policy=policy.default).parsebytes(
+        b"Content-Type: "
+        + content_type.encode("utf-8")
+        + b"\r\nMIME-Version: 1.0\r\n\r\n"
+        + await request.body()
+    )
+
+    uploads: list[UploadFile] = []
+    for part in message.iter_parts():
+        if part.get_content_disposition() != "form-data":
+            continue
+        if part.get_param("name", header="content-disposition") != "file":
+            continue
+        filename = part.get_filename()
+        if not filename:
+            continue
+        payload = part.get_payload(decode=True) or b""
+        if len(payload) > MAX_UPLOAD_BYTES:
+            raise _file_too_large_error()
+        uploads.append(
+            UploadFile(
+                file=BytesIO(payload),
+                filename=filename,
+                size=len(payload),
+                headers=Headers({"content-type": part.get_content_type()}),
+            )
+        )
+
+    if len(uploads) > MAX_UPLOAD_FILES:
+        raise HTTPException(status_code=400, detail="Too many files")
+    return uploads
 
 
 async def _persist_upload(upload: UploadFile, *, uploads_dir: Path) -> Attachment:
@@ -70,7 +115,7 @@ async def _persist_upload(upload: UploadFile, *, uploads_dir: Path) -> Attachmen
     except HTTPException:
         target_path.unlink(missing_ok=True)
         raise
-    except Exception:
+    except OSError:
         target_path.unlink(missing_ok=True)
         raise
     finally:

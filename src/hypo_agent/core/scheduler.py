@@ -11,6 +11,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.events import EVENT_JOB_MISSED, JobEvent
+from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
@@ -20,6 +21,14 @@ import structlog
 from hypo_agent.core.event_queue import EventQueue
 
 logger = structlog.get_logger("hypo_agent.scheduler")
+_SCHEDULER_RECOVERABLE_ERRORS = (OSError, RuntimeError, TypeError, ValueError)
+_EMAIL_SCAN_RECOVERABLE_ERRORS = (
+    imaplib.IMAP4.error,
+    OSError,
+    RuntimeError,
+    TypeError,
+    ValueError,
+)
 
 
 class SchedulerService:
@@ -71,7 +80,7 @@ class SchedulerService:
         for reminder in reminders:
             try:
                 await self.register_reminder_job(reminder)
-            except Exception:
+            except _SCHEDULER_RECOVERABLE_ERRORS:
                 logger.exception(
                     "scheduler.restore.failed",
                     reminder_id=reminder.get("id"),
@@ -283,7 +292,7 @@ class SchedulerService:
                 result = executor()
             if inspect.isawaitable(result):
                 result = await result
-        except Exception as exc:
+        except _EMAIL_SCAN_RECOVERABLE_ERRORS as exc:
             if self._is_email_connection_error(exc):
                 logger.warning(f"⚠️ Heartbeat: 邮件连接失败，下次重试 - {exc}")
             else:
@@ -605,7 +614,7 @@ class SchedulerService:
             try:
                 with urllib_request.urlopen(target, timeout=timeout_seconds) as resp:
                     return int(getattr(resp, "status", None))
-            except Exception:
+            except (OSError, TimeoutError, ValueError):
                 return None
 
         return await asyncio.to_thread(_do_request)
@@ -613,7 +622,7 @@ class SchedulerService:
     def _remove_job_if_exists(self, job_id: str) -> None:
         try:
             self._scheduler.remove_job(job_id)
-        except Exception:
+        except JobLookupError:
             return
 
     def _job_id(self, reminder_id: int) -> str:

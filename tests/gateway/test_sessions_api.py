@@ -8,12 +8,7 @@ from hypo_agent.gateway.app import AppDeps, create_app
 from hypo_agent.memory.session import SessionMemory
 from hypo_agent.memory.structured_store import StructuredStore
 from hypo_agent.models import Attachment, Message
-
-
-class DummyPipeline:
-    async def stream_reply(self, inbound):
-        if False:  # pragma: no cover
-            yield {}
+from tests.shared import DummyPipeline
 
 
 def _build_app(tmp_path) -> TestClient:
@@ -83,8 +78,8 @@ def test_get_session_tool_invocations_returns_rows(tmp_path) -> None:
         asyncio.run(
             client.app.state.structured_store.record_tool_invocation(
                 session_id="s1",
-                tool_name="run_command",
-                skill_name="tmux",
+                tool_name="exec_command",
+                skill_name="exec",
                 params_json='{"command":"echo hi"}',
                 status="success",
                 result_summary="ok",
@@ -103,8 +98,8 @@ def test_get_session_tool_invocations_returns_rows(tmp_path) -> None:
         assert len(payload) == 1
         row = payload[0]
         assert row["session_id"] == "s1"
-        assert row["tool_name"] == "run_command"
-        assert row["skill_name"] == "tmux"
+        assert row["tool_name"] == "exec_command"
+        assert row["skill_name"] == "exec"
         assert row["params_json"] == '{"command":"echo hi"}'
         assert row["status"] == "success"
         assert row["result_summary"] == "ok"
@@ -129,8 +124,8 @@ def test_delete_session_also_clears_structured_store_rows(tmp_path) -> None:
         asyncio.run(
             client.app.state.structured_store.record_tool_invocation(
                 session_id="s1",
-                tool_name="run_command",
-                skill_name="tmux",
+                tool_name="exec_command",
+                skill_name="exec",
                 params_json='{"command":"echo hi"}',
                 status="success",
                 result_summary="ok",

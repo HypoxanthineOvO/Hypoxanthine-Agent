@@ -54,3 +54,9 @@ default-groups = ["dev"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-ra -q"
+markers = [
+  "unit: pure unit tests without external I/O or TestClient lifecycles",
+  "integration: tests that exercise TestClient, in-process services, or multi-component flows",
+  "cli: CLI wrapper tests",
+  "slow: tests expected to take more than 5 seconds",
+]

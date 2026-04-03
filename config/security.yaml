@@ -4,6 +4,9 @@ directory_whitelist:
     - path: ${HYPO_AGENT_ROOT}
       permissions:
         - read
+    - path: /home/heyx
+      permissions:
+        - read
     - path: ${HYPO_AGENT_ROOT}/config
       permissions:
         - read

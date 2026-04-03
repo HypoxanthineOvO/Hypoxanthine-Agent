@@ -8,8 +8,10 @@ import httpx
 from notion_client import AsyncClient
 from notion_client.errors import APIErrorCode, APIResponseError, HTTPResponseError, RequestTimeoutError
 
+from hypo_agent.exceptions import ExternalServiceError
 
-class NotionUnavailableError(RuntimeError):
+
+class NotionUnavailableError(ExternalServiceError):
     """Raised when Notion API is unreachable, rate-limited beyond retry budget, or unauthorized."""
 
 
@@ -273,7 +275,7 @@ def _retry_after_seconds(headers: Any) -> int:
         return 1
     try:
         value = headers.get("Retry-After")
-    except Exception:
+    except AttributeError:
         return 1
     try:
         return max(1, int(value))

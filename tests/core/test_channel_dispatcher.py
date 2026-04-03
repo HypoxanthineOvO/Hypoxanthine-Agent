@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from hypo_agent.core.channel_dispatcher import ChannelDispatcher
+from hypo_agent.exceptions import ChannelError
 from hypo_agent.models import Message
 
 
@@ -38,7 +39,7 @@ def test_channel_dispatcher_continues_after_sink_failure() -> None:
 
         async def broken_sink(msg: Message) -> None:
             del msg
-            raise RuntimeError("boom")
+            raise ChannelError("boom", operation="deliver")
 
         async def healthy_sink(msg: Message) -> None:
             received.append(msg.text or "")

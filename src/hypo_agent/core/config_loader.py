@@ -220,6 +220,17 @@ def load_narration_config(
     return NarrationConfig.model_validate(narration_payload)
 
 
+def normalize_speaking_style_habits(speaking_style: dict[str, Any]) -> list[str]:
+    raw_habits = speaking_style.get("habits")
+    if raw_habits is None:
+        return []
+    if isinstance(raw_habits, str):
+        return [raw_habits.strip()] if raw_habits.strip() else []
+    if isinstance(raw_habits, list):
+        return [str(item).strip() for item in raw_habits if str(item).strip()]
+    return []
+
+
 def render_persona_system_prompt(
     persona: PersonaConfig | Path | str = "config/persona.yaml",
     *,
@@ -241,6 +252,10 @@ def render_persona_system_prompt(
     tone = persona_config.speaking_style.get("tone")
     if tone:
         lines.append(f"表达风格：{tone}")
+    habits = normalize_speaking_style_habits(persona_config.speaking_style)
+    if habits:
+        lines.append("行为边界：")
+        lines.extend(f"- {item}" for item in habits)
     return "\n".join(lines).strip()
 
 

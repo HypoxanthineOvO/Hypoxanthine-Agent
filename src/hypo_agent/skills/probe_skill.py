@@ -23,7 +23,7 @@ class ProbeSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "probe_list_devices",
-                    "description": "列出所有已注册的探针设备及其在线状态。",
+                    "description": "List registered probe devices and their online status.",
                     "parameters": {
                         "type": "object",
                         "properties": {},
@@ -34,7 +34,7 @@ class ProbeSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "probe_screenshot",
-                    "description": "对指定设备立即截图并返回图片。",
+                    "description": "Capture a screenshot from a probe device.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -48,7 +48,7 @@ class ProbeSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "probe_process_list",
-                    "description": "查询指定设备当前运行的进程列表。",
+                    "description": "Get the current process list from a probe device.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -63,7 +63,7 @@ class ProbeSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "probe_list_screenshots",
-                    "description": "列出指定设备某天的截图记录（含空闲时段）。",
+                    "description": "List stored screenshot records for a probe device.",
                     "parameters": {
                         "type": "object",
                         "properties": {

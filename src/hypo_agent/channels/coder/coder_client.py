@@ -4,10 +4,12 @@ from typing import Any
 
 import httpx
 
+from hypo_agent.exceptions import ExternalServiceError
+
 _UNAVAILABLE_MESSAGE = "Hypo-Coder 当前不可用，请确认服务是否启动"
 
 
-class CoderUnavailableError(RuntimeError):
+class CoderUnavailableError(ExternalServiceError):
     """Raised when Hypo-Coder cannot be reached or returns an unusable response."""
 
 

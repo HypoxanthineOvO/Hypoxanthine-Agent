@@ -2,7 +2,7 @@
 
 Future HTTP API design notes (not implemented in this milestone):
 - `GET /api/skills/log-inspector/logs?minutes=30&level=error&limit=100`
-- `GET /api/skills/log-inspector/tools?skill_name=tmux&success=false&hours=24&limit=50`
+- `GET /api/skills/log-inspector/tools?skill_name=exec&success=false&hours=24&limit=50`
 - `GET /api/skills/log-inspector/errors?hours=6`
 - `GET /api/skills/log-inspector/sessions?hours=24`
 - `GET /api/skills/log-inspector/sessions/{session_id}?hours=24`
@@ -20,12 +20,23 @@ from typing import Any
 from urllib.parse import quote
 
 import aiosqlite
+import structlog
 
 from hypo_agent.core.config_loader import get_memory_dir
 from hypo_agent.models import Message, SkillOutput
 from hypo_agent.skills.base import BaseSkill
 
 _VALID_LOG_LEVELS = {"warning", "error", "critical"}
+logger = structlog.get_logger("hypo_agent.skills.log_inspector")
+_LOG_INSPECTOR_ERRORS = (
+    aiosqlite.Error,
+    subprocess.SubprocessError,
+    OSError,
+    RuntimeError,
+    TypeError,
+    ValueError,
+    json.JSONDecodeError,
+)
 
 
 class LogInspectorSkill(BaseSkill):
@@ -155,7 +166,8 @@ class LogInspectorSkill(BaseSkill):
                     status="success",
                     result=await self.get_session_history(session_id=session_id, hours=hours),
                 )
-        except Exception as exc:
+        except _LOG_INSPECTOR_ERRORS as exc:
+            logger.warning("log_inspector.execute.failed", tool_name=tool_name, error=str(exc))
             return SkillOutput(status="error", error_info=str(exc))
 
         return SkillOutput(status="error", error_info=f"Unsupported tool '{tool_name}'")
@@ -184,7 +196,8 @@ class LogInspectorSkill(BaseSkill):
                 "items": [],
                 "warning": f"{self.journalctl_bin} is not available in this environment",
             }
-        except Exception as exc:
+        except _LOG_INSPECTOR_ERRORS as exc:
+            logger.warning("log_inspector.recent_logs.failed", error=str(exc))
             return {
                 "available": False,
                 "source": "journalctl",

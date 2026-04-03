@@ -2,17 +2,11 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from hypo_agent.gateway.app import create_app
+from tests.shared import DummyPipeline
 
 
-class DummyPipeline:
-    async def stream_reply(self, inbound):
-        if False:  # pragma: no cover
-            yield {}
-
-
-def test_sessions_api_supports_browser_cors_preflight() -> None:
-    app = create_app(auth_token="test-token", pipeline=DummyPipeline())
+def test_sessions_api_supports_browser_cors_preflight(app_factory) -> None:
+    app = app_factory(pipeline=DummyPipeline())
     with TestClient(app) as client:
         response = client.options(
             "/api/sessions",

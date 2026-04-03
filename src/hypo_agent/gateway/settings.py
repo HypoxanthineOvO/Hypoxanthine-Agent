@@ -15,10 +15,31 @@ class FeishuChannelSettings(BaseModel):
     enabled: bool = False
 
 
+class QQChannelSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+
+
+class QQBotChannelSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+
+
+class WeixinChannelSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+
+
 class ChannelsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     feishu: FeishuChannelSettings = Field(default_factory=FeishuChannelSettings)
+    qq: QQChannelSettings = Field(default_factory=QQChannelSettings)
+    qq_bot: QQBotChannelSettings = Field(default_factory=QQBotChannelSettings)
+    weixin: WeixinChannelSettings = Field(default_factory=WeixinChannelSettings)
 
 
 class GatewaySettings(BaseModel):

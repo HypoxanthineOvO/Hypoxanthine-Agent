@@ -12,6 +12,7 @@ import structlog
 from hypo_agent.models import Message
 
 logger = structlog.get_logger("hypo_agent.memory.gc")
+_MEMORY_GC_ERRORS = (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError)
 
 
 class MemoryGC:
@@ -53,7 +54,7 @@ class MemoryGC:
         for session_file in sorted(self.sessions_dir.glob("*.jsonl")):
             try:
                 processed = await self._process_session_file(session_file)
-            except Exception:
+            except _MEMORY_GC_ERRORS:
                 logger.exception("memory_gc.process_failed", file_path=str(session_file))
                 error_count += 1
                 continue
@@ -161,7 +162,7 @@ class MemoryGC:
                 [{"role": "user", "content": prompt}],
                 session_id=session_id,
             )
-        except Exception:
+        except (OSError, RuntimeError, TypeError, ValueError):
             logger.exception("memory_gc.llm_summary_failed", session_id=session_id)
             return ""
 

@@ -118,6 +118,8 @@ circuit_breaker:
 channels:
   feishu:
     enabled: true
+  qq:
+    enabled: true
 """.strip(),
         encoding="utf-8",
     )
@@ -125,3 +127,18 @@ channels:
     settings = load_gateway_settings(security_yaml, config_yaml)
 
     assert settings.channels.feishu.enabled is True
+    assert settings.channels.qq.enabled is True
+
+
+def test_repo_security_config_grants_home_read_and_agent_memory_config_write() -> None:
+    security_yaml = Path(__file__).resolve().parents[2] / "config" / "security.yaml"
+
+    settings = load_gateway_settings(security_yaml)
+    rules = settings.security.directory_whitelist.rules
+    permissions_by_path = {rule.path: set(rule.permissions) for rule in rules}
+
+    repo_root = str(Path(__file__).resolve().parents[2])
+    assert permissions_by_path[repo_root] == {"read"}
+    assert permissions_by_path[f"{repo_root}/config"] == {"read", "write"}
+    assert permissions_by_path[f"{repo_root}/memory"] == {"read", "write"}
+    assert permissions_by_path["/home/heyx"] == {"read"}

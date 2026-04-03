@@ -216,3 +216,45 @@ def test_permission_manager_supports_hypo_agent_root_placeholder_for_repo_access
     assert allowed_repo_read is True
     assert allowed_config_write is True
     assert allowed_memory_write is True
+
+
+def test_permission_manager_allows_agent_memory_config_and_home_read_but_denies_src_write(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo_root = tmp_path / "Hypo-Agent"
+    (repo_root / "config").mkdir(parents=True)
+    (repo_root / "memory").mkdir(parents=True)
+    (repo_root / "src").mkdir(parents=True)
+
+    monkeypatch.setenv("HYPO_AGENT_ROOT", str(repo_root))
+    whitelist = DirectoryWhitelist(
+        rules=[
+            WhitelistRule(path="${HYPO_AGENT_ROOT}", permissions=["read"]),
+            WhitelistRule(path="/home/heyx", permissions=["read"]),
+            WhitelistRule(path="${HYPO_AGENT_ROOT}/config", permissions=["read", "write"]),
+            WhitelistRule(path="${HYPO_AGENT_ROOT}/memory", permissions=["read", "write"]),
+        ],
+        default_policy="readonly",
+    )
+    manager = PermissionManager(whitelist)
+
+    allow_memory_write, _ = manager.check_permission(
+        str(repo_root / "memory" / "notes.md"),
+        "write",
+    )
+    allow_config_write, _ = manager.check_permission(
+        str(repo_root / "config" / "persona.yaml"),
+        "write",
+    )
+    allow_home_read, _ = manager.check_permission("/home/heyx/Documents/file.txt", "read")
+    deny_src_write, deny_reason = manager.check_permission(
+        str(repo_root / "src" / "hypo_agent" / "app.py"),
+        "write",
+    )
+
+    assert allow_memory_write is True
+    assert allow_config_write is True
+    assert allow_home_read is True
+    assert deny_src_write is False
+    assert "not allowed" in deny_reason.lower()

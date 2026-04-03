@@ -15,14 +15,16 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 import structlog
 
 from hypo_agent.core.time_utils import normalize_utc_datetime, utc_isoformat, utc_now
+from hypo_agent.exceptions import ExternalServiceError
 from hypo_agent.models import ProbeConfig
 
 logger = structlog.get_logger("hypo_agent.channels.probe")
 router = APIRouter()
+_PROBE_RECOVERABLE_ERRORS = (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError)
 
 
-class ProbeRPCError(RuntimeError):
-    pass
+class ProbeRPCError(ExternalServiceError):
+    """Raised when probe RPC dispatch or response handling fails."""
 
 
 class ProbeHelloMessage(BaseModel):
@@ -143,7 +145,7 @@ class ProbeServer:
         for device_id, websocket in sockets:
             try:
                 await websocket.close(code=1012, reason="server shutdown")
-            except Exception:
+            except (OSError, RuntimeError):
                 logger.debug("probe.websocket.close_failed", device_id=device_id, exc_info=True)
 
     async def handle_connection(self, websocket: WebSocket) -> None:
@@ -224,7 +226,7 @@ class ProbeServer:
             response = await asyncio.wait_for(future, timeout=max(0.01, float(timeout)))
         except asyncio.TimeoutError as exc:
             raise ProbeRPCError("timeout") from exc
-        except Exception:
+        except _PROBE_RECOVERABLE_ERRORS:
             if not future.done():
                 future.cancel()
             raise
@@ -272,7 +274,12 @@ class ProbeServer:
             try:
                 payload = base64.b64decode(image_base64, validate=True)
             except (binascii.Error, ValueError) as exc:
-                raise ValueError("invalid image_base64") from exc
+                try:
+                    normalized_image = "".join(str(image_base64).split()).rstrip("=")
+                    normalized_image += "=" * (-len(normalized_image) % 4)
+                    payload = base64.b64decode(normalized_image, validate=False)
+                except (binascii.Error, ValueError) as fallback_exc:
+                    raise ValueError("invalid image_base64") from fallback_exc
             image_path = day_dir / filename
             image_path.write_bytes(payload)
         self._append_index_record(
@@ -419,7 +426,7 @@ class ProbeServer:
             await websocket.close(code=code, reason=reason)
         except RuntimeError:
             return
-        except Exception:
+        except OSError:
             logger.debug("probe.websocket.close_failed", code=code, reason=reason, exc_info=True)
 
     def _now(self) -> datetime:

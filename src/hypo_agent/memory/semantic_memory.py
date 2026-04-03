@@ -25,6 +25,7 @@ logger = structlog.get_logger("hypo_agent.memory.semantic_memory")
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
 _DEFAULT_USER_QUERY = "用户偏好 回复风格 喜欢 习惯"
+_SEMANTIC_MEMORY_ERRORS = (OSError, RuntimeError, TypeError, ValueError)
 
 
 def estimate_token_count(text: str) -> int:
@@ -94,7 +95,7 @@ class SemanticMemory:
         for file_path in markdown_files:
             try:
                 await self.update_index(file_path)
-            except Exception:
+            except _SEMANTIC_MEMORY_ERRORS:
                 logger.exception("semantic_memory.build_index.file_failed", file_path=str(file_path))
 
     async def update_index(self, file_path: str | Path) -> None:
@@ -158,7 +159,7 @@ class SemanticMemory:
         vector_hits: list[ChunkResult] = []
         try:
             embeddings = await self.model_router.embed([normalized_query])
-        except Exception:
+        except _SEMANTIC_MEMORY_ERRORS:
             logger.warning("semantic_memory.vector_search_failed", query=normalized_query)
         else:
             if embeddings:

@@ -12,7 +12,7 @@ import structlog
 
 from hypo_agent.models import SkillOutput
 from hypo_agent.security.permission_manager import PermissionManager
-from hypo_agent.skills.base import BaseSkill
+from hypo_agent.skills.base import BaseSkill, DEFAULT_MAX_OUTPUT_CHARS
 
 logger = structlog.get_logger("hypo_agent.skills.code_run_skill")
 
@@ -28,7 +28,7 @@ class CodeRunSkill(BaseSkill):
         permission_manager: PermissionManager | None = None,
         sandbox_dir: Path | str = "/tmp/hypo-agent-sandbox",
         default_timeout_seconds: int = 30,
-        max_output_chars: int = 262144,
+        max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS,
         subprocess_exec=None,
         which_fn: Callable[[str], str | None] | None = None,
     ) -> None:

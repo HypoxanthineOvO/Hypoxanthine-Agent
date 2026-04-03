@@ -8,13 +8,7 @@ from fastapi.testclient import TestClient
 from hypo_agent.gateway.app import AppDeps, create_app
 from hypo_agent.memory.session import SessionMemory
 from hypo_agent.memory.structured_store import StructuredStore
-
-
-class DummyPipeline:
-    async def stream_reply(self, inbound):
-        del inbound
-        if False:  # pragma: no cover
-            yield {}
+from tests.shared import DummyPipeline
 
 
 def _seed_config_dir(config_dir: Path) -> None:
@@ -319,7 +313,7 @@ model: lightweight
 tool_levels:
   heavy:
     - scan_emails
-    - run_command
+    - exec_command
   medium:
     - write_file
 debounce_seconds: 2

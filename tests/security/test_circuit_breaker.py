@@ -29,22 +29,22 @@ def _config() -> CircuitBreakerConfig:
 def test_tool_level_breaker_fuses_tool_for_session() -> None:
     breaker = CircuitBreaker(_config())
 
-    breaker.record_failure(tool_name="run_command", session_id="s1")
-    breaker.record_failure(tool_name="run_command", session_id="s1")
-    breaker.record_failure(tool_name="run_command", session_id="s1")
+    breaker.record_failure(tool_name="exec_command", session_id="s1")
+    breaker.record_failure(tool_name="exec_command", session_id="s1")
+    breaker.record_failure(tool_name="exec_command", session_id="s1")
 
-    allowed, reason = breaker.can_execute("run_command", "s1")
+    allowed, reason = breaker.can_execute("exec_command", "s1")
     assert allowed is False
     assert "disabled" in reason.lower()
 
-    allowed_other, _ = breaker.can_execute("run_command", "s2")
+    allowed_other, _ = breaker.can_execute("exec_command", "s2")
     assert allowed_other is True
 def test_session_level_breaker_blocks_all_tools_for_session() -> None:
     clock = Clock()
     breaker = CircuitBreaker(_config(), now_fn=clock.now)
 
     for _ in range(5):
-        breaker.record_failure(tool_name="run_command", session_id="s1")
+        breaker.record_failure(tool_name="exec_command", session_id="s1")
 
     allowed, reason = breaker.can_execute("run_code", "s1")
     assert allowed is False
@@ -58,7 +58,51 @@ def test_global_kill_switch_blocks_immediately() -> None:
     breaker = CircuitBreaker(_config())
     breaker.set_global_kill_switch(True)
 
-    allowed, reason = breaker.can_execute("run_command", "s1")
+    allowed, reason = breaker.can_execute("exec_command", "s1")
     assert allowed is False
     assert "kill switch" in reason.lower()
 
+
+def test_skill_level_breaker_fuses_only_matching_logical_skill() -> None:
+    breaker = CircuitBreaker(
+        CircuitBreakerConfig(
+            tool_level_max_failures=3,
+            session_level_max_failures=5,
+            cooldown_seconds=10,
+            global_kill_switch=False,
+            skill_level_enabled=True,
+            skill_level_max_failures=2,
+        )
+    )
+
+    breaker.record_failure("exec_command", "s1", "git-workflow")
+    breaker.record_failure("exec_command", "s1", "git-workflow")
+
+    allowed_same, reason_same = breaker.can_execute("exec_command", "s1", "git-workflow")
+    allowed_other, _ = breaker.can_execute("exec_command", "s1", "host-inspection")
+
+    assert allowed_same is False
+    assert "logical skill 'git-workflow'" in reason_same
+    assert allowed_other is True
+
+
+def test_skill_level_breaker_reset_on_success() -> None:
+    breaker = CircuitBreaker(
+        CircuitBreakerConfig(
+            tool_level_max_failures=5,
+            session_level_max_failures=5,
+            cooldown_seconds=10,
+            global_kill_switch=False,
+            skill_level_enabled=True,
+            skill_level_max_failures=2,
+        )
+    )
+
+    breaker.record_failure("exec_command", "s1", "git-workflow")
+    breaker.record_success("exec_command", "s1", "git-workflow")
+    breaker.record_failure("exec_command", "s1", "git-workflow")
+
+    allowed, reason = breaker.can_execute("exec_command", "s1", "git-workflow")
+
+    assert allowed is True
+    assert reason == ""

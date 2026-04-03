@@ -35,7 +35,7 @@ class CoderSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "coder_submit_task",
-                    "description": "向 Hypo-Coder 提交一个编码任务，完成后会另行通知。",
+                    "description": "Submit a coding task to Hypo-Coder.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -51,7 +51,7 @@ class CoderSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "coder_task_status",
-                    "description": "查询指定编码任务的当前状态和结果",
+                    "description": "Get the current status and result of a coder task.",
                     "parameters": {
                         "type": "object",
                         "properties": {"task_id": {"type": "string"}},
@@ -63,7 +63,7 @@ class CoderSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "coder_list_tasks",
-                    "description": "列出所有编码任务，可按状态筛选",
+                    "description": "List coder tasks, optionally filtered by status.",
                     "parameters": {
                         "type": "object",
                         "properties": {"status": {"type": "string"}},
@@ -74,7 +74,7 @@ class CoderSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "coder_abort_task",
-                    "description": "中止指定的编码任务",
+                    "description": "Abort a coder task.",
                     "parameters": {
                         "type": "object",
                         "properties": {"task_id": {"type": "string"}},
@@ -86,7 +86,7 @@ class CoderSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "coder_health",
-                    "description": "检查 Hypo-Coder 服务是否可用",
+                    "description": "Check whether the Hypo-Coder service is healthy.",
                     "parameters": {"type": "object", "properties": {}},
                 },
             },
@@ -127,7 +127,7 @@ class CoderSkill(BaseSkill):
                 return SkillOutput(status="success", result=await self.coder_health())
         except CoderUnavailableError as exc:
             return SkillOutput(status="error", error_info=str(exc))
-        except Exception as exc:
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
             return SkillOutput(status="error", error_info=str(exc))
         return SkillOutput(status="error", error_info=f"Unsupported tool '{tool_name}'")
 

@@ -68,7 +68,7 @@ async def _load_optional_extensions(request: Request, db: aiosqlite.Connection) 
             result = loader(db)
             if hasattr(result, "__await__"):
                 await result
-        except Exception:
+        except (OSError, RuntimeError, TypeError, ValueError):
             return
 
 

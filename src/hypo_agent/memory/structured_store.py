@@ -472,7 +472,7 @@ class StructuredStore:
                     """,
                     (int(limit),),
                 ).fetchall()
-        except Exception:
+        except (sqlite3.Error, TypeError, ValueError):
             return []
 
         result: list[tuple[str, str]] = []

@@ -30,6 +30,15 @@ from hypo_agent.core.unified_message import UnifiedMessage, message_from_unified
 from hypo_agent.models import Message
 
 logger = structlog.get_logger("hypo_agent.channels.qq_bot")
+_QQ_BOT_DELIVERY_ERRORS = (
+    httpx.HTTPStatusError,
+    httpx.TransportError,
+    httpx.TimeoutException,
+    OSError,
+    RuntimeError,
+    TypeError,
+    ValueError,
+)
 
 _TOKEN_CACHE: dict[str, tuple[str, datetime]] = {}
 _TOKEN_LOCKS: dict[str, asyncio.Lock] = {}
@@ -330,7 +339,7 @@ class QQBotChannelService:
                     text=pending_text,
                 )
                 delivered_segment_count += pending_segment_count
-        except Exception as exc:
+        except _QQ_BOT_DELIVERY_ERRORS as exc:
             result = DeliveryResult.failed(
                 "qq_bot",
                 segment_count=total_segment_count,
@@ -557,7 +566,7 @@ class QQBotChannelService:
             value = loader()
             if inspect.isawaitable(value):
                 value = await value
-        except Exception:
+        except (OSError, RuntimeError, TypeError, ValueError):
             logger.warning("qq_bot.target_openid.load_failed", exc_info=True)
             return ""
         return str(value or "").strip()
@@ -574,7 +583,7 @@ class QQBotChannelService:
             result = saver(normalized)
             if inspect.isawaitable(result):
                 await result
-        except Exception:
+        except (OSError, RuntimeError, TypeError, ValueError):
             logger.warning("qq_bot.target_openid.save_failed", exc_info=True)
 
     def _image_fallback_text(self, image_source: str) -> str:

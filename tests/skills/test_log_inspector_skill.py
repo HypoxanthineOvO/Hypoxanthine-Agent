@@ -17,8 +17,8 @@ def _seed_tool_invocation_rows(db_path: Path) -> None:
         await store.init()
         await store.record_tool_invocation(
             session_id="s-alpha",
-            tool_name="run_command",
-            skill_name="tmux",
+            tool_name="exec_command",
+            skill_name="exec",
             params_json=json.dumps({"command": "uptime"}, ensure_ascii=False),
             status="success",
             result_summary="load average: 0.42",

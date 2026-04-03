@@ -352,7 +352,7 @@ async def update_config_file(
 
     try:
         await _trigger_reload(request)
-    except Exception as exc:  # pragma: no cover - defensive fallback
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:  # pragma: no cover - defensive fallback
         raise HTTPException(status_code=500, detail=f"Config reload failed: {exc}") from exc
 
     response = _serialize_config_response(

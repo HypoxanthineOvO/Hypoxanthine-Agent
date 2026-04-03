@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 import urllib.request
+from uuid import uuid4
 
 import yaml
 
@@ -25,7 +26,8 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from hypo_agent.core.config_loader import get_database_path
+from hypo_agent.core.config_loader import get_database_path, get_memory_dir
+from hypo_agent.memory.structured_store import StructuredStore
 
 try:
     import websockets
@@ -72,6 +74,26 @@ def _ws_url(port: int, token: str) -> str:
 
 def _default_db_path() -> Path:
     return get_database_path()
+
+
+def _default_sessions_dir() -> Path:
+    return get_memory_dir() / "sessions"
+
+
+def _default_smoke_session_id() -> str:
+    return f"smoke-{uuid4().hex[:8]}"
+
+
+async def _cleanup_smoke_session_data(
+    session_id: str,
+    *,
+    db_path: Path | None = None,
+    sessions_dir: Path | None = None,
+) -> None:
+    session_store = StructuredStore(db_path=db_path or _default_db_path())
+    await session_store.delete_session_data(session_id)
+    session_file = (sessions_dir or _default_sessions_dir()) / f"{session_id}.jsonl"
+    session_file.unlink(missing_ok=True)
 
 
 def _port_is_listening(host: str, port: int, *, timeout: float = 1.0) -> bool:
@@ -647,7 +669,14 @@ def _case_qq_send_private_api_mock() -> SmokeCaseResult:
     return asyncio.run(_case_qq_send_private_api_mock_async())
 
 
-async def cmd_smoke(*, port: int, session_id: str) -> int:
+async def cmd_smoke(*, port: int, session_id: str, force: bool = False) -> int:
+    if not _is_test_mode() and not force:
+        print(
+            "[ERROR] Refusing to run smoke outside HYPO_TEST_MODE=1. "
+            "Use --force only for explicit production/deployment acceptance."
+        )
+        return 2
+
     token = _load_token()
     uri = _ws_url(port, token)
     tasks_payload = _load_tasks_config()
@@ -681,24 +710,56 @@ async def cmd_smoke(*, port: int, session_id: str) -> int:
 
     print("=" * 60)
     print("SMOKE TEST: Hypo-Agent m9 smoke gates")
+    print(f"session_id={session_id}")
     print("=" * 60)
 
     results: list[SmokeCaseResult] = []
-    async with websockets.connect(uri) as ws:
-        smoke = SmokeSession(ws=ws, session_id=session_id)
-        print("[CASE 1] base dialogue regression")
-        # Some providers can be slow or cold-start; keep smoke robust.
-        results.append(await _case_send_regression(smoke, "你好", timeout=90))
-        print("[CASE 2] reminder regression and proactive push")
-        results.append(await _case_reminder_push_regression(smoke))
-        print("[CASE 3] heartbeat proactive push")
-        results.append(await _case_heartbeat_push(smoke, tasks_payload))
-        print("[CASE 4] proactive message_tag integrity")
-        results.append(_case_message_tag_integrity(smoke))
-        print("[CASE 5] email_scan scheduled trigger")
-        results.append(await _case_email_scan_trigger(smoke, tasks_payload))
-        print("[CASE 6] agent_search tool regression")
-        results.append(await _case_agent_search_tool(smoke))
+    try:
+        async with websockets.connect(uri) as ws:
+            smoke = SmokeSession(ws=ws, session_id=session_id)
+            print("[CASE 1] base dialogue regression")
+            # Some providers can be slow or cold-start; keep smoke robust.
+            results.append(await _case_send_regression(smoke, "你好", timeout=90))
+            print("[CASE 2] reminder regression and proactive push")
+            results.append(await _case_reminder_push_regression(smoke))
+            print("[CASE 3] heartbeat proactive push")
+            if _is_test_mode():
+                results.append(await _case_heartbeat_push(smoke, tasks_payload))
+            else:
+                results.append(
+                    SmokeCaseResult(
+                        "heartbeat proactive push",
+                        SmokeStatus.SKIP,
+                        "requires HYPO_TEST_MODE=1",
+                    )
+                )
+            print("[CASE 4] proactive message_tag integrity")
+            results.append(_case_message_tag_integrity(smoke))
+            print("[CASE 5] email_scan scheduled trigger")
+            if _is_test_mode():
+                results.append(await _case_email_scan_trigger(smoke, tasks_payload))
+            else:
+                results.append(
+                    SmokeCaseResult(
+                        "email_scan scheduled trigger",
+                        SmokeStatus.SKIP,
+                        "requires HYPO_TEST_MODE=1",
+                    )
+                )
+            print("[CASE 6] agent_search tool regression")
+            if _is_test_mode():
+                results.append(await _case_agent_search_tool(smoke))
+            else:
+                results.append(
+                    SmokeCaseResult(
+                        "agent_search tool regression",
+                        SmokeStatus.SKIP,
+                        "requires HYPO_TEST_MODE=1",
+                    )
+                )
+    finally:
+        if session_id.startswith("smoke-"):
+            await _cleanup_smoke_session_data(session_id)
 
     print("=" * 60)
     has_fail = False
@@ -738,7 +799,17 @@ def main() -> None:
     db_parser = sub.add_parser("check-db", help="run sqlite query")
     db_parser.add_argument("query")
 
-    sub.add_parser("smoke", help="run m8_smoke test")
+    smoke_parser = sub.add_parser("smoke", help="run m8_smoke test")
+    smoke_parser.add_argument(
+        "--session",
+        default=None,
+        help='Session ID for smoke run (default: random "smoke-xxxxxxxx"; use "--session main" to opt in)',
+    )
+    smoke_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow smoke outside HYPO_TEST_MODE=1 for explicit production/deployment acceptance",
+    )
 
     args = parser.parse_args()
     port = args.port if args.port is not None else get_port()
@@ -767,7 +838,16 @@ def main() -> None:
     if args.command == "check-db":
         raise SystemExit(cmd_check_db(args.query))
     if args.command == "smoke":
-        raise SystemExit(asyncio.run(cmd_smoke(port=port, session_id=args.session_id)))
+        smoke_session_id = args.session or _default_smoke_session_id()
+        raise SystemExit(
+            asyncio.run(
+                cmd_smoke(
+                    port=port,
+                    session_id=smoke_session_id,
+                    force=bool(getattr(args, "force", False)),
+                )
+            )
+        )
 
 
 if __name__ == "__main__":

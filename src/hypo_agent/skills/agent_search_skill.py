@@ -15,9 +15,14 @@ import asyncio
 from pathlib import Path
 from typing import Any, Callable
 
+import structlog
+
 from hypo_agent.core.config_loader import load_secrets_config
 from hypo_agent.models import SkillOutput
 from hypo_agent.skills.base import BaseSkill
+
+logger = structlog.get_logger("hypo_agent.skills.agent_search")
+_AGENT_SEARCH_ERRORS = (OSError, RuntimeError, TypeError, ValueError)
 
 
 class AgentSearchSkill(BaseSkill):
@@ -43,10 +48,7 @@ class AgentSearchSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "web_search",
-                    "description": (
-                        "联网搜索最新网页结果。用户需要最新信息、外部资料、新闻、"
-                        "官网文档、公开网页参考时调用。"
-                    ),
+                    "description": "Search the web and return ranked results for a query.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -66,7 +68,7 @@ class AgentSearchSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "web_read",
-                    "description": "提取指定 URL 的正文内容，返回适合总结和引用的正文。",
+                    "description": "Extract readable page content from a specific URL.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -88,7 +90,8 @@ class AgentSearchSkill(BaseSkill):
             max_results = min(10, max(1, max_results))
             try:
                 result = await self.web_search(query, max_results=max_results)
-            except Exception as exc:
+            except _AGENT_SEARCH_ERRORS as exc:
+                logger.warning("agent_search.web_search.failed", error=str(exc))
                 return SkillOutput(status="error", error_info=str(exc))
             return SkillOutput(status="success", result=result)
 
@@ -99,7 +102,8 @@ class AgentSearchSkill(BaseSkill):
 
             try:
                 result = await self.web_read(url)
-            except Exception as exc:
+            except _AGENT_SEARCH_ERRORS as exc:
+                logger.warning("agent_search.web_read.failed", url=url, error=str(exc))
                 return SkillOutput(status="error", error_info=str(exc))
             return SkillOutput(status="success", result=result)
 

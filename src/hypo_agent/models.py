@@ -254,6 +254,8 @@ class CircuitBreakerConfig(BaseModel):
     session_level_max_failures: int = 5
     cooldown_seconds: int = 120
     global_kill_switch: bool = False
+    skill_level_enabled: bool = False
+    skill_level_max_failures: int | None = None
 
 
 class SecurityConfig(BaseModel):

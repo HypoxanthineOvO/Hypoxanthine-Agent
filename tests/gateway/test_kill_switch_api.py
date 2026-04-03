@@ -2,17 +2,11 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from hypo_agent.gateway.app import create_app
+from tests.shared import DummyPipeline
 
 
-class DummyPipeline:
-    async def stream_reply(self, inbound):
-        if False:  # pragma: no cover
-            yield {}
-
-
-def test_kill_switch_api_toggles_global_state() -> None:
-    app = create_app(auth_token="test-token", pipeline=DummyPipeline())
+def test_kill_switch_api_toggles_global_state(app_factory) -> None:
+    app = app_factory(pipeline=DummyPipeline())
 
     with TestClient(app) as client:
         enabled_response = client.post("/api/kill-switch", json={"enabled": True})

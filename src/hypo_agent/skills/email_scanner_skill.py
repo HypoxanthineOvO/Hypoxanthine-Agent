@@ -13,12 +13,30 @@ from pathlib import Path
 import secrets
 from typing import Any
 
+import structlog
 import yaml
 
 from hypo_agent.core.config_loader import get_memory_dir
+from hypo_agent.exceptions import ModelError
 from hypo_agent.memory.email_store import EmailStore
 from hypo_agent.models import SkillOutput
 from hypo_agent.skills.base import BaseSkill
+
+logger = structlog.get_logger("hypo_agent.skills.email_scanner_skill")
+
+_EMAIL_MODEL_ERRORS = (ModelError, OSError, RuntimeError, TypeError, ValueError)
+_EMAIL_IMAP_ERRORS = (imaplib.IMAP4.error, OSError, RuntimeError, TypeError, ValueError)
+_EMAIL_DATE_ERRORS = (TypeError, ValueError, OverflowError)
+
+
+def _error_fields(exc: Exception) -> dict[str, str]:
+    message = str(exc).strip()
+    if len(message) > 200:
+        message = f"{message[:197]}..."
+    return {
+        "error_type": type(exc).__name__,
+        "error_msg": message,
+    }
 
 
 @dataclass(slots=True)
@@ -338,7 +356,12 @@ class EmailScannerSkill(BaseSkill):
                 prompt,
                 session_id="main",
             )
-        except Exception:
+        except _EMAIL_MODEL_ERRORS as exc:
+            # FALLBACK: category falls back to layer1 when the lightweight classifier is unavailable.
+            logger.warning(
+                "email_scanner.layer2.fallback_used",
+                **_error_fields(exc),
+            )
             return {
                 "category": fallback_category,
                 "confidence": None,
@@ -370,7 +393,12 @@ class EmailScannerSkill(BaseSkill):
         if hasattr(self.model_router, "get_model_for_task"):
             try:
                 model_name = str(self.model_router.get_model_for_task("chat") or "chat")
-            except Exception:
+            except _EMAIL_MODEL_ERRORS as exc:
+                # FALLBACK: use the default chat model when routing metadata is unavailable.
+                logger.warning(
+                    "email_scanner.layer3_model.fallback_used",
+                    **_error_fields(exc),
+                )
                 model_name = "chat"
 
         try:
@@ -381,7 +409,12 @@ class EmailScannerSkill(BaseSkill):
                     session_id="main",
                 )
             ).strip()
-        except Exception:
+        except _EMAIL_MODEL_ERRORS as exc:
+            # FALLBACK: summary text is optional and can be omitted when generation fails.
+            logger.warning(
+                "email_scanner.layer3_summary.fallback_used",
+                **_error_fields(exc),
+            )
             return ""
 
     async def scan_emails(self, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -438,7 +471,12 @@ class EmailScannerSkill(BaseSkill):
                         unread_only=unread_only,
                         dedupe_message_ids=dedupe_message_ids,
                     )
-                except Exception as exc:
+                except _EMAIL_IMAP_ERRORS as exc:
+                    logger.warning(
+                        "email_scanner.scan_account.fallback_used",
+                        account_name=str(account.get("name") or ""),
+                        **_error_fields(exc),
+                    )
                     accounts_failed += 1
                     items.append(
                         {
@@ -640,7 +678,12 @@ class EmailScannerSkill(BaseSkill):
                 payload = await self.model_router.call_lightweight_json(prompt, session_id="main")
             except TypeError:
                 payload = await self.model_router.call_lightweight_json(prompt)
-            except Exception:
+            except _EMAIL_MODEL_ERRORS as exc:
+                # FALLBACK: keep the built-in bootstrap draft when LLM generation fails.
+                logger.warning(
+                    "email_scanner.bootstrap_rules.fallback_used",
+                    **_error_fields(exc),
+                )
                 payload = {}
             if isinstance(payload, dict):
                 candidate_yaml = str(payload.get("yaml") or "").strip()
@@ -781,8 +824,13 @@ class EmailScannerSkill(BaseSkill):
         finally:
             try:
                 client.logout()
-            except Exception:
-                pass
+            except _EMAIL_IMAP_ERRORS as exc:
+                # FALLBACK: logout failure should not invalidate already fetched messages.
+                logger.warning(
+                    "email_scanner.logout.fallback_used",
+                    account_name=account_name,
+                    **_error_fields(exc),
+                )
 
     def _extract_email_payload(
         self,
@@ -856,8 +904,13 @@ class EmailScannerSkill(BaseSkill):
             try:
                 parsed = parsedate_to_datetime(received_at)
                 return parsed.astimezone(UTC).date().isoformat()
-            except Exception:
-                pass
+            except _EMAIL_DATE_ERRORS as exc:
+                # FALLBACK: invalid Date headers use the current UTC date for attachment bucketing.
+                logger.debug(
+                    "email_scanner.attachment_bucket.fallback_used",
+                    received_at=received_at,
+                    **_error_fields(exc),
+                )
         return datetime.now(UTC).date().isoformat()
 
     def _sanitize_filename(self, filename: str) -> str:
@@ -942,13 +995,24 @@ class EmailScannerSkill(BaseSkill):
                     seen_ids.add(message_id)
                     if len(results) >= limit:
                         return results
-            except Exception:
+            except _EMAIL_IMAP_ERRORS as exc:
+                # FALLBACK: search skips unhealthy mailboxes and continues with remaining accounts.
+                logger.warning(
+                    "email_scanner.search_account.fallback_used",
+                    account_name=str(account.get("name") or host),
+                    **_error_fields(exc),
+                )
                 continue
             finally:
                 try:
                     client.logout()
-                except Exception:
-                    pass
+                except _EMAIL_IMAP_ERRORS as exc:
+                    # FALLBACK: logout failure should not discard already collected search results.
+                    logger.warning(
+                        "email_scanner.logout.fallback_used",
+                        account_name=str(account.get("name") or host),
+                        **_error_fields(exc),
+                    )
         return results
 
     async def _fetch_email_by_message_id(self, message_id: str) -> dict[str, Any] | None:
@@ -989,13 +1053,25 @@ class EmailScannerSkill(BaseSkill):
                 )
                 payload["account_name"] = str(account.get("name") or host)
                 return payload
-            except Exception:
+            except _EMAIL_IMAP_ERRORS as exc:
+                # FALLBACK: detail lookup skips unhealthy mailboxes and checks the next configured account.
+                logger.warning(
+                    "email_scanner.fetch_detail.fallback_used",
+                    account_name=str(account.get("name") or host),
+                    message_id=key,
+                    **_error_fields(exc),
+                )
                 continue
             finally:
                 try:
                     client.logout()
-                except Exception:
-                    pass
+                except _EMAIL_IMAP_ERRORS as exc:
+                    # FALLBACK: logout failure should not hide a successfully fetched email payload.
+                    logger.warning(
+                        "email_scanner.logout.fallback_used",
+                        account_name=str(account.get("name") or host),
+                        **_error_fields(exc),
+                    )
         return None
 
     def _build_email_store_record(
@@ -1063,7 +1139,13 @@ class EmailScannerSkill(BaseSkill):
             return None
         try:
             parsed = parsedate_to_datetime(raw)
-        except Exception:
+        except _EMAIL_DATE_ERRORS as exc:
+            # FALLBACK: malformed Date headers are treated as missing timestamps.
+            logger.debug(
+                "email_scanner.received_at_parse.fallback_used",
+                raw_value=raw,
+                **_error_fields(exc),
+            )
             return None
         if parsed.tzinfo is None:
             return parsed.replace(tzinfo=UTC)
@@ -1126,7 +1208,12 @@ class EmailScannerSkill(BaseSkill):
 
         try:
             raw_value = await getter(self.HEARTBEAT_SCAN_STARTED_AT_PREF_KEY)
-        except Exception:
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            # FALLBACK: a missing heartbeat cursor only expands the next scan window.
+            logger.warning(
+                "email_scanner.heartbeat_cursor_load.fallback_used",
+                **_error_fields(exc),
+            )
             return None
 
         parsed = self._parse_iso_datetime(raw_value)
@@ -1147,7 +1234,12 @@ class EmailScannerSkill(BaseSkill):
                 self.HEARTBEAT_SCAN_STARTED_AT_PREF_KEY,
                 normalized.isoformat(),
             )
-        except Exception:
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            # FALLBACK: cursor persistence failure should not block the completed scan.
+            logger.warning(
+                "email_scanner.heartbeat_cursor_store.fallback_used",
+                **_error_fields(exc),
+            )
             return
 
     def _parse_iso_datetime(self, value: Any) -> datetime | None:
@@ -1196,7 +1288,12 @@ class EmailScannerSkill(BaseSkill):
             return
         try:
             store(msg_num, "+FLAGS", "(\\Seen)")
-        except Exception:
+        except _EMAIL_IMAP_ERRORS as exc:
+            # FALLBACK: marking as read is best-effort and should not fail the scan result.
+            logger.warning(
+                "email_scanner.mark_as_read.fallback_used",
+                **_error_fields(exc),
+            )
             return
 
     def get_status(self, *, scheduler: Any | None = None) -> dict[str, Any]:

@@ -4,8 +4,10 @@ from typing import Any
 
 import httpx
 
+from hypo_agent.exceptions import ExternalServiceError
 
-class InfoClientUnavailable(RuntimeError):
+
+class InfoClientUnavailable(ExternalServiceError):
     """Raised when Hypo-Info cannot be reached or returns an unusable response."""
 
 

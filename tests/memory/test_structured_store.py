@@ -130,8 +130,8 @@ def test_structured_store_records_tool_invocations(tmp_path) -> None:
         await store.init()
         invocation_id = await store.record_tool_invocation(
             session_id="s1",
-            tool_name="run_command",
-            skill_name="tmux",
+            tool_name="exec_command",
+            skill_name="exec",
             params_json='{"command":"echo hi"}',
             status="success",
             result_summary="ok",
@@ -145,8 +145,8 @@ def test_structured_store_records_tool_invocations(tmp_path) -> None:
         row = rows[0]
         assert invocation_id == row["id"]
         assert row["session_id"] == "s1"
-        assert row["tool_name"] == "run_command"
-        assert row["skill_name"] == "tmux"
+        assert row["tool_name"] == "exec_command"
+        assert row["skill_name"] == "exec"
         assert row["params_json"] == '{"command":"echo hi"}'
         assert row["status"] == "success"
         assert row["result_summary"] == "ok"
@@ -166,8 +166,8 @@ def test_structured_store_updates_tool_invocation_compressed_meta(tmp_path) -> N
         await store.init()
         invocation_id = await store.record_tool_invocation(
             session_id="s1",
-            tool_name="run_command",
-            skill_name="tmux",
+            tool_name="exec_command",
+            skill_name="exec",
             params_json='{"command":"echo hi"}',
             status="success",
             result_summary="ok",
@@ -252,8 +252,8 @@ def test_structured_store_delete_session_data_cleans_all_related_rows(tmp_path) 
         )
         await store.record_tool_invocation(
             session_id="s1",
-            tool_name="run_command",
-            skill_name="tmux",
+            tool_name="exec_command",
+            skill_name="exec",
             params_json='{"command":"echo hi"}',
             status="success",
             result_summary="ok",

@@ -165,7 +165,7 @@ class SessionMemory:
                 continue
             try:
                 message = self._parse_session_message(stripped)
-            except Exception:
+            except (OSError, RuntimeError, TypeError, ValueError):
                 main_file.write_text(legacy_file.read_text(encoding="utf-8"), encoding="utf-8")
                 return
             migrated_lines.append(

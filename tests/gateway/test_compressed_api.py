@@ -9,13 +9,7 @@ from hypo_agent.core.output_compressor import OutputCompressor
 from hypo_agent.gateway.app import AppDeps, create_app
 from hypo_agent.memory.session import SessionMemory
 from hypo_agent.memory.structured_store import StructuredStore
-
-
-class DummyPipeline:
-    async def stream_reply(self, inbound):
-        del inbound
-        if False:  # pragma: no cover
-            yield {}
+from tests.shared import DummyPipeline
 
 
 class StubRouter:
@@ -59,7 +53,7 @@ def test_get_compressed_original_hit(tmp_path) -> None:
     client, compressor = _build_client(tmp_path)
     assert compressor is not None
 
-    metadata: dict[str, object] = {"session_id": "s1", "tool_name": "run_command"}
+    metadata: dict[str, object] = {"session_id": "s1", "tool_name": "exec_command"}
     original_output = _tool_output("x" * 110000)
     asyncio.run(compressor.compress_if_needed(original_output, metadata=metadata))
     compressed_meta = metadata.get("compressed_meta")

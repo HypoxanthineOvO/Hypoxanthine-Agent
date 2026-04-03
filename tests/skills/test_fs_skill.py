@@ -48,6 +48,19 @@ def test_fs_skill_declares_required_permissions(tmp_path: Path) -> None:
     assert skill.required_permissions == ["filesystem"]
 
 
+def test_fs_skill_tool_descriptions_tell_model_to_try_reads_first(tmp_path: Path) -> None:
+    skill, _, _ = _build_skill(tmp_path)
+    descriptions = {
+        tool["function"]["name"]: tool["function"]["description"]
+        for tool in skill.tools
+    }
+
+    assert "do not assume access is denied before trying" in descriptions["read_file"]
+    assert "permission error" in descriptions["read_file"]
+    assert "writes require directory write permission" in descriptions["write_file"]
+    assert "before claiming you cannot access it" in descriptions["list_directory"]
+
+
 def test_blocked_path_filesystem_denied(tmp_path: Path) -> None:
     blocked = tmp_path / "blocked.txt"
     blocked.write_text("secret", encoding="utf-8")
@@ -442,3 +455,67 @@ def test_read_file_returns_friendly_error_for_encrypted_pdf(tmp_path: Path) -> N
 
     assert output.status == "error"
     assert f"Cannot read encrypted PDF: {file_path}" in output.error_info
+
+
+def test_fs_skill_allows_agent_memory_and_config_and_home_read_but_denies_src_write(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "Hypo-Agent"
+    memory_dir = repo_root / "memory"
+    config_dir = repo_root / "config"
+    src_dir = repo_root / "src"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    src_dir.mkdir(parents=True, exist_ok=True)
+
+    manager = PermissionManager(
+        DirectoryWhitelist(
+            rules=[
+                WhitelistRule(path=str(repo_root), permissions=["read"]),
+                WhitelistRule(path="/home/heyx", permissions=["read"]),
+                WhitelistRule(path=str(config_dir), permissions=["read", "write"]),
+                WhitelistRule(path=str(memory_dir), permissions=["read", "write"]),
+            ],
+            default_policy="readonly",
+        )
+    )
+    skill = FileSystemSkill(
+        permission_manager=manager,
+        index_file=memory_dir / "knowledge" / "directory_index.yaml",
+    )
+
+    home_file = tmp_path / "homefile.txt"
+    home_file.write_text("hello from home", encoding="utf-8")
+    home_target = Path("/home/heyx/test-readme.txt")
+
+    read_home = asyncio.run(skill.execute("read_file", {"path": str(home_file)}))
+    write_memory = asyncio.run(
+        skill.execute(
+            "write_file",
+            {"path": str(memory_dir / "notes.md"), "content": "memory ok"},
+        )
+    )
+    write_config = asyncio.run(
+        skill.execute(
+            "write_file",
+            {"path": str(config_dir / "persona.yaml"), "content": "name: Hypo\n"},
+        )
+    )
+    deny_src = asyncio.run(
+        skill.execute(
+            "write_file",
+            {"path": str(src_dir / "app.py"), "content": "print('nope')\n"},
+        )
+    )
+
+    allowed_home, _ = manager.check_permission(str(home_target), "read")
+
+    assert read_home.status == "success"
+    assert read_home.result == "hello from home"
+    assert write_memory.status == "success"
+    assert (memory_dir / "notes.md").read_text(encoding="utf-8") == "memory ok"
+    assert write_config.status == "success"
+    assert (config_dir / "persona.yaml").read_text(encoding="utf-8") == "name: Hypo\n"
+    assert allowed_home is True
+    assert deny_src.status == "error"
+    assert "permission denied" in (deny_src.error_info or "").lower()

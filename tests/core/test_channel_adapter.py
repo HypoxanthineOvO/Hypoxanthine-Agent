@@ -25,7 +25,7 @@ def test_webui_adapter_preserves_tool_result_fields() -> None:
     adapter = WebUIAdapter()
     event = {
         "type": "tool_call_result",
-        "tool_name": "run_command",
+        "tool_name": "exec_command",
         "tool_call_id": "call_1",
         "status": "success",
         "result": {"stdout": "ok"},
@@ -37,7 +37,7 @@ def test_webui_adapter_preserves_tool_result_fields() -> None:
     formatted = asyncio.run(adapter.format(event))
 
     assert formatted["type"] == "tool_call_result"
-    assert formatted["tool_name"] == "run_command"
+    assert formatted["tool_name"] == "exec_command"
     assert formatted["status"] == "success"
     assert formatted["session_id"] == "s1"
 
@@ -96,7 +96,7 @@ def test_webui_adapter_formats_tool_result_with_compressed_meta() -> None:
         },
         tool_calls=[
             {
-                "tool_name": "run_command",
+                "tool_name": "exec_command",
                 "tool_call_id": "call_1",
                 "status": "success",
                 "result": "compressed text",
@@ -115,7 +115,7 @@ def test_webui_adapter_formats_tool_result_with_compressed_meta() -> None:
     )
 
     assert formatted["type"] == "tool_call_result"
-    assert formatted["tool_name"] == "run_command"
+    assert formatted["tool_name"] == "exec_command"
     assert formatted["compressed_meta"] == {
         "cache_id": "abc",
         "original_chars": 5000,

@@ -135,7 +135,7 @@ class QQAdapter:
         try:
             with urllib_request.urlopen(req, timeout=self.request_timeout_seconds) as resp:
                 raw = resp.read().decode("utf-8")
-        except Exception as exc:
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning("qq.adapter.request_failed", path=path, error=str(exc))
             return None
         try:

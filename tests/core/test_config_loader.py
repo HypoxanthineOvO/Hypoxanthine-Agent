@@ -436,6 +436,30 @@ speaking_style:
     ]
 
 
+def test_render_persona_system_prompt_includes_speaking_style_habits(tmp_path: Path) -> None:
+    persona_yaml = tmp_path / "persona.yaml"
+    persona_yaml.write_text(
+        """
+name: Hypo
+aliases: [hypo]
+personality: [pragmatic]
+speaking_style:
+  tone: direct
+  habits:
+    - 回答完直接结束
+    - 不要主动给下一步建议
+""".strip(),
+        encoding="utf-8",
+    )
+
+    rendered = render_persona_system_prompt(load_persona_config(persona_yaml))
+
+    assert "表达风格：direct" in rendered
+    assert "行为边界：" in rendered
+    assert "- 回答完直接结束" in rendered
+    assert "- 不要主动给下一步建议" in rendered
+
+
 def test_default_persona_mentions_directory_index_knowledge_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -467,7 +491,7 @@ model: DeepseekV3_2
 tool_levels:
   heavy:
     - scan_emails
-    - run_command
+    - exec_command
   medium:
     - write_file
 debounce_seconds: 2
@@ -480,7 +504,7 @@ max_narration_length: 80
 
     assert config.enabled is True
     assert config.model == "DeepseekV3_2"
-    assert config.tool_levels.heavy == ["scan_emails", "run_command"]
+    assert config.tool_levels.heavy == ["scan_emails", "exec_command"]
     assert config.tool_levels.medium == ["write_file"]
     assert config.debounce_seconds == 2
     assert config.max_narration_length == 80

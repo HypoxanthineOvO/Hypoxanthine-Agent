@@ -10,13 +10,7 @@ from hypo_agent.gateway.app import AppDeps, create_app
 from hypo_agent.memory.session import SessionMemory
 from hypo_agent.memory.structured_store import StructuredStore
 from hypo_agent.models import Message
-
-
-class DummyPipeline:
-    async def stream_reply(self, inbound):
-        del inbound
-        if False:  # pragma: no cover
-            yield {}
+from tests.shared import DummyPipeline
 
 
 def _build_client(tmp_path: Path) -> TestClient:

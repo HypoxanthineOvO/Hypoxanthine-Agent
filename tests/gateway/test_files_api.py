@@ -9,13 +9,7 @@ from hypo_agent.memory.session import SessionMemory
 from hypo_agent.memory.structured_store import StructuredStore
 from hypo_agent.models import DirectoryWhitelist
 from hypo_agent.security.permission_manager import PermissionManager
-
-
-class DummyPipeline:
-    async def stream_reply(self, inbound):
-        del inbound
-        if False:  # pragma: no cover
-            yield {}
+from tests.shared import DummyPipeline
 
 
 def _build_client(tmp_path: Path) -> TestClient:

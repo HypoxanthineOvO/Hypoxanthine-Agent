@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -15,6 +14,8 @@ from typing import Any, Callable
 import aiosqlite
 import httpx
 
+from hypo_agent.core.config_loader import load_secrets_config
+from hypo_agent.exceptions import ExternalServiceError
 from hypo_agent.models import SkillOutput
 from hypo_agent.skills.base import BaseSkill
 
@@ -60,13 +61,29 @@ class HypoInfoClient:
     async def digest(self, *, time_range: str = "today") -> dict[str, Any]:
         return await self._get("/api/agent/digest", {"time_range": time_range})
 
+    async def summary(
+        self,
+        *,
+        time_range: str = "today",
+        min_importance: int | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"time_range": time_range}
+        if min_importance is not None:
+            params["min_importance"] = min_importance
+        return await self._get("/api/agent/summary", params)
+
+    async def categories(self) -> dict[str, Any]:
+        return await self._get("/api/agent/categories", {})
+
     async def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         try:
             async with self._client() as client:
                 resp = await client.get(path, params=params)
                 resp.raise_for_status()
                 return resp.json()
-        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as exc:
+        except httpx.TimeoutException as exc:
+            raise HypoInfoError(f"Hypo-Info 服务不可达：{exc}") from exc
+        except httpx.RequestError as exc:
             raise HypoInfoError(f"Hypo-Info 服务不可达：{exc}") from exc
         except httpx.HTTPStatusError as exc:
             raise HypoInfoError(
@@ -74,13 +91,21 @@ class HypoInfoClient:
             ) from exc
 
 
-class HypoInfoError(RuntimeError):
-    pass
+class HypoInfoError(ExternalServiceError):
+    """Raised when Hypo-Info cannot fulfill a request."""
 
 
 class InfoReachSkill(BaseSkill):
+    """Hypo-Info 主动推送与订阅管理。
+
+    由 Scheduler 和 Heartbeat 驱动，负责定时新闻摘要推送、
+    高重要性文章主动通知、订阅 CRUD。
+
+    数据通过 HypoInfoClient 调用 /api/agent/* 端点。
+    """
+
     name = "info_reach"
-    description = "Query Hypo-Info API for articles, digests, and subscriptions."
+    description = "Use Hypo-Info for proactive digests, article retrieval, and subscription management."
     required_permissions: list[str] = []
 
     HEARTBEAT_PREF_KEY = "info_reach.last_heartbeat_check_at"
@@ -91,7 +116,8 @@ class InfoReachSkill(BaseSkill):
         message_queue: Any | None = None,
         heartbeat_service: Any | None = None,
         db_path: Path | str | None = None,
-        base_url: str = _DEFAULT_BASE_URL,
+        base_url: str | None = None,
+        secrets_path: Path | str = "config/secrets.yaml",
         transport: Any | None = None,
         default_session_id: str = "main",
         now_fn: Callable[[], datetime] | None = None,
@@ -105,7 +131,9 @@ class InfoReachSkill(BaseSkill):
         self.default_session_id = default_session_id
         self.now_fn = now_fn or (lambda: datetime.now(UTC))
         self._db_path = Path(db_path) if db_path else None
-        self._client = HypoInfoClient(base_url, transport=transport)
+        self.secrets_path = Path(secrets_path)
+        resolved_base_url = self._resolve_base_url(base_url)
+        self._client = HypoInfoClient(resolved_base_url, transport=transport)
         self._subscription_table_ready = False
 
         if heartbeat_service is not None and hasattr(heartbeat_service, "register_event_source"):
@@ -122,7 +150,11 @@ class InfoReachSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "info_query",
-                    "description": "查询 Hypo-Info 文章，支持分类、关键词和时间范围过滤。",
+                    "description": (
+                        "Retrieve Hypo-Info articles for internal news lookup. "
+                        "After calling, answer the user with a concise natural-language summary of the findings. "
+                        "Do not dump raw JSON, field names, or internal payloads."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -143,7 +175,10 @@ class InfoReachSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "info_summary",
-                    "description": "获取 Hypo-Info 每日摘要（digest）。",
+                    "description": (
+                        "Retrieve a Hypo-Info digest for proactive updates. "
+                        "Summarize the digest in natural-language sections for the user instead of repeating raw JSON."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -160,7 +195,10 @@ class InfoReachSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "info_subscribe",
-                    "description": "创建或更新一个 Hypo-Info 订阅。",
+                    "description": (
+                        "Create or update a Hypo-Info subscription. "
+                        "Confirm the saved subscription in natural language; do not echo raw JSON."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -177,7 +215,10 @@ class InfoReachSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "info_list_subscriptions",
-                    "description": "列出全部 Hypo-Info 订阅。",
+                    "description": (
+                        "List Hypo-Info subscriptions. "
+                        "Present them as a readable summary instead of raw JSON."
+                    ),
                     "parameters": {"type": "object", "properties": {}},
                 },
             },
@@ -185,7 +226,9 @@ class InfoReachSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "info_delete_subscription",
-                    "description": "删除一个 Hypo-Info 订阅。",
+                    "description": (
+                        "Delete a Hypo-Info subscription and confirm the result in natural language."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {"name": {"type": "string"}},
@@ -237,7 +280,7 @@ class InfoReachSkill(BaseSkill):
                 return SkillOutput(status="success", result=await self.info_delete_subscription(name=name))
         except HypoInfoError as exc:
             return SkillOutput(status="error", error_info=f"Hypo-Info 错误：{exc}")
-        except Exception as exc:
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
             return SkillOutput(status="error", error_info=str(exc))
 
         return SkillOutput(status="error", error_info=f"Unsupported tool '{tool_name}'")
@@ -514,3 +557,15 @@ class InfoReachSkill(BaseSkill):
         if isinstance(value, str) and value.strip():
             return [value.strip()]
         return []
+
+    def _resolve_base_url(self, explicit_base_url: str | None) -> str:
+        if explicit_base_url and str(explicit_base_url).strip():
+            return str(explicit_base_url).strip()
+        try:
+            secrets = load_secrets_config(self.secrets_path)
+        except (FileNotFoundError, ValueError):
+            return _DEFAULT_BASE_URL
+        services = secrets.services
+        hypo_info = services.hypo_info if services is not None else None
+        configured = str(hypo_info.base_url if hypo_info is not None else "").strip()
+        return configured or _DEFAULT_BASE_URL
