@@ -12,13 +12,14 @@ from urllib.parse import quote
 import structlog
 
 from hypo_agent.channels.weixin.crypto import decrypt_media
-from hypo_agent.channels.weixin.ilink_client import ILinkClient, SessionExpiredError
+from hypo_agent.channels.weixin.ilink_client import ILinkAPIError, ILinkClient, SessionExpiredError
 from hypo_agent.core.time_utils import utc_isoformat, utc_now
 from hypo_agent.core.uploads import build_upload_path, get_uploads_dir, guess_mime_type
 from hypo_agent.models import Attachment, Message, WeixinServiceConfig
 
 logger = structlog.get_logger("hypo_agent.channels.weixin.channel")
 _WEIXIN_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
+_WEIXIN_CHANNEL_ERRORS = (ILinkAPIError, OSError, RuntimeError, TypeError, ValueError)
 
 
 class WeixinChannel:
@@ -110,7 +111,7 @@ class WeixinChannel:
                 self._session_expired = True
                 self._running = False
                 break
-            except Exception as exc:
+            except _WEIXIN_CHANNEL_ERRORS as exc:
                 delay = backoff[min(retry_count, len(backoff) - 1)]
                 logger.warning(
                     "weixin.channel.poll_error",
@@ -244,14 +245,14 @@ class WeixinChannel:
                 typing_started = True
                 try:
                     await self.client.send_typing(user_id, status=1)
-                except Exception:
+                except _WEIXIN_CHANNEL_ERRORS:
                     logger.warning("weixin.channel.typing_failed", user_id=user_id, exc_info=True)
                 return
 
             if event_type == "assistant_done" and typing_started:
                 try:
                     await self.client.send_typing(user_id, status=2)
-                except Exception:
+                except _WEIXIN_CHANNEL_ERRORS:
                     logger.warning(
                         "weixin.channel.typing_stop_failed",
                         user_id=user_id,
@@ -263,7 +264,7 @@ class WeixinChannel:
                 if typing_started:
                     try:
                         await self.client.send_typing(user_id, status=2)
-                    except Exception:
+                    except _WEIXIN_CHANNEL_ERRORS:
                         logger.warning(
                             "weixin.channel.typing_stop_failed",
                             user_id=user_id,
@@ -352,7 +353,7 @@ class WeixinChannel:
                 source_url=source_url,
                 media_kind=media_kind,
             )
-        except Exception as exc:
+        except _WEIXIN_CHANNEL_ERRORS as exc:
             logger.exception(
                 "weixin.channel.attachment_download_failed",
                 media_kind=media_kind,

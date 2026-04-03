@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from hypo_agent.core.image_renderer import ImageRenderError
+from hypo_agent.core.markdown_plaintext import downgrade_markdown_table
 from hypo_agent.core.qq_text_renderer import render_qq_plaintext
 from hypo_agent.core.unified_message import (
     CodeBlock,
@@ -154,7 +155,7 @@ class QQRenderer:
                 )
             except ImageRenderError as exc:
                 fallback = exc.fallback_text
-            except Exception:
+            except (OSError, RuntimeError, TypeError, ValueError):
                 fallback = self._fallback_block_text(content, block_type=block_type)
             else:
                 segments.append(
@@ -216,25 +217,7 @@ class QQRenderer:
         return merged
 
     def _downgrade_table_block(self, content: str) -> str:
-        rows: list[str] = []
-        for raw_line in str(content or "").splitlines():
-            stripped = raw_line.strip()
-            if not stripped:
-                continue
-            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-            if len(cells) >= 2 and all(cell and self._is_divider_cell(cell) for cell in cells):
-                continue
-            if "|" in stripped:
-                rows.append(" | ".join(cells))
-                continue
-            rows.append(raw_line)
-        return "\n".join(row for row in rows if row).strip()
-
-    def _is_divider_cell(self, value: str) -> bool:
-        stripped = str(value or "").strip()
-        if not stripped:
-            return False
-        return all(char in "-:" for char in stripped) and "-" in stripped
+        return downgrade_markdown_table(content)
 
     def _tag_emoji(self, message_tag: str | None) -> str:
         mapping = {

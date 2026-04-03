@@ -27,6 +27,16 @@ _WEIXIN_RETRY_SPLIT_BYTES = 96
 _WEIXIN_IMAGE_RETRY_DELAYS = (0.5, 1.0)
 _WEIXIN_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _WEIXIN_NON_BMP_RE = re.compile(r"[\U00010000-\U0010FFFF]")
+_WEIXIN_ADAPTER_ERRORS = (
+    ILinkAPIError,
+    httpx.HTTPStatusError,
+    httpx.TransportError,
+    httpx.TimeoutException,
+    OSError,
+    RuntimeError,
+    TypeError,
+    ValueError,
+)
 
 
 class WeixinAdapter:
@@ -114,7 +124,7 @@ class WeixinAdapter:
                     ret=response.get("ret") if isinstance(response, dict) else None,
                     errcode=response.get("errcode") if isinstance(response, dict) else None,
                 )
-            except Exception as exc:
+            except _WEIXIN_ADAPTER_ERRORS as exc:
                 error = str(exc)
                 failed_segments = total_segments - segment_index
                 logger.warning(
@@ -212,7 +222,7 @@ class WeixinAdapter:
                     target_user_id=target_user_id,
                     context_token=context_token,
                 )
-            except Exception as exc:
+            except _WEIXIN_ADAPTER_ERRORS as exc:
                 fallback_text = str(segment.get("fallback_text") or "").strip() or self._image_fallback_text(raw)
                 logger.warning(
                     "weixin.adapter.image_fallback",
@@ -408,7 +418,7 @@ class WeixinAdapter:
         for attempt in range(len(_WEIXIN_IMAGE_RETRY_DELAYS) + 1):
             try:
                 return await operation()
-            except Exception as exc:
+            except _WEIXIN_ADAPTER_ERRORS as exc:
                 last_error = exc
                 if attempt >= len(_WEIXIN_IMAGE_RETRY_DELAYS) or not self._is_retryable_image_error(exc):
                     raise
@@ -768,7 +778,7 @@ class WeixinAdapter:
                     batch_index=index + 1,
                     batch_count=len(pending),
                 )
-            except Exception as exc:
+            except _WEIXIN_ADAPTER_ERRORS as exc:
                 remaining.append(text)
                 remaining.extend(pending[index + 1 :])
                 logger.warning(

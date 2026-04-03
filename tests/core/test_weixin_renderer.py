@@ -47,6 +47,43 @@ def test_weixin_renderer_renders_plain_text_without_markdown_symbols() -> None:
     assert "喝水" in text
 
 
+def test_weixin_renderer_reuses_qq_markdown_plaintext_rules() -> None:
+    renderer = WeixinRenderer()
+
+    text = renderer.render_message_text(
+        Message(
+            text="## 总结\n> 引用内容\n---\n- 项目\n1. 步骤\n**提醒** `喝水`",
+            sender="assistant",
+            session_id="main",
+        )
+    )
+
+    assert "『总结』" in text
+    assert "「引用内容」" in text
+    assert "————————" in text
+    assert "• 项目" in text
+    assert "1. 步骤" in text
+    assert "【提醒】 喝水" in text
+
+
+def test_weixin_renderer_plaintext_fallback_uses_raw_code_and_table_text() -> None:
+    renderer = WeixinRenderer()
+
+    text = renderer.render_message_text(
+        Message(
+            text="```python\nprint('x')\n```\n| A | B |\n| --- | --- |\n| 1 | 2 |\n",
+            sender="assistant",
+            session_id="main",
+        )
+    )
+
+    assert "[code渲染失败" not in text
+    assert "[table渲染失败" not in text
+    assert "print('x')" in text
+    assert "A | B" in text
+    assert "1 | 2" in text
+
+
 def test_weixin_renderer_outputs_images_for_renderable_blocks() -> None:
     image_renderer = StubImageRenderer()
     renderer = WeixinRenderer(image_renderer=image_renderer)

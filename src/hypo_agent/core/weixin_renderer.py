@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 
 from hypo_agent.core.image_renderer import ImageRenderError
+from hypo_agent.core.markdown_plaintext import (
+    downgrade_markdown_table,
+    render_markdown_plaintext,
+)
 from hypo_agent.core.unified_message import (
     CodeBlock,
     DiagramBlock,
@@ -18,15 +21,6 @@ from hypo_agent.core.unified_message import (
 )
 from hypo_agent.models import Message
 
-_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
-_HEADING_RE = re.compile(r"^\s*#{1,6}\s+")
-_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
-_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
-_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)")
-_STRIKE_RE = re.compile(r"~~(.+?)~~")
-_UNORDERED_LIST_RE = re.compile(r"^(\s*)[-*]\s+")
-_QUOTE_RE = re.compile(r"^\s*>\s?")
-
 
 class WeixinRenderer:
     def __init__(self, *, image_renderer: Any | None = None) -> None:
@@ -39,7 +33,7 @@ class WeixinRenderer:
 
         for block in unified.blocks:
             if isinstance(block, TextBlock):
-                text = self._render_plaintext(block.text)
+                text = render_markdown_plaintext(block.text)
                 if pending_emoji and text.strip():
                     text = f"{pending_emoji} {text}"
                     pending_emoji = ""
@@ -101,21 +95,23 @@ class WeixinRenderer:
         parts: list[str] = []
         for block in unified.blocks:
             if isinstance(block, TextBlock):
-                rendered = self._render_plaintext(block.text)
+                rendered = render_markdown_plaintext(block.text).replace("`", "")
                 if rendered:
                     parts.append(rendered)
                 continue
             if isinstance(block, TableBlock):
-                parts.append(self._fallback_block_text(block.markdown, block_type="table"))
+                table_text = downgrade_markdown_table(block.markdown)
+                if table_text:
+                    parts.append(table_text)
                 continue
             if isinstance(block, CodeBlock):
-                parts.append(self._fallback_block_text(block.text, block_type="code"))
+                parts.append(block.text)
                 continue
             if isinstance(block, MathBlock):
-                parts.append(self._fallback_block_text(block.text, block_type="math"))
+                parts.append(block.text)
                 continue
             if isinstance(block, DiagramBlock):
-                parts.append(self._fallback_block_text(block.text, block_type=block.syntax))
+                parts.append(block.text)
                 continue
             if isinstance(block, ImageAttachmentBlock):
                 label = block.filename or Path(str(block.url or "")).name or "image"
@@ -144,7 +140,7 @@ class WeixinRenderer:
                 rendered_path = await self.image_renderer.render_to_image(content, block_type=block_type)
             except ImageRenderError as exc:
                 fallback = exc.fallback_text
-            except Exception:
+            except (OSError, RuntimeError, TypeError, ValueError):
                 fallback = self._fallback_block_text(content, block_type=block_type)
             else:
                 segments.append(
@@ -167,23 +163,6 @@ class WeixinRenderer:
 
     def _renderer_available(self) -> bool:
         return bool(self.image_renderer is not None and getattr(self.image_renderer, "available", False))
-
-    def _render_plaintext(self, markdown_text: str) -> str:
-        if not markdown_text:
-            return ""
-        rendered_lines: list[str] = []
-        for raw_line in markdown_text.splitlines():
-            line = raw_line.rstrip()
-            line = _HEADING_RE.sub("", line)
-            line = _QUOTE_RE.sub("", line)
-            line = _UNORDERED_LIST_RE.sub(lambda match: f"{match.group(1)}- ", line, count=1)
-            line = _LINK_RE.sub(r"\1 (\2)", line)
-            line = _BOLD_RE.sub(r"\1", line)
-            line = _ITALIC_RE.sub(r"\1", line)
-            line = _STRIKE_RE.sub(r"\1", line)
-            line = _INLINE_CODE_RE.sub(r"\1", line)
-            rendered_lines.append(line)
-        return "\n".join(rendered_lines).strip()
 
     def _fallback_block_text(self, content: str, *, block_type: str) -> str:
         if self.image_renderer is not None and hasattr(self.image_renderer, "build_fallback_text"):

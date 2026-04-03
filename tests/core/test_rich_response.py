@@ -15,7 +15,7 @@ def test_rich_response_preserves_fields() -> None:
     payload = RichResponse(
         text="hello",
         compressed_meta={"cache_id": "abc", "original_chars": 5000, "compressed_chars": 1200},
-        tool_calls=[{"tool_name": "run_command"}],
+        tool_calls=[{"tool_name": "exec_command"}],
         attachments=[{"path": "./logs/out.txt"}],
     )
 
@@ -25,5 +25,5 @@ def test_rich_response_preserves_fields() -> None:
         "original_chars": 5000,
         "compressed_chars": 1200,
     }
-    assert payload.tool_calls == [{"tool_name": "run_command"}]
+    assert payload.tool_calls == [{"tool_name": "exec_command"}]
     assert payload.attachments == [{"path": "./logs/out.txt"}]

@@ -21,7 +21,7 @@ describe("CompressedMessage", () => {
         },
         apiBase: "http://localhost:8000/api",
         token: "test-token",
-        toolName: "run_command",
+        toolName: "exec_command",
       },
     });
 

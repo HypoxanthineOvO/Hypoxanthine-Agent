@@ -69,6 +69,23 @@ describe("MessageBubble", () => {
     expect(wrapper.text()).toContain("💬 微信");
   });
 
+  it("renders feishu source label without relying on text prefix", () => {
+    const wrapper = mount(MessageBubble, {
+      props: {
+        message: {
+          text: "来自飞书",
+          sender: "user",
+          session_id: "main",
+          channel: "feishu",
+        },
+      },
+      slots: { default: "<div>飞书内容</div>" },
+    });
+
+    expect(wrapper.find(".message-tag").text()).toBe("📨 飞书");
+    expect(wrapper.text()).not.toContain("[飞书]");
+  });
+
   it("renders formatted time for normal messages and hides it for narration", () => {
     const normal = mount(MessageBubble, {
       props: {

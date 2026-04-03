@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 
-import { renderMarkdown, renderMermaidIn } from "../../utils/markdownRenderer";
+import { renderMarkdown, renderMathIn, renderMermaidIn } from "../../utils/markdownRenderer";
 
 const props = defineProps<{
   text: string;
@@ -32,6 +32,7 @@ const renderMermaidIfNeeded = async (): Promise<void> => {
   if (!root.value) {
     return;
   }
+  await renderMathIn(root.value);
   await renderMermaidIn(root.value);
 };
 

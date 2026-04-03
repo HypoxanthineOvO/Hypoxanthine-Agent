@@ -14,6 +14,8 @@ from uuid import uuid4
 import httpx
 import structlog
 
+from hypo_agent.exceptions import ChannelError, ExternalServiceError
+
 logger = structlog.get_logger("hypo_agent.channels.weixin.ilink_client")
 
 _USE_STORED_TOKEN = object()
@@ -25,7 +27,7 @@ _CHANNEL_VERSION = "1.0.2"
 _CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
 
 
-class ILinkError(RuntimeError):
+class ILinkError(ExternalServiceError):
     """Base exception for iLink client failures."""
 
 
@@ -51,7 +53,7 @@ class LoginError(ILinkError):
     """Raised when the QR-code login flow fails."""
 
 
-class SessionExpiredError(ILinkAPIError):
+class SessionExpiredError(ChannelError, ILinkAPIError):
     """Raised when the remote bot session has expired and login is required."""
 
 

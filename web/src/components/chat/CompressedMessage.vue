@@ -56,7 +56,7 @@ const renderMode = computed<"markdown" | "code">(() => {
 });
 
 const language = computed(() => {
-  if (props.toolName === "run_command") {
+  if (props.toolName === "exec_command") {
     return "bash";
   }
   if (props.toolName === "run_code") {

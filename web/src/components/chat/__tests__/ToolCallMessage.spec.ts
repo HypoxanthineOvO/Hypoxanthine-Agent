@@ -7,13 +7,13 @@ describe("ToolCallMessage", () => {
   it("renders one-line summary by default", () => {
     const wrapper = mount(ToolCallMessage, {
       props: {
-        toolName: "run_command",
+        toolName: "exec_command",
         status: "success",
         params: { command: "nvidia-smi" },
       },
     });
 
-    expect(wrapper.text()).toContain('🔧 执行了 run_command({"command":"nvidia-smi"}) → 成功');
+    expect(wrapper.text()).toContain('🔧 执行了 exec_command({"command":"nvidia-smi"}) → 成功');
     expect(wrapper.find(".details").exists()).toBe(false);
     expect(wrapper.get(".summary-button").attributes("aria-expanded")).toBe("false");
   });
@@ -21,7 +21,7 @@ describe("ToolCallMessage", () => {
   it("expands details when clicked", async () => {
     const wrapper = mount(ToolCallMessage, {
       props: {
-        toolName: "run_command",
+        toolName: "exec_command",
         status: "error",
         params: { command: "bad" },
         result: { stderr: "oops" },
@@ -39,7 +39,7 @@ describe("ToolCallMessage", () => {
   it("truncates long params in summary", () => {
     const wrapper = mount(ToolCallMessage, {
       props: {
-        toolName: "run_command",
+        toolName: "exec_command",
         status: "success",
         params: { payload: "x".repeat(240) },
       },

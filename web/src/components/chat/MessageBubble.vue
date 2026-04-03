@@ -21,6 +21,9 @@ const sourceLabel = (): string => {
   if (channel === "weixin") {
     return "💬 微信";
   }
+  if (channel === "feishu") {
+    return "📨 飞书";
+  }
   if (channel === "system") {
     return "系统";
   }

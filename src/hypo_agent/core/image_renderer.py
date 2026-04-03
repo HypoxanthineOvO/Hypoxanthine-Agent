@@ -8,13 +8,24 @@ from uuid import uuid4
 import structlog
 
 from hypo_agent.core.config_loader import get_memory_dir
+from hypo_agent.exceptions import SkillError
+
+try:
+    from playwright.async_api import Error as PlaywrightError
+except ImportError:  # pragma: no cover - optional dependency
+    PlaywrightError = RuntimeError
 
 logger = structlog.get_logger("hypo_agent.core.image_renderer")
+_IMAGE_RENDER_ERRORS = (ImportError, PlaywrightError, OSError, RuntimeError, TypeError, ValueError)
 
 
-class ImageRenderError(RuntimeError):
+class ImageRenderError(SkillError):
     def __init__(self, *, block_type: str, fallback_text: str, reason: str) -> None:
-        super().__init__(reason)
+        super().__init__(
+            reason,
+            operation="render_image",
+            block_type=str(block_type or "markdown"),
+        )
         self.block_type = str(block_type or "markdown")
         self.fallback_text = str(fallback_text or "")
         self.reason = str(reason or "image render failed")
@@ -65,7 +76,7 @@ class ImageRenderer:
             await page.set_content("<html><body>ok</body></html>", wait_until="domcontentloaded")
             self._available = True
             return True
-        except Exception:
+        except _IMAGE_RENDER_ERRORS:
             self._available = False
             logger.warning("image_renderer.health_check_failed", exc_info=True)
             return False
@@ -91,7 +102,7 @@ class ImageRenderer:
                 color_scheme="light",
                 device_scale_factor=2,
             )
-        except Exception as exc:
+        except _IMAGE_RENDER_ERRORS as exc:
             self._available = False
             logger.warning("image_renderer.unavailable", error=str(exc))
             await self.shutdown()
@@ -121,7 +132,7 @@ class ImageRenderer:
                 )
                 self.cleanup_rendered_images()
                 return output_path
-            except Exception as exc:
+            except _IMAGE_RENDER_ERRORS as exc:
                 last_error = exc
                 if attempt >= 1 or not self._should_retry_render(exc):
                     break
@@ -155,7 +166,7 @@ class ImageRenderer:
                     if not recovered:
                         break
                 return await self._render_to_pdf_once(str(content or ""))
-            except Exception as exc:
+            except _IMAGE_RENDER_ERRORS as exc:
                 last_error = exc
                 if attempt >= 1 or not self._should_retry_render(exc):
                     break

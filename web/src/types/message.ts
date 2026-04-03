@@ -3,8 +3,16 @@ export type MessageTag =
   | "heartbeat"
   | "email_scan"
   | "tool_status"
+  | "narration";
+
+export type MessageKind =
+  | "text"
+  | "tool_call"
+  | "error"
   | "narration"
-  | string;
+  | "system";
+
+export type MessageEventType = "tool_call_start" | "tool_call_result";
 
 export interface Attachment {
   type: "image" | "file" | "audio" | "video";
@@ -15,6 +23,7 @@ export interface Attachment {
 }
 
 export interface Message {
+  kind?: MessageKind;
   text?: string | null;
   image?: string | null;
   file?: string | null;
@@ -27,13 +36,13 @@ export interface Message {
   senderAvatar?: string;
   message_tag?: MessageTag;
   channel?: string;
-  event_type?: "tool_call_start" | "tool_call_result";
+  event_type?: MessageEventType;
   tool_name?: string;
   tool_call_id?: string;
   arguments?: Record<string, unknown>;
   status?: string;
   result?: unknown;
-  error_info?: string;
+  error_info?: string | null;
   metadata?: Record<string, unknown>;
   compressed_meta?: CompressedMeta;
 }
@@ -81,7 +90,7 @@ export interface ToolCallResultEvent {
   tool_call_id: string;
   status: string;
   result: unknown;
-  error_info: string;
+  error_info: string | null;
   metadata: Record<string, unknown>;
   session_id: string;
   compressed_meta?: CompressedMeta;

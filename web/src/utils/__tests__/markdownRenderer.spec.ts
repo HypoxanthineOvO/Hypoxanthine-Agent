@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { renderMarkdown } from "../markdownRenderer";
+import { renderMarkdown, renderMathIn } from "../markdownRenderer";
 
 describe("markdownRenderer", () => {
   it("renders gfm table", () => {
@@ -14,9 +14,18 @@ describe("markdownRenderer", () => {
     expect(html).toContain('type="checkbox"');
   });
 
-  it("renders katex", () => {
+  it("marks katex for lazy post-render", () => {
     const html = renderMarkdown("$x^2 + y^2 = z^2$");
-    expect(html).toContain("katex");
+    expect(html).toContain("data-katex-source");
+  });
+
+  it("renders katex placeholders after lazy load", async () => {
+    const container = document.createElement("div");
+    container.innerHTML = renderMarkdown("$x^2 + y^2 = z^2$");
+
+    await renderMathIn(container);
+
+    expect(container.innerHTML).toContain("katex");
   });
 
   it("keeps mermaid code block marker for post-render", () => {

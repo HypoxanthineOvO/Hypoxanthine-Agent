@@ -1,10 +1,35 @@
 import MarkdownIt from "markdown-it";
-import hljs from "highlight.js";
-import katexPlugin from "@traptitech/markdown-it-katex";
+import hljs from "highlight.js/lib/core";
+import bash from "highlight.js/lib/languages/bash";
+import css from "highlight.js/lib/languages/css";
+import javascript from "highlight.js/lib/languages/javascript";
+import json from "highlight.js/lib/languages/json";
+import markdownLang from "highlight.js/lib/languages/markdown";
+import python from "highlight.js/lib/languages/python";
+import sql from "highlight.js/lib/languages/sql";
+import typescript from "highlight.js/lib/languages/typescript";
 import taskListsPlugin from "markdown-it-task-lists";
+import xml from "highlight.js/lib/languages/xml";
+import yaml from "highlight.js/lib/languages/yaml";
 
-import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
+
+hljs.registerLanguage("bash", bash);
+hljs.registerLanguage("css", css);
+hljs.registerLanguage("html", xml);
+hljs.registerLanguage("javascript", javascript);
+hljs.registerLanguage("js", javascript);
+hljs.registerLanguage("json", json);
+hljs.registerLanguage("markdown", markdownLang);
+hljs.registerLanguage("md", markdownLang);
+hljs.registerLanguage("python", python);
+hljs.registerLanguage("py", python);
+hljs.registerLanguage("sql", sql);
+hljs.registerLanguage("typescript", typescript);
+hljs.registerLanguage("ts", typescript);
+hljs.registerLanguage("xml", xml);
+hljs.registerLanguage("yaml", yaml);
+hljs.registerLanguage("yml", yaml);
 
 function escapeHtml(raw: string): string {
   return raw
@@ -24,6 +49,85 @@ function renderCodeWithLineNumbers(codeHtml: string): string {
       return `<span class="code-line"><span class="line-number">${index + 1}</span><span class="line-text">${content}</span></span>`;
     })
     .join("");
+}
+
+function createMathPlaceholder(expression: string, displayMode: boolean): string {
+  return `<span class="katex-placeholder" data-katex-display="${displayMode ? "true" : "false"}" data-katex-source="${encodeURIComponent(expression)}">${escapeHtml(expression)}</span>`;
+}
+
+function mathPlugin(md: MarkdownIt): void {
+  md.inline.ruler.after("escape", "math_inline", (state, silent) => {
+    if (state.src[state.pos] !== "$" || state.src[state.pos + 1] === "$") {
+      return false;
+    }
+
+    let match = state.pos + 1;
+    while ((match = state.src.indexOf("$", match)) !== -1) {
+      if (state.src[match - 1] !== "\\") {
+        break;
+      }
+      match += 1;
+    }
+
+    if (match === -1 || match === state.pos + 1) {
+      return false;
+    }
+
+    if (!silent) {
+      const token = state.push("math_inline", "math", 0);
+      token.content = state.src.slice(state.pos + 1, match);
+    }
+    state.pos = match + 1;
+    return true;
+  });
+
+  md.block.ruler.after("blockquote", "math_block", (state, start, end, silent) => {
+    const startPos = (state.bMarks[start] ?? 0) + (state.tShift[start] ?? 0);
+    const maxPos = state.eMarks[start] ?? startPos;
+    if (state.src.slice(startPos, startPos + 2) !== "$$") {
+      return false;
+    }
+
+    let next = start;
+    let content = state.src.slice(startPos + 2, maxPos);
+
+    if (content.trimEnd().endsWith("$$")) {
+      content = content.replace(/\$\$\s*$/, "");
+      if (!silent) {
+        const token = state.push("math_block", "math", 0);
+        token.block = true;
+        token.content = content.trim();
+        token.map = [start, start + 1];
+      }
+      state.line = start + 1;
+      return true;
+    }
+
+    while (++next < end) {
+      const nextStart = (state.bMarks[next] ?? 0) + (state.tShift[next] ?? 0);
+      const nextMax = state.eMarks[next] ?? nextStart;
+      const line = state.src.slice(nextStart, nextMax);
+      if (line.trimEnd().endsWith("$$")) {
+        content += `\n${line.replace(/\$\$\s*$/, "")}`;
+        if (!silent) {
+          const token = state.push("math_block", "math", 0);
+          token.block = true;
+          token.content = content.trim();
+          token.map = [start, next + 1];
+        }
+        state.line = next + 1;
+        return true;
+      }
+      content += `\n${line}`;
+    }
+
+    return false;
+  });
+
+  md.renderer.rules.math_inline = (tokens, index) =>
+    createMathPlaceholder(tokens[index]?.content ?? "", false);
+  md.renderer.rules.math_block = (tokens, index) =>
+    `<div class="katex-block">${createMathPlaceholder(tokens[index]?.content ?? "", true)}</div>`;
 }
 
 const markdown: MarkdownIt = new MarkdownIt({
@@ -48,13 +152,14 @@ const markdown: MarkdownIt = new MarkdownIt({
   linkify: true,
 })
   .use(taskListsPlugin as unknown as (md: MarkdownIt) => void)
-  .use(katexPlugin as unknown as (md: MarkdownIt) => void);
+  .use(mathPlugin);
 
 export function renderMarkdown(source: string): string {
   return markdown.render(source);
 }
 
 let mermaidLoader: Promise<typeof import("mermaid")> | null = null;
+let katexLoader: Promise<typeof import("katex")> | null = null;
 
 async function loadMermaid(): Promise<typeof import("mermaid")> {
   if (mermaidLoader) {
@@ -69,6 +174,40 @@ async function loadMermaid(): Promise<typeof import("mermaid")> {
     securityLevel: "strict",
   });
   return mod;
+}
+
+async function loadKatex(): Promise<typeof import("katex")> {
+  if (!katexLoader) {
+    katexLoader = Promise.all([
+      import("katex"),
+      import("katex/dist/katex.min.css").catch(() => undefined),
+    ]).then(([mod]) => mod);
+  }
+  return katexLoader;
+}
+
+export async function renderMathIn(container: HTMLElement): Promise<void> {
+  const mathNodes = container.querySelectorAll<HTMLElement>("[data-katex-source]");
+  if (mathNodes.length === 0) {
+    return;
+  }
+
+  const katex = await loadKatex();
+  for (const node of mathNodes) {
+    const source = node.dataset.katexSource;
+    if (!source) {
+      continue;
+    }
+
+    try {
+      node.outerHTML = katex.renderToString(decodeURIComponent(source), {
+        displayMode: node.dataset.katexDisplay === "true",
+        throwOnError: false,
+      });
+    } catch {
+      node.textContent = decodeURIComponent(source);
+    }
+  }
 }
 
 export async function renderMermaidIn(container: HTMLElement): Promise<void> {
