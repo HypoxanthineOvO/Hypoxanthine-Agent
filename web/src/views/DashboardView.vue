@@ -23,6 +23,29 @@ import {
 
 import { apiGetJson, ApiClientError } from "../utils/apiClient";
 import ChannelStatusCard from "../components/dashboard/ChannelStatusCard.vue";
+import { useThemeMode } from "../composables/useThemeMode";
+import type {
+  ChannelCard,
+  ChannelCardMap,
+  ChannelsStatusResponse,
+  DashboardStatus,
+  EmailChannelStatus,
+  FeishuChannelStatus,
+  HeartbeatChannelStatus,
+  ModelLatencyStatsRow,
+  QQBotChannelStatus,
+  RecentIssueRow,
+  RecentLatencyRow,
+  RecentTaskRow,
+  SkillRow,
+  TokenStatsRow,
+  WeixinChannelStatus,
+} from "../types/dashboard";
+import {
+  formatFullTime,
+  formatRelativeTime,
+  formatShortTime,
+} from "../utils/timeFormat";
 
 use([
   CanvasRenderer,
@@ -47,138 +70,6 @@ const emit = defineEmits<{
   'open-session': [sessionId: string]
   'navigate': [view: "chat" | "dashboard" | "config" | "memory", sessionId?: string]
 }>();
-
-interface DashboardStatus {
-  uptime_seconds: number;
-  uptime_human: string;
-  session_count: number;
-  kill_switch: boolean;
-  bwrap_available: boolean;
-}
-
-interface TokenStatsRow {
-  date: string;
-  model: string;
-  total_tokens: number;
-}
-
-interface ModelLatencyStatsRow {
-  model: string;
-  p50_ms: number;
-  p95_ms: number;
-  p99_ms: number;
-}
-
-interface RecentLatencyRow {
-  model: string;
-  latency_ms: number;
-  timestamp: string;
-  session_id?: string;
-}
-
-interface RecentTaskRow {
-  id: number;
-  created_at: string;
-  tool_name: string;
-  status: string;
-  duration_ms: number | null;
-}
-
-interface SkillRow {
-  name: string;
-  status: "healthy" | "open" | "disabled";
-  tools: string[];
-}
-
-interface RecentIssueRow {
-  timestamp: string;
-  level: "error" | "warning";
-  message: string;
-  detail: string;
-  source: string;
-}
-
-interface WebUiChannelStatus {
-  status: string;
-  active_connections: number;
-  last_message_at: string | null;
-}
-
-interface QQBotChannelStatus {
-  status: string;
-  qq_bot_enabled?: boolean;
-  qq_bot_app_id?: string;
-  ws_connected?: boolean;
-  connected_at?: string | null;
-  last_message_at: string | null;
-  messages_received: number;
-  messages_sent: number;
-}
-
-interface QQNapcatChannelStatus {
-  status: string;
-  bot_qq: string;
-  napcat_ws_url: string;
-  connected_at?: string | null;
-  last_message_at: string | null;
-  messages_received: number;
-  messages_sent: number;
-  online?: boolean | null;
-  good?: boolean | null;
-}
-
-interface WeixinChannelStatus {
-  status: string;
-  bot_id: string;
-  user_id: string;
-  last_message_at: string | null;
-  messages_received: number;
-  messages_sent: number;
-}
-
-interface EmailChannelStatus {
-  status: string;
-  accounts: string[];
-  last_scan_at: string | null;
-  next_scan_at: string | null;
-  emails_processed: number;
-}
-
-interface HeartbeatChannelStatus {
-  status: string;
-  last_heartbeat_at: string | null;
-  active_tasks: number;
-}
-
-interface ChannelsStatusResponse {
-  channels: {
-    webui: WebUiChannelStatus;
-    qq_bot: QQBotChannelStatus;
-    qq_napcat?: QQNapcatChannelStatus;
-    weixin: WeixinChannelStatus;
-    email: EmailChannelStatus;
-    heartbeat: HeartbeatChannelStatus;
-  };
-}
-
-interface ChannelCard {
-  key: string;
-  icon: string;
-  name: string;
-  status: string;
-  statusLabel: string;
-  tagType: "success" | "warning" | "error" | "default";
-  details: string[];
-}
-
-interface ChannelCardMap {
-  webui: ChannelCard;
-  qqBot: ChannelCard;
-  qqNapcat: ChannelCard | null;
-  weixin: ChannelCard;
-  email: ChannelCard;
-  heartbeat: ChannelCard;
-}
 
 const normalizedApiBase = computed(() => {
   const explicitBase = props.apiBase.trim();
@@ -206,7 +97,6 @@ const skills = ref<SkillRow[]>([]);
 const channels = ref<ChannelsStatusResponse["channels"] | null>(null);
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let channelRefreshTimer: ReturnType<typeof setInterval> | null = null;
-let themeObserver: MutationObserver | null = null;
 const statsCardRef = ref<HTMLElement | null>(null);
 const issueFilter = ref<"all" | "error" | "warning">("all");
 const selectedIssue = ref<RecentIssueRow | null>(null);
@@ -222,15 +112,10 @@ const actionMessage = (() => {
   }
 })();
 
-const themeMode = ref<"light" | "dark">(
-  document.documentElement.dataset.theme === "dark" ? "dark" : "light",
+const { isDark } = useThemeMode();
+const isDarkMode = computed(
+  () => isDark.value || document.documentElement.dataset.theme === "dark",
 );
-
-const syncThemeMode = (): void => {
-  themeMode.value = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
-};
-
-const isDarkMode = computed(() => themeMode.value === "dark");
 const chartTheme = computed(() => (isDarkMode.value ? "dark" : undefined));
 const cssVar = (name: string, fallback: string): string =>
   getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
@@ -250,56 +135,6 @@ const normalizeDateKey = (raw: string): string => {
   const value = String(raw ?? "").trim();
   const match = value.match(/^(\d{4}-\d{2}-\d{2})/);
   return match?.[1] ?? value;
-};
-
-const formatRelativeTime = (raw: string | null | undefined): string => {
-  if (!raw) {
-    return "暂无";
-  }
-  const timestamp = new Date(raw).getTime();
-  if (Number.isNaN(timestamp)) {
-    return raw;
-  }
-  const diff = timestamp - Date.now();
-  const absDiff = Math.abs(diff);
-  if (absDiff < 60_000) {
-    return "刚刚";
-  }
-  const minutes = Math.round(absDiff / 60_000);
-  if (minutes < 60) {
-    return diff >= 0 ? `${minutes} 分钟后` : `${minutes} 分钟前`;
-  }
-  const hours = Math.round(absDiff / 3_600_000);
-  if (hours < 24) {
-    return diff >= 0 ? `${hours} 小时后` : `${hours} 小时前`;
-  }
-  const days = Math.round(absDiff / 86_400_000);
-  return diff >= 0 ? `${days} 天后` : `${days} 天前`;
-};
-
-const formatShortTime = (raw: string): string => {
-  const timestamp = new Date(raw);
-  if (Number.isNaN(timestamp.getTime())) {
-    return raw;
-  }
-  const month = String(timestamp.getMonth() + 1).padStart(2, "0");
-  const day = String(timestamp.getDate()).padStart(2, "0");
-  const hours = String(timestamp.getHours()).padStart(2, "0");
-  const minutes = String(timestamp.getMinutes()).padStart(2, "0");
-  return `${month}-${day} ${hours}:${minutes}`;
-};
-
-const formatFullTime = (raw: string): string => {
-  const timestamp = new Date(raw);
-  if (Number.isNaN(timestamp.getTime())) {
-    return raw;
-  }
-  const month = String(timestamp.getMonth() + 1).padStart(2, "0");
-  const day = String(timestamp.getDate()).padStart(2, "0");
-  const hours = String(timestamp.getHours()).padStart(2, "0");
-  const minutes = String(timestamp.getMinutes()).padStart(2, "0");
-  const seconds = String(timestamp.getSeconds()).padStart(2, "0");
-  return `${month}-${day} ${hours}:${minutes}:${seconds}`;
 };
 
 const issueFilterOptions = [
@@ -419,6 +254,15 @@ const defaultEmailStatus = (): EmailChannelStatus => ({
   emails_processed: 0,
 });
 
+const defaultFeishuStatus = (): FeishuChannelStatus => ({
+  status: "disabled",
+  app_id: "",
+  chat_count: 0,
+  last_message_at: null,
+  messages_received: 0,
+  messages_sent: 0,
+});
+
 const defaultHeartbeatStatus = (): HeartbeatChannelStatus => ({
   status: "disabled",
   last_heartbeat_at: null,
@@ -433,6 +277,7 @@ const channelCardMap = computed<ChannelCardMap>(() => {
       qqBot: createLoadingChannelCard("qq_bot", "🐧", "QQ Bot"),
       qqNapcat: null,
       weixin: createLoadingChannelCard("weixin", "💬", "微信"),
+      feishu: createLoadingChannelCard("feishu", "🪽", "飞书"),
       email: createLoadingChannelCard("email", "📧", "邮箱"),
       heartbeat: createLoadingChannelCard("heartbeat", "💓", "心跳"),
     };
@@ -440,6 +285,7 @@ const channelCardMap = computed<ChannelCardMap>(() => {
 
   const qqBot = payload.qq_bot ?? defaultQQBotStatus();
   const weixin = payload.weixin ?? defaultWeixinStatus();
+  const feishu = payload.feishu ?? defaultFeishuStatus();
   const email = payload.email ?? defaultEmailStatus();
   const heartbeat = payload.heartbeat ?? defaultHeartbeatStatus();
 
@@ -473,6 +319,12 @@ const channelCardMap = computed<ChannelCardMap>(() => {
       `目标用户 ${weixin.user_id || "未绑定"}`,
       `收 ${weixin.messages_received} / 发 ${weixin.messages_sent}`,
       `最后消息 ${formatRelativeTime(weixin.last_message_at)}`,
+    ]),
+    feishu: createChannelCard("feishu", "🪽", "飞书", feishu.status, [
+      `App ID ${feishu.app_id || "未配置"}`,
+      `活跃会话 ${feishu.chat_count}`,
+      `收 ${feishu.messages_received} / 发 ${feishu.messages_sent}`,
+      `最后消息 ${formatRelativeTime(feishu.last_message_at)}`,
     ]),
     email: createChannelCard("email", "📧", "邮箱", email.status, [
       email.accounts.join(", ") || "未配置邮箱账号",
@@ -777,14 +629,6 @@ const quickActions = computed(() => [
 ]);
 
 onMounted(() => {
-  syncThemeMode();
-  themeObserver = new MutationObserver(() => {
-    syncThemeMode();
-  });
-  themeObserver.observe(document.documentElement, {
-    attributes: true,
-    attributeFilter: ["data-theme"],
-  });
   void loadDashboard();
   void loadChannels();
   refreshTimer = setInterval(() => {
@@ -800,9 +644,6 @@ watch(issueFilter, () => {
 });
 
 onUnmounted(() => {
-  if (themeObserver) {
-    themeObserver.disconnect();
-  }
   if (refreshTimer !== null) {
     clearInterval(refreshTimer);
   }
@@ -886,6 +727,16 @@ onUnmounted(() => {
           :status-label="channelCardMap.weixin.statusLabel"
           :tag-type="channelCardMap.weixin.tagType"
           :details="channelCardMap.weixin.details"
+        />
+      </n-grid-item>
+
+      <n-grid-item>
+        <ChannelStatusCard
+          :title="channelCardMap.feishu.name"
+          :icon="channelCardMap.feishu.icon"
+          :status-label="channelCardMap.feishu.statusLabel"
+          :tag-type="channelCardMap.feishu.tagType"
+          :details="channelCardMap.feishu.details"
         />
       </n-grid-item>
 

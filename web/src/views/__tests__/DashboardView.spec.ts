@@ -62,6 +62,14 @@ describe("DashboardView", () => {
           messages_received: 12,
           messages_sent: 9,
         },
+        feishu: {
+          status: "connected",
+          app_id: "••••ishu",
+          chat_count: 2,
+          last_message_at: new Date().toISOString(),
+          messages_received: 5,
+          messages_sent: 4,
+        },
         email: {
           status: "enabled",
           accounts: ["hyx021203@shanghaitech.edu.cn"],
@@ -136,7 +144,7 @@ describe("DashboardView", () => {
       if (url.includes("/dashboard/skills?")) {
         return {
           ok: true,
-          json: async () => ({ data: [{ name: "tmux", status: "healthy", tools: ["run_command"] }] }),
+          json: async () => ({ data: [{ name: "exec", status: "healthy", tools: ["exec_command"] }] }),
         };
       }
       if (url.includes("/channels/status?")) {
@@ -195,12 +203,12 @@ describe("DashboardView", () => {
       ),
     ).toBe(true);
     expect(wrapper.text()).toContain("0:00:12");
-    expect(wrapper.text()).toContain("tmux");
+    expect(wrapper.text()).toContain("exec");
     expect(wrapper.text()).toContain("最近错误 / 告警");
     expect(wrapper.text()).toContain("快捷操作");
   });
 
-  it("renders channel status cards with qq, weixin and email details", async () => {
+  it("renders channel status cards with qq, weixin, feishu and email details", async () => {
     mockDashboardFetch(
       [{ date: "2026-03-06", model: "Gemini3Pro", total_tokens: 100 }],
       [{ date: "2026-03-06", p50_ms: 50, p95_ms: 80, p99_ms: 120 }],
@@ -226,11 +234,14 @@ describe("DashboardView", () => {
     expect(wrapper.text()).toContain("微信");
     expect(wrapper.text()).toContain("wx-bot-1");
     expect(wrapper.text()).toContain("收 12 / 发 9");
+    expect(wrapper.text()).toContain("飞书");
+    expect(wrapper.text()).toContain("••••ishu");
+    expect(wrapper.text()).toContain("活跃会话 2");
     expect(wrapper.text()).toContain("hyx021203@shanghaitech.edu.cn");
     expect(wrapper.text()).toContain("active tasks");
   });
 
-  it("renders WebUI, QQ and 微信 channel cards in the DOM", async () => {
+  it("renders WebUI, QQ, 微信 and 飞书 channel cards in the DOM", async () => {
     mockDashboardFetch(
       [{ date: "2026-03-06", model: "Gemini3Pro", total_tokens: 100 }],
       [{ date: "2026-03-06", p50_ms: 50, p95_ms: 80, p99_ms: 120 }],
@@ -251,6 +262,7 @@ describe("DashboardView", () => {
     expect(wrapper.text()).toContain("WebUI");
     expect(wrapper.text()).toContain("QQ Bot");
     expect(wrapper.text()).toContain("微信");
+    expect(wrapper.text()).toContain("飞书");
   });
 
   it("builds token chart with date xAxis and model-based series", async () => {

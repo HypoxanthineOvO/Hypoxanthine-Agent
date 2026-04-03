@@ -76,6 +76,56 @@ export function formatTimeSeparatorLabel(
   return formatClock(current);
 }
 
+export function formatRelativeTime(raw: string | null | undefined): string {
+  if (!raw) {
+    return "暂无";
+  }
+  const timestamp = new Date(raw).getTime();
+  if (Number.isNaN(timestamp)) {
+    return raw;
+  }
+  const diff = timestamp - Date.now();
+  const absDiff = Math.abs(diff);
+  if (absDiff < 60_000) {
+    return "刚刚";
+  }
+  const minutes = Math.round(absDiff / 60_000);
+  if (minutes < 60) {
+    return diff >= 0 ? `${minutes} 分钟后` : `${minutes} 分钟前`;
+  }
+  const hours = Math.round(absDiff / 3_600_000);
+  if (hours < 24) {
+    return diff >= 0 ? `${hours} 小时后` : `${hours} 小时前`;
+  }
+  const days = Math.round(absDiff / 86_400_000);
+  return diff >= 0 ? `${days} 天后` : `${days} 天前`;
+}
+
+export function formatShortTime(raw: string): string {
+  const timestamp = new Date(raw);
+  if (Number.isNaN(timestamp.getTime())) {
+    return raw;
+  }
+  const month = String(timestamp.getMonth() + 1).padStart(2, "0");
+  const day = String(timestamp.getDate()).padStart(2, "0");
+  const hours = String(timestamp.getHours()).padStart(2, "0");
+  const minutes = String(timestamp.getMinutes()).padStart(2, "0");
+  return `${month}-${day} ${hours}:${minutes}`;
+}
+
+export function formatFullTime(raw: string): string {
+  const timestamp = new Date(raw);
+  if (Number.isNaN(timestamp.getTime())) {
+    return raw;
+  }
+  const month = String(timestamp.getMonth() + 1).padStart(2, "0");
+  const day = String(timestamp.getDate()).padStart(2, "0");
+  const hours = String(timestamp.getHours()).padStart(2, "0");
+  const minutes = String(timestamp.getMinutes()).padStart(2, "0");
+  const seconds = String(timestamp.getSeconds()).padStart(2, "0");
+  return `${month}-${day} ${hours}:${minutes}:${seconds}`;
+}
+
 export function shouldInsertTimeSeparator(
   isoString: string | null | undefined,
   previousIsoString?: string,

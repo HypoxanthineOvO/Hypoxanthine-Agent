@@ -1,8 +1,46 @@
+import { fileURLToPath, URL } from "node:url";
+
 import vue from "@vitejs/plugin-vue";
 import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 
 export default defineConfig({
+  build: {
+    chunkSizeWarningLimit: 600,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules/echarts")) {
+            return "echarts";
+          }
+          if (id.includes("node_modules/zrender")) {
+            return "zrender";
+          }
+          if (id.includes("node_modules/vue-echarts")) {
+            return "vue-echarts";
+          }
+          if (id.includes("node_modules/naive-ui")) {
+            return "naive-ui";
+          }
+          if (id.includes("node_modules/vueuc")) {
+            return "vueuc";
+          }
+          if (id.includes("node_modules/vooks") || id.includes("node_modules/vdirs") || id.includes("node_modules/seemly") || id.includes("node_modules/css-render")) {
+            return "naive-ui-deps";
+          }
+          if (id.includes("node_modules/@monaco-editor")) {
+            return "monaco";
+          }
+          return undefined;
+        },
+      },
+    },
+  },
+  resolve: {
+    alias: {
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
+    },
+  },
   server: {
     host: "0.0.0.0",
     port: 5173,

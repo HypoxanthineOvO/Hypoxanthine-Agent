@@ -54,7 +54,8 @@ graph TD
     end
 
     subgraph Skills["Skill Modules"]
-        TmuxSkill["TmuxSkill<br>(libtmux)"]
+        ExecSkill["ExecSkill<br>(subprocess)"]
+        TmuxSkill["TmuxSkill<br>(optional persistent session)"]
         ReminderSkill["ReminderSkill"]
         FSSkill["FileSystemSkill<br>(Sandboxed)"]
         CodingBridge["CodingBridgeSkill<br>(Future)"]
@@ -214,7 +215,8 @@ class BaseSkill:
 
 | Skill | 职责 | 权限 |
 | --- | --- | --- |
-| **TmuxSkill** | 在 tmux 会话中执行命令，支持超时与输出截断保护 | `required_permissions=[]`（M5 暂不做 PM 校验） |
+| **ExecSkill** | 直接子进程执行一次性命令/脚本，支持硬超时与输出截断保护 | `required_permissions=[]` |
+| **TmuxSkill** | 管理持久 tmux 会话（`tmux_send` / `tmux_read`），仅用于长生命周期终端场景 | `required_permissions=[]` |
 | **CodeRunSkill** | 将 Python / shell 代码写入临时文件后执行，优先使用 bwrap 沙箱，缺失时 fallback 直执并告警 | `required_permissions=[]`（通过 PM 白名单生成 bwrap rw 绑定） |
 | **FileSystemSkill** | 智能文件读取/写入/目录列表 + 目录树索引（`directory_index.yaml`） | `required_permissions=["filesystem"]` |
 | **EmailScannerSkill（M9）** | 多账户 IMAP 扫描、三层分类、摘要、附件落盘、定时扫描入队 | `required_permissions=[]`（依赖白名单限制附件目录） |
@@ -386,11 +388,11 @@ name: coding_check
 description: "拉代码 → 跑测试 → 分析错误 → 报告"
 steps:
   - name: pull_code
-    skill: TmuxSkill
+    skill: ExecSkill
     command: "cd project_dir && git pull"
     on_error: abort
   - name: run_tests
-    skill: TmuxSkill
+    skill: ExecSkill
     command: "cd project_dir && pytest"
     on_error: continue
   - name: analyze

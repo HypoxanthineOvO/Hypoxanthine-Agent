@@ -7,14 +7,15 @@ import {
   NNotificationProvider,
 } from "naive-ui";
 import type { GlobalThemeOverrides } from "naive-ui";
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from "vue";
 
 import SideNav from "./components/layout/SideNav.vue";
 import { useThemeMode } from "./composables/useThemeMode";
-import ChatView from "./views/ChatView.vue";
-import ConfigView from "./views/ConfigView.vue";
-import DashboardView from "./views/DashboardView.vue";
-import MemoryView from "./views/MemoryView.vue";
+
+const ChatView = defineAsyncComponent(() => import("./views/ChatView.vue"));
+const DashboardView = defineAsyncComponent(() => import("./views/DashboardView.vue"));
+const ConfigView = defineAsyncComponent(() => import("./views/ConfigView.vue"));
+const MemoryView = defineAsyncComponent(() => import("./views/MemoryView.vue"));
 
 const fallbackWsUrl = (() => {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -70,10 +71,6 @@ const toggleSidebar = (): void => {
     return;
   }
   sidebarCollapsed.value = !sidebarCollapsed.value;
-};
-
-const onThemeToggleEvent = (): void => {
-  toggleMode();
 };
 
 const onSidebarCollapseEvent = (): void => {
@@ -236,13 +233,11 @@ watch(showSideNav, (visible) => {
 
 onMounted(() => {
   window.addEventListener("resize", updateViewportWidth);
-  window.addEventListener("hypo:theme-toggle", onThemeToggleEvent);
   window.addEventListener("hypo:sidebar-collapse", onSidebarCollapseEvent);
 });
 
 onUnmounted(() => {
   window.removeEventListener("resize", updateViewportWidth);
-  window.removeEventListener("hypo:theme-toggle", onThemeToggleEvent);
   window.removeEventListener("hypo:sidebar-collapse", onSidebarCollapseEvent);
 });
 </script>

@@ -71,6 +71,38 @@ describe("ChatView", () => {
     expect(wrapper.text()).toContain("old");
   });
 
+  it("renders feishu source as badge instead of legacy text prefix in restored history", async () => {
+    const fetchMock = vi.fn();
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          { text: "[飞书] 同步一下", sender: "user", session_id: "main", channel: "feishu" },
+        ],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [],
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(ChatView, {
+      props: {
+        wsUrl: "ws://localhost:8000/ws",
+        token: "test-token",
+        apiBase: "http://localhost:8000/api",
+      },
+    });
+
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    expect(wrapper.text()).toContain("📨 飞书");
+    expect(wrapper.text()).toContain("同步一下");
+    expect(wrapper.text()).not.toContain("[飞书] 同步一下");
+  });
+
   it("uses explicit session id prop for debug loading", async () => {
     const fetchMock = vi.fn();
     fetchMock
@@ -171,8 +203,8 @@ describe("ChatView", () => {
           {
             id: 42,
             session_id: "main",
-            tool_name: "run_command",
-            skill_name: "tmux",
+            tool_name: "exec_command",
+            skill_name: "exec",
             params_json: "{\"command\":\"echo hi\"}",
             status: "success",
             result_summary: "{\"stdout\":\"ok\"}",
@@ -230,8 +262,8 @@ describe("ChatView", () => {
           {
             id: 42,
             session_id: "main",
-            tool_name: "run_command",
-            skill_name: "tmux",
+            tool_name: "exec_command",
+            skill_name: "exec",
             params_json: "{\"command\":\"echo hi\"}",
             status: "success",
             result_summary: "{\"stdout\":\"ok\"}",
@@ -256,7 +288,7 @@ describe("ChatView", () => {
     await flushUi();
     await flushUi();
 
-    expect(wrapper.text()).not.toContain("🔧 执行了 run_command");
+    expect(wrapper.text()).not.toContain("🔧 执行了 exec_command");
     expect(wrapper.text()).toContain("Hi，我是 Hypo-Agent");
   });
 

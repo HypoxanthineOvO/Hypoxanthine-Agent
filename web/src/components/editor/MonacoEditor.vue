@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from "vue";
+import type { Monaco } from "@monaco-editor/loader";
+
+import { useThemeMode } from "@/composables/useThemeMode";
 
 const props = withDefaults(
   defineProps<{
@@ -21,21 +24,48 @@ const emit = defineEmits<{
 
 const container = ref<HTMLElement | null>(null);
 const fallback = ref(false);
-let editor: any = null;
+const isMounted = ref(false);
+const { isDark } = useThemeMode();
+let editorInstance: Monaco["editor"]["IStandaloneCodeEditor"] | null = null;
+let contentListener: Monaco["IDisposable"] | null = null;
+let monacoApi: Monaco | null = null;
 
 watch(
   () => props.modelValue,
   (nextValue) => {
-    if (!editor) {
+    if (!editorInstance) {
       return;
     }
-    if (editor.getValue() !== nextValue) {
-      editor.setValue(nextValue);
+    if (editorInstance.getValue() !== nextValue) {
+      editorInstance.setValue(nextValue);
     }
   },
 );
 
+watch(
+  () => props.language,
+  (nextLanguage) => {
+    const model = editorInstance?.getModel();
+    if (!model || !monacoApi) {
+      return;
+    }
+    monacoApi.editor.setModelLanguage(model, nextLanguage);
+  },
+);
+
+watch(
+  () => props.readonly,
+  (readonly) => {
+    editorInstance?.updateOptions({ readOnly: readonly });
+  },
+);
+
+watch(isDark, (dark) => {
+  monacoApi?.editor.setTheme(dark ? "vs-dark" : "vs");
+});
+
 onMounted(async () => {
+  isMounted.value = true;
   if (!container.value) {
     fallback.value = true;
     return;
@@ -43,7 +73,12 @@ onMounted(async () => {
   try {
     const monacoLoader = await import("@monaco-editor/loader");
     const monaco = await monacoLoader.default.init();
-    editor = monaco.editor.create(container.value, {
+    if (!isMounted.value || !container.value) {
+      return;
+    }
+    monacoApi = monaco;
+    monaco.editor.setTheme(isDark.value ? "vs-dark" : "vs");
+    editorInstance = monaco.editor.create(container.value, {
       value: props.modelValue,
       language: props.language,
       minimap: { enabled: false },
@@ -51,9 +86,10 @@ onMounted(async () => {
       readOnly: props.readonly,
       fontSize: 13,
       scrollBeyondLastLine: false,
+      theme: isDark.value ? "vs-dark" : "vs",
     });
-    editor?.onDidChangeModelContent(() => {
-      emit("update:modelValue", editor?.getValue() ?? "");
+    contentListener = editorInstance.onDidChangeModelContent(() => {
+      emit("update:modelValue", editorInstance?.getValue() ?? "");
     });
   } catch {
     fallback.value = true;
@@ -61,8 +97,12 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  editor?.dispose();
-  editor = null;
+  isMounted.value = false;
+  contentListener?.dispose();
+  contentListener = null;
+  editorInstance?.dispose();
+  editorInstance = null;
+  monacoApi = null;
 });
 </script>
 

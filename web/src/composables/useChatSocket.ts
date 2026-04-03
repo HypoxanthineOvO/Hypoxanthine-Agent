@@ -13,6 +13,7 @@ import type {
   ToolCallStartEvent,
   WsErrorEvent,
 } from "../types/message";
+import { stripLegacySourcePrefix } from "../utils/messageRouting";
 
 interface UseChatSocketOptions {
   url: string;
@@ -157,10 +158,12 @@ export function useChatSocket(options: UseChatSocketOptions) {
           }
           lastError.value = payload;
           messages.value.push({
+            kind: "error",
             sender: "assistant",
             session_id: payload.session_id,
             timestamp: new Date().toISOString(),
             text: payload.message,
+            error_info: payload.message,
             metadata: {
               error_card: true,
               retryable: payload.retryable,
@@ -177,6 +180,7 @@ export function useChatSocket(options: UseChatSocketOptions) {
             return;
           }
           messages.value.push({
+            kind: "narration",
             text: payload.text,
             sender: "assistant",
             session_id: payload.session_id,
@@ -206,6 +210,7 @@ export function useChatSocket(options: UseChatSocketOptions) {
 
           if (!isExistingStreamSlot) {
             messages.value.push({
+              kind: "text",
               text: chunkText,
               sender: "assistant",
               session_id: payload.session_id,
@@ -254,6 +259,7 @@ export function useChatSocket(options: UseChatSocketOptions) {
             return;
           }
           messages.value.push({
+            kind: "tool_call",
             sender: "assistant",
             session_id: payload.session_id,
             event_type: "tool_call_start",
@@ -269,6 +275,7 @@ export function useChatSocket(options: UseChatSocketOptions) {
             return;
           }
           messages.value.push({
+            kind: "tool_call",
             sender: "assistant",
             session_id: payload.session_id,
             event_type: "tool_call_result",
@@ -290,7 +297,19 @@ export function useChatSocket(options: UseChatSocketOptions) {
         if (payload.session_id !== options.sessionId.value) {
           return;
         }
-        messages.value.push(payload);
+        messages.value.push({
+          ...stripLegacySourcePrefix(payload),
+          kind:
+            payload.kind ??
+            (payload.metadata?.error_card === true
+              ? "error"
+              : payload.message_tag === "narration"
+                ? "narration"
+                : payload.event_type
+                  ? "tool_call"
+                  : "text"),
+          error_info: payload.error_info ?? null,
+        });
       } catch {
         status.value = "error";
       }
@@ -326,6 +345,7 @@ export function useChatSocket(options: UseChatSocketOptions) {
     }
 
     const message: Message = {
+      kind: "text",
       text: trimmed || null,
       attachments: normalizedAttachments,
       sender: "user",
@@ -347,7 +367,7 @@ export function useChatSocket(options: UseChatSocketOptions) {
   const sendText = (text: string): boolean => sendMessage(text);
 
   const replaceMessages = (nextMessages: Message[]): void => {
-    messages.value = nextMessages.map((item) => ({ ...item }));
+    messages.value = nextMessages.map((item) => stripLegacySourcePrefix({ ...item }));
     streamingAssistantIndex = null;
   };
 

@@ -198,6 +198,33 @@ describe("useChatSocket", () => {
     expect(socket.messages.value[1]?.message_tag).toBe("email_scan");
   });
 
+  it("strips legacy source prefixes from proactive channel messages", () => {
+    const socket = useChatSocket({
+      url: "ws://localhost:8000/ws",
+      token: "abc123",
+      sessionId: ref("main"),
+    });
+    socket.connect();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+    ws.emitMessage(
+      JSON.stringify({
+        text: "[飞书] 同步一下",
+        sender: "user",
+        session_id: "main",
+        channel: "feishu",
+      }),
+    );
+
+    expect(socket.messages.value).toHaveLength(1);
+    expect(socket.messages.value[0]?.text).toBe("同步一下");
+    expect(socket.messages.value[0]?.channel).toBe("feishu");
+  });
+
   it("converts narration events into ephemeral chat messages", () => {
     const socket = useChatSocket({
       url: "ws://localhost:8000/ws",
@@ -225,6 +252,120 @@ describe("useChatSocket", () => {
     expect(socket.messages.value[0]?.message_tag).toBe("narration");
     expect(socket.messages.value[0]?.metadata?.ephemeral).toBe(true);
     expect(socket.messages.value[0]?.timestamp).toBe("2026-03-13T10:00:00+08:00");
+  });
+
+  it("stores tool call start and result events for the active session", () => {
+    const socket = useChatSocket({
+      url: "ws://localhost:8000/ws",
+      token: "abc123",
+      sessionId: ref("main"),
+    });
+    socket.connect();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+    ws.emitMessage(
+      JSON.stringify({
+        type: "tool_call_start",
+        tool_name: "exec_command",
+        tool_call_id: "call-1",
+        arguments: { command: "echo hi" },
+        session_id: "main",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "tool_call_result",
+        tool_name: "exec_command",
+        tool_call_id: "call-1",
+        status: "success",
+        result: { stdout: "hi" },
+        error_info: null,
+        metadata: { ephemeral: true },
+        session_id: "main",
+      }),
+    );
+
+    expect(socket.messages.value).toHaveLength(2);
+    expect(socket.messages.value[0]?.event_type).toBe("tool_call_start");
+    expect(socket.messages.value[0]?.tool_name).toBe("exec_command");
+    expect(socket.messages.value[1]?.event_type).toBe("tool_call_result");
+    expect(socket.messages.value[1]?.error_info).toBeNull();
+    expect(socket.messages.value[1]?.metadata?.ephemeral).toBe(true);
+  });
+
+  it("converts ws error events into retryable error cards for the active session only", () => {
+    const socket = useChatSocket({
+      url: "ws://localhost:8000/ws",
+      token: "abc123",
+      sessionId: ref("main"),
+    });
+    socket.connect();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+    ws.emitMessage(
+      JSON.stringify({
+        type: "error",
+        code: "LLM_TIMEOUT",
+        message: "LLM 调用超时，请稍后重试",
+        retryable: true,
+        session_id: "main",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "error",
+        code: "IGNORED",
+        message: "other session",
+        retryable: false,
+        session_id: "other-session",
+      }),
+    );
+
+    expect(socket.lastError.value?.code).toBe("LLM_TIMEOUT");
+    expect(socket.messages.value).toHaveLength(1);
+    expect(socket.messages.value[0]?.metadata?.error_card).toBe(true);
+    expect(socket.messages.value[0]?.metadata?.retryable).toBe(true);
+  });
+
+  it("ignores tool and plain message events from other sessions", () => {
+    const socket = useChatSocket({
+      url: "ws://localhost:8000/ws",
+      token: "abc123",
+      sessionId: ref("main"),
+    });
+    socket.connect();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+    ws.emitMessage(
+      JSON.stringify({
+        type: "tool_call_start",
+        tool_name: "exec_command",
+        tool_call_id: "call-x",
+        arguments: { command: "pwd" },
+        session_id: "other-session",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        text: "cross-session",
+        sender: "assistant",
+        session_id: "other-session",
+      }),
+    );
+
+    expect(socket.messages.value).toHaveLength(0);
   });
 
   it("schedules reconnect with exponential backoff after unexpected close", () => {
