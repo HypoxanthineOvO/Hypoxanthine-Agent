@@ -8,13 +8,13 @@ _LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*(?!\*)")
 _ITALIC_RE = re.compile(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)")
 _STRIKE_RE = re.compile(r"~~(.+?)~~")
-_ORDERED_LIST_RE = re.compile(r"^\s*\d+\.\s+")
-_UNORDERED_LIST_RE = re.compile(r"^(\s*)[-*]\s+")
+_ORDERED_LIST_RE = re.compile(r"^(?P<indent>\s*)(?P<number>\d+)[.)]\s+")
+_UNORDERED_LIST_RE = re.compile(r"^(\s*)[-*+]\s+")
 _DIVIDER_RE = re.compile(r"^\s*---+\s*$")
 _QUOTE_RE = re.compile(r"^\s*>\s?(.*)$")
 
 
-def render_markdown_plaintext(markdown_text: str) -> str:
+def markdown_to_plaintext(markdown_text: str) -> str:
     if not markdown_text:
         return ""
 
@@ -53,13 +53,24 @@ def render_markdown_plaintext(markdown_text: str) -> str:
             rendered_lines.append(f"「{quote_text}」")
             continue
 
-        if _UNORDERED_LIST_RE.match(line) and not _ORDERED_LIST_RE.match(line):
+        ordered_match = _ORDERED_LIST_RE.match(line)
+        if ordered_match:
+            line = _ORDERED_LIST_RE.sub(
+                lambda m: f"{m.group('indent')}{m.group('number')}. ",
+                line,
+                count=1,
+            )
+        elif _UNORDERED_LIST_RE.match(line):
             line = _UNORDERED_LIST_RE.sub(lambda m: f"{m.group(1)}• ", line, count=1)
 
         rendered_lines.append(_render_inline_text(line))
 
     restored = "\n".join(rendered_lines)
     return _restore_inline_code(restored, placeholders).strip()
+
+
+def render_markdown_plaintext(markdown_text: str) -> str:
+    return markdown_to_plaintext(markdown_text)
 
 
 def downgrade_markdown_table(content: str) -> str:

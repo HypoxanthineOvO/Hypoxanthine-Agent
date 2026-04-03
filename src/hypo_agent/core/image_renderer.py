@@ -8,6 +8,7 @@ from uuid import uuid4
 import structlog
 
 from hypo_agent.core.config_loader import get_memory_dir
+from hypo_agent.core.markdown_plaintext import downgrade_markdown_table, markdown_to_plaintext
 from hypo_agent.exceptions import SkillError
 
 try:
@@ -219,7 +220,14 @@ class ImageRenderer:
             "markdown": "Markdown 内容",
         }
         label = labels.get(block_type, "内容")
-        body = str(content or "").strip() or "[空内容]"
+        raw_body = str(content or "").strip()
+        if block_type == "markdown":
+            body = markdown_to_plaintext(raw_body)
+        elif block_type == "table":
+            body = downgrade_markdown_table(raw_body)
+        else:
+            body = raw_body
+        body = body.strip() or "[空内容]"
         return f"[{label}渲染失败，原始内容如下]\n{body}"
 
     async def _prepare_page(self) -> Any:

@@ -6,7 +6,7 @@ from typing import Any
 from hypo_agent.core.image_renderer import ImageRenderError
 from hypo_agent.core.markdown_plaintext import (
     downgrade_markdown_table,
-    render_markdown_plaintext,
+    markdown_to_plaintext,
 )
 from hypo_agent.core.unified_message import (
     CodeBlock,
@@ -33,7 +33,7 @@ class WeixinRenderer:
 
         for block in unified.blocks:
             if isinstance(block, TextBlock):
-                text = render_markdown_plaintext(block.text)
+                text = markdown_to_plaintext(block.text)
                 if pending_emoji and text.strip():
                     text = f"{pending_emoji} {text}"
                     pending_emoji = ""
@@ -95,7 +95,7 @@ class WeixinRenderer:
         parts: list[str] = []
         for block in unified.blocks:
             if isinstance(block, TextBlock):
-                rendered = render_markdown_plaintext(block.text).replace("`", "")
+                rendered = markdown_to_plaintext(block.text).replace("`", "")
                 if rendered:
                     parts.append(rendered)
                 continue

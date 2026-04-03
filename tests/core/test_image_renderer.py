@@ -164,6 +164,17 @@ def test_render_to_image_raises_fallback_text_when_retry_fails(tmp_path: Path, m
     assert "[表格渲染失败，原始内容如下]" in exc_info.value.fallback_text
 
 
+def test_build_fallback_text_downgrades_markdown_plaintext(tmp_path: Path) -> None:
+    renderer = ImageRenderer(memory_dir=tmp_path / "memory")
+
+    fallback = renderer.build_fallback_text(
+        "## 总结\n- 项目\n1. 步骤\n**提醒** `喝水`",
+        block_type="markdown",
+    )
+
+    assert fallback == "[Markdown 内容渲染失败，原始内容如下]\n『总结』\n• 项目\n1. 步骤\n【提醒】 喝水"
+
+
 def test_render_code_block(tmp_path: Path) -> None:
     output_path = _run_renderer(
         tmp_path,
