@@ -144,14 +144,18 @@ class ExecSkill(BaseSkill):
             deny_reason="",
         )
 
-        process = await asyncio.create_subprocess_shell(
-            command,
-            stdout=PIPE,
-            stderr=PIPE,
-            cwd=str(workdir),
-            env=os.environ.copy(),
-        )
-        result = await self._collect_process_result(process=process, timeout=timeout)
+        process: asyncio.subprocess.Process | None = None
+        try:
+            process = await asyncio.create_subprocess_shell(
+                command,
+                stdout=PIPE,
+                stderr=PIPE,
+                cwd=str(workdir),
+                env=os.environ.copy(),
+            )
+            result = await self._collect_process_result(process=process, timeout=timeout)
+        finally:
+            await self._ensure_process_reaped(process)
         return self._to_skill_output(
             result=result,
             metadata={
@@ -350,3 +354,12 @@ class ExecSkill(BaseSkill):
             path.unlink(missing_ok=True)
         except OSError:
             logger.warning("exec.script.cleanup_failed", path=str(path))
+
+    async def _ensure_process_reaped(self, process: asyncio.subprocess.Process | None) -> None:
+        if process is None or process.returncode is not None:
+            return
+        process.kill()
+        try:
+            await process.communicate()
+        except Exception:
+            logger.warning("exec.process.cleanup_failed", exc_info=True)

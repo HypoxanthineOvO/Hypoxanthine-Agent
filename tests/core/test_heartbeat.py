@@ -434,6 +434,49 @@ def test_heartbeat_status_reports_running_when_scheduler_has_active_jobs() -> No
     assert status["active_tasks"] == 2
 
 
+def test_heartbeat_tracks_consecutive_failures_and_last_success(tmp_path: Path) -> None:
+    async def _run() -> None:
+        prompt_path = tmp_path / "heartbeat_prompt.md"
+        prompt_path.write_text("ok", encoding="utf-8")
+        service = HeartbeatService(
+            message_queue=AutoRespondingQueue([]),
+            scheduler=StubScheduler(running=True),
+            default_session_id="main",
+            prompt_path=prompt_path,
+        )
+
+        async def fake_wait_for(awaitable, timeout):
+            del awaitable, timeout
+            raise TimeoutError
+
+        original_wait_for = heartbeat_module.asyncio.wait_for
+        heartbeat_module.asyncio.wait_for = fake_wait_for
+        try:
+            result = await service.run()
+        finally:
+            heartbeat_module.asyncio.wait_for = original_wait_for
+
+        assert result["error"] == "timeout"
+        assert service.consecutive_failures == 1
+        assert service.last_success_at is None
+
+        queue = AutoRespondingQueue(
+            [
+                {"type": "assistant_chunk", "text": SILENT_SENTINEL},
+                {"type": "assistant_done"},
+            ]
+        )
+        service.message_queue = queue
+
+        result = await service.run()
+
+        assert result["summary"] == SILENT_SENTINEL
+        assert service.consecutive_failures == 0
+        assert service.last_success_at is not None
+
+    asyncio.run(_run())
+
+
 def test_heartbeat_logs_start_and_push_on_success(tmp_path: Path, monkeypatch) -> None:
     async def _run() -> None:
         prompt_path = tmp_path / "heartbeat_prompt.md"

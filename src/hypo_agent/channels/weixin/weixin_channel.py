@@ -33,6 +33,7 @@ class WeixinChannel:
         inbound_callback_getter: Callable[[], Any | None] | None = None,
         sleep_func=asyncio.sleep,
         uploads_dir: Path | str | None = None,
+        max_reconnect_retries: int | None = 10,
     ) -> None:
         self.config = (
             config
@@ -50,6 +51,9 @@ class WeixinChannel:
         self._get_inbound_callback = inbound_callback_getter or (lambda: None)
         self._sleep = sleep_func
         self.uploads_dir = get_uploads_dir(uploads_dir)
+        self.max_reconnect_retries = (
+            None if max_reconnect_retries is None else max(1, int(max_reconnect_retries))
+        )
         self.client: ILinkClient | None = None
         self._task: asyncio.Task[None] | None = None
         self._running = False
@@ -112,6 +116,14 @@ class WeixinChannel:
                 self._running = False
                 break
             except _WEIXIN_CHANNEL_ERRORS as exc:
+                if self.max_reconnect_retries is not None and retry_count >= self.max_reconnect_retries:
+                    logger.error(
+                        "weixin.channel.reconnect_exhausted",
+                        retries=retry_count,
+                        error=str(exc),
+                    )
+                    self._running = False
+                    break
                 delay = backoff[min(retry_count, len(backoff) - 1)]
                 logger.warning(
                     "weixin.channel.poll_error",

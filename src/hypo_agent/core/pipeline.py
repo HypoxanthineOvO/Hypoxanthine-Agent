@@ -263,12 +263,15 @@ class ChatPipeline:
         self.skill_catalog = skill_catalog
         self._event_consumer_task: asyncio.Task[None] | None = None
         self._pending_sop_usage: set[str] = set()
+        self._last_activity_at = utc_isoformat(utc_now())
+        self._last_activity_monotonic = perf_counter()
 
     async def start_event_consumer(self) -> None:
         if self.event_queue is None:
             return
         if self._event_consumer_task is not None and not self._event_consumer_task.done():
             return
+        self._mark_activity(reason="event_consumer_start")
         self._event_consumer_task = asyncio.create_task(self._consume_event_loop())
 
     async def stop_event_consumer(self) -> None:
@@ -276,6 +279,7 @@ class ChatPipeline:
         if task is None:
             return
         self._event_consumer_task = None
+        self._mark_activity(reason="event_consumer_stop")
         task.cancel()
         try:
             await task
@@ -1539,6 +1543,7 @@ class ChatPipeline:
         response: RichResponse,
         session_id: str,
     ) -> dict[str, Any]:
+        self._mark_activity(reason=event_type, session_id=session_id)
         formatted = self.channel_adapter.format(
             response,
             event_type=event_type,
@@ -1547,6 +1552,17 @@ class ChatPipeline:
         if inspect.isawaitable(formatted):
             formatted = await formatted
         return dict(formatted)
+
+    def get_last_activity_at(self) -> str:
+        return self._last_activity_at
+
+    def last_activity_age_seconds(self) -> float:
+        return max(0.0, perf_counter() - self._last_activity_monotonic)
+
+    def _mark_activity(self, *, reason: str, session_id: str | None = None) -> None:
+        del reason, session_id
+        self._last_activity_monotonic = perf_counter()
+        self._last_activity_at = utc_isoformat(utc_now())
 
     async def _persist_tool_invocation_compressed_meta(
         self,
@@ -1744,6 +1760,7 @@ class ChatPipeline:
         while True:
             event: dict[str, Any] = await self.event_queue.get()
             try:
+                self._mark_activity(reason="event_queue_message")
                 logger.info(
                     "event_consumer.processing",
                     event_type=event.get("event_type"),
@@ -1812,6 +1829,23 @@ class ChatPipeline:
             if inspect.isawaitable(emit_result):
                 await emit_result
         except RuntimeError as exc:
+            logger.warning(
+                "pipeline.error_converted",
+                session_id=inbound.session_id,
+                converted_type="LLM_RUNTIME_ERROR",
+                **_error_fields(exc),
+            )
+            error_payload = {
+                "type": "error",
+                "code": "LLM_RUNTIME_ERROR",
+                "message": "LLM 调用失败，请检查配置或稍后重试",
+                "retryable": True,
+                "session_id": inbound.session_id,
+            }
+            emit_result = emitter(error_payload)
+            if inspect.isawaitable(emit_result):
+                await emit_result
+        except Exception as exc:
             logger.warning(
                 "pipeline.error_converted",
                 session_id=inbound.session_id,

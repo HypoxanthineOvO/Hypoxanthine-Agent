@@ -243,6 +243,34 @@ def test_weixin_channel_retries_after_poll_error_with_backoff() -> None:
     asyncio.run(_run())
 
 
+def test_weixin_channel_stops_after_reconnect_retries_exhausted() -> None:
+    async def _run() -> None:
+        queue = QueueStub()
+        client = FakeClient(updates=[RuntimeError("boom"), RuntimeError("boom-again")])
+        sleep_calls: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+
+        channel = WeixinChannel(
+            config={"token_path": "memory/weixin_auth.json", "allowed_users": []},
+            message_queue=queue,
+            build_message=Message,
+            client_factory=lambda: client,
+            sleep_func=fake_sleep,
+            max_reconnect_retries=1,
+        )
+
+        await channel.start()
+        await asyncio.sleep(0.05)
+        await channel.stop()
+
+        assert sleep_calls == [1.0]
+        assert channel._running is False
+
+    asyncio.run(_run())
+
+
 def test_weixin_channel_stop_closes_client_and_cancels_task() -> None:
     async def _run() -> None:
         queue = QueueStub()

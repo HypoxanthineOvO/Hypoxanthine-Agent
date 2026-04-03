@@ -28,6 +28,7 @@ from hypo_agent.channels.probe import ProbeServer, router as probe_ws_router
 from hypo_agent.channels.qq_bot_channel import QQBotChannelService
 from hypo_agent.channels.qq_channel import QQChannelService
 from hypo_agent.channels.weixin import WeixinAdapter, WeixinChannel
+from hypo_agent.core.agent_watchdog import AgentWatchdog
 from hypo_agent.core.config_loader import (
     load_persona_config,
     load_secrets_config,
@@ -980,11 +981,19 @@ def create_app(
         await start_feishu_channel()
         await start_weixin_channel()
         await restart_qq_ws_client()
+        app.state.agent_watchdog = AgentWatchdog(
+            pipeline=app.state.pipeline,
+            heartbeat_service=resolved_deps.heartbeat_service,
+        )
+        await app.state.agent_watchdog.start()
         app.state.directory_index_task = asyncio.create_task(run_directory_index_refresh())
         app.state.email_cache_warmup_task = asyncio.create_task(run_email_cache_warmup())
         try:
             yield
         finally:
+            agent_watchdog = getattr(app.state, "agent_watchdog", None)
+            if agent_watchdog is not None:
+                await agent_watchdog.stop()
             email_cache_warmup_task = getattr(app.state, "email_cache_warmup_task", None)
             if email_cache_warmup_task is not None:
                 if not email_cache_warmup_task.done():
@@ -1055,6 +1064,7 @@ def create_app(
     app.state.event_queue = resolved_deps.event_queue
     app.state.scheduler = resolved_deps.scheduler
     app.state.heartbeat_service = resolved_deps.heartbeat_service
+    app.state.agent_watchdog = None
     app.state.memory_gc = resolved_deps.memory_gc
     app.state.coder_client = resolved_deps.coder_client
     app.state.coder_webhook_secret = resolved_deps.coder_webhook_secret or ""

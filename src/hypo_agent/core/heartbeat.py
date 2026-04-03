@@ -48,6 +48,8 @@ class HeartbeatService:
         self.prompt_path = Path(prompt_path)
         self.timeout_seconds = max(5, int(timeout_seconds))
         self.last_heartbeat_at: str | None = None
+        self.last_success_at: str | None = None
+        self.consecutive_failures = 0
         self._prompt_missing_reported = False
         self._run_lock = asyncio.Lock()
         self._event_sources: dict[str, Any] = {}
@@ -106,12 +108,14 @@ class HeartbeatService:
             if not self._prompt_missing_reported:
                 self._prompt_missing_reported = True
                 await self._push_summary(summary)
+                self._mark_failure()
                 return {
                     "should_push": True,
                     "summary": summary,
                     "error": "prompt_missing",
                     "event_sources": {},
                 }
+            self._mark_failure()
             return {
                 "should_push": False,
                 "summary": SILENT_SENTINEL,
@@ -182,6 +186,7 @@ class HeartbeatService:
             summary = "Heartbeat 检查超时（可能是模型/工具调用异常）。请查看日志或稍后重试。"
             await self._push_summary(summary)
             self.last_heartbeat_at = datetime.now(UTC).isoformat()
+            self._mark_failure()
             logger.error(
                 "heartbeat.timeout",
                 session_id=self.default_session_id,
@@ -203,6 +208,7 @@ class HeartbeatService:
             error_message = str(error_payload.get("message") or "").strip() or "unknown error"
             summary = f"Heartbeat 执行失败：{error_message}"
             await self._push_summary(summary)
+            self._mark_failure()
             logger.error(
                 "heartbeat.failed",
                 session_id=self.default_session_id,
@@ -218,6 +224,7 @@ class HeartbeatService:
 
         normalized = assistant_text.strip()
         if normalized == SILENT_SENTINEL:
+            self._mark_success()
             logger.info(
                 "heartbeat.silent",
                 session_id=self.default_session_id,
@@ -230,6 +237,7 @@ class HeartbeatService:
             }
 
         if not normalized:
+            self._mark_success()
             logger.info(
                 "heartbeat.empty_reply",
                 session_id=self.default_session_id,
@@ -241,6 +249,7 @@ class HeartbeatService:
                 "event_sources": event_source_statuses,
             }
 
+        self._mark_success()
         await self._push_summary(normalized)
         logger.info(
             "heartbeat.push",
@@ -288,8 +297,17 @@ class HeartbeatService:
         return {
             "status": "running" if running and (has_job or active_tasks > 0) else "disabled",
             "last_heartbeat_at": self.last_heartbeat_at,
+            "last_success_at": self.last_success_at,
+            "consecutive_failures": self.consecutive_failures,
             "active_tasks": active_tasks,
         }
+
+    def _mark_success(self) -> None:
+        self.consecutive_failures = 0
+        self.last_success_at = datetime.now(UTC).isoformat()
+
+    def _mark_failure(self) -> None:
+        self.consecutive_failures += 1
 
     async def _collect_event_source_context(self) -> tuple[str, dict[str, dict[str, str | None]]]:
         if not self._event_sources:

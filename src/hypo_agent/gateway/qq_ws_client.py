@@ -24,6 +24,7 @@ class NapCatWebSocketClient:
         pipeline_getter: Callable[[], Any | None],
         reconnect_delay_seconds: float = 5.0,
         connect_timeout_seconds: float = 5.0,
+        max_reconnect_retries: int | None = 10,
     ) -> None:
         self.url = str(url).strip()
         self.bot_qq = str(bot_qq).strip()
@@ -32,6 +33,9 @@ class NapCatWebSocketClient:
         self._pipeline_getter = pipeline_getter
         self.reconnect_delay_seconds = max(0.1, float(reconnect_delay_seconds))
         self.connect_timeout_seconds = max(1.0, float(connect_timeout_seconds))
+        self.max_reconnect_retries = (
+            None if max_reconnect_retries is None else max(1, int(max_reconnect_retries))
+        )
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self.status = "disconnected"
@@ -100,9 +104,11 @@ class NapCatWebSocketClient:
         )
 
     async def _run_forever(self) -> None:
+        retry_count = 0
         while not self._stop_event.is_set():
             try:
                 await self.run_once()
+                retry_count = 0
             except asyncio.CancelledError:
                 raise
             except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -112,10 +118,21 @@ class NapCatWebSocketClient:
             if self._stop_event.is_set():
                 break
 
+            if self.max_reconnect_retries is not None and retry_count >= self.max_reconnect_retries:
+                logger.error(
+                    "qq.ws.client.reconnect_exhausted",
+                    url=self.url,
+                    retries=retry_count,
+                )
+                break
+
+            delay = min(30.0, self.reconnect_delay_seconds * (2**retry_count))
+            retry_count += 1
+
             try:
                 await asyncio.wait_for(
                     self._stop_event.wait(),
-                    timeout=self.reconnect_delay_seconds,
+                    timeout=delay,
                 )
             except asyncio.TimeoutError:
                 continue

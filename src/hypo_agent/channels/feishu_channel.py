@@ -82,6 +82,7 @@ class FeishuChannel:
         api_client: Any | None = None,
         ws_client_factory: Callable[[], Any] | None = None,
         reconnect_delay_seconds: float = 3.0,
+        max_reconnect_retries: int | None = 10,
     ) -> None:
         self.app_id = str(app_id or "").strip()
         self.app_secret = str(app_secret or "").strip()
@@ -91,6 +92,9 @@ class FeishuChannel:
         self._api_client = api_client
         self._ws_client_factory = ws_client_factory
         self._reconnect_delay_seconds = max(0.5, float(reconnect_delay_seconds))
+        self._max_reconnect_retries = (
+            None if max_reconnect_retries is None else max(1, int(max_reconnect_retries))
+        )
         self._adapter = FeishuAdapter()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -415,5 +419,13 @@ class FeishuChannel:
                     attempt=attempt,
                 )
 
-            if self._stop_event.wait(self._reconnect_delay_seconds):
+            if self._max_reconnect_retries is not None and attempt >= self._max_reconnect_retries:
+                logger.error(
+                    "feishu.channel.reconnect_exhausted",
+                    retries=attempt,
+                )
+                break
+
+            delay = min(30.0, self._reconnect_delay_seconds * (2 ** max(attempt - 1, 0)))
+            if self._stop_event.wait(delay):
                 break

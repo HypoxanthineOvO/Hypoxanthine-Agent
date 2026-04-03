@@ -416,3 +416,44 @@ def test_pipeline_event_consumer_suppresses_internal_heartbeat_side_effects() ->
         assert pushed == []
 
     asyncio.run(_run())
+
+
+def test_pipeline_event_consumer_emits_error_for_unhandled_user_message_exception() -> None:
+    class ExplodingRouter(StubRouter):
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            del model_name, messages, session_id, tools
+            raise ValueError("bad upstream payload")
+            yield ""  # pragma: no cover
+
+    async def _run() -> None:
+        queue = EventQueue()
+        memory = StubSessionMemory()
+        streamed: list[dict[str, object]] = []
+
+        async def emit(event: dict[str, object]) -> None:
+            streamed.append(event)
+
+        pipeline = ChatPipeline(
+            router=ExplodingRouter(),
+            chat_model="Gemini3Pro",
+            session_memory=memory,
+            event_queue=queue,
+        )
+
+        await pipeline.start_event_consumer()
+        await pipeline.enqueue_user_message(
+            Message(text="hello", sender="user", session_id="main"),
+            emit=emit,
+        )
+        await asyncio.sleep(0.05)
+        await pipeline.stop_event_consumer()
+
+        assert streamed[-1] == {
+            "type": "error",
+            "code": "LLM_RUNTIME_ERROR",
+            "message": "LLM 调用失败，请检查配置或稍后重试",
+            "retryable": True,
+            "session_id": "main",
+        }
+
+    asyncio.run(_run())

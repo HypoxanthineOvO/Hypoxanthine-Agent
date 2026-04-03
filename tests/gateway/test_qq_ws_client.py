@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import MethodType
 
 from hypo_agent.gateway.qq_ws_client import NapCatWebSocketClient
 
@@ -155,3 +156,28 @@ def test_napcat_websocket_client_counts_only_handled_messages(monkeypatch) -> No
 
     assert client.messages_received == 0
     assert client.last_message_at is None
+
+
+def test_napcat_websocket_client_stops_after_reconnect_retries_exhausted() -> None:
+    attempts: list[int] = []
+
+    async def fake_run_once(self) -> None:
+        del self
+        attempts.append(1)
+        raise RuntimeError("boom")
+
+    async def _run() -> None:
+        client = NapCatWebSocketClient(
+            url="ws://127.0.0.1:3009/onebot/v11/ws",
+            service_getter=lambda: None,
+            pipeline_getter=lambda: None,
+            reconnect_delay_seconds=0.01,
+            max_reconnect_retries=2,
+        )
+        client.run_once = MethodType(fake_run_once, client)
+
+        await asyncio.wait_for(client._run_forever(), timeout=1.0)  # type: ignore[attr-defined]
+
+        assert attempts == [1, 1, 1]
+
+    asyncio.run(_run())
