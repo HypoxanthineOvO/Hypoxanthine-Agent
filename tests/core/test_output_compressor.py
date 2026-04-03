@@ -194,7 +194,7 @@ def test_output_compressor_writes_compressed_meta_to_input_metadata() -> None:
     compressor = OutputCompressor(router=router)
 
     async def _run() -> None:
-        metadata: dict[str, object] = {"session_id": "s1", "tool_name": "run_command"}
+        metadata: dict[str, object] = {"session_id": "s1", "tool_name": "exec_command"}
         original_output = _tool_output("z" * 110000)
         output, compressed = await compressor.compress_if_needed(
             original_output,

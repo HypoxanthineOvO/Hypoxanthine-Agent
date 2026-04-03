@@ -31,6 +31,9 @@ aliases: [assistant, hypo]
 personality: [pragmatic, concise]
 speaking_style:
   tone: direct
+  habits:
+    - 回答完直接结束
+    - 不主动给下一步建议
 """.strip(),
         encoding="utf-8",
     )
@@ -56,5 +59,7 @@ speaking_style:
     assert "你是 Hypo（assistant, hypo）" in prompt
     assert "pragmatic；concise" in prompt
     assert "说话风格：direct" in prompt
+    assert "行为边界：" in prompt
+    assert "- 回答完直接结束" in prompt
     assert "用户喜欢简洁回复" in prompt
     assert semantic_memory.calls == ["请直接回答"]

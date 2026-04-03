@@ -6,6 +6,7 @@ from typing import Any
 from hypo_agent.core.config_loader import (
     get_memory_dir,
     load_persona_config,
+    normalize_speaking_style_habits,
     render_persona_system_prompt,
 )
 from hypo_agent.memory.semantic_memory import SemanticMemory
@@ -42,7 +43,7 @@ class PersonaManager:
             search_query = str(query or "").strip() or SemanticMemory.default_user_query()
             try:
                 results = await self.semantic_memory.search(search_query, top_k=5)
-            except Exception:
+            except (OSError, RuntimeError, TypeError, ValueError):
                 results = []
             dynamic_chunks = [item.chunk_text for item in results if item.chunk_text.strip()]
 
@@ -86,10 +87,14 @@ class PersonaManager:
         alias_part = f"（{aliases}）" if aliases else ""
         personality = "；".join(str(item).strip() for item in config.personality if str(item).strip())
         tone = str(config.speaking_style.get("tone") or "").strip()
+        habits = normalize_speaking_style_habits(config.speaking_style)
 
         lines = [f"你是 {config.name}{alias_part}。"]
         if personality:
             lines.append(personality)
         if tone:
             lines.append(f"说话风格：{tone}")
+        if habits:
+            lines.append("行为边界：")
+            lines.extend(f"- {item}" for item in habits)
         return "\n\n".join(lines).strip()

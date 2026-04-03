@@ -79,7 +79,7 @@ async def probe_model(
     start = perf_counter()
     try:
         response = await asyncio.wait_for(acompletion_fn(**kwargs), timeout=timeout_seconds)
-    except Exception as exc:  # pragma: no cover - covered by unit tests
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:  # pragma: no cover - covered by unit tests
         elapsed_ms = (perf_counter() - start) * 1000
         error_text = str(exc).strip() or exc.__class__.__name__
         return ModelProbeResult(

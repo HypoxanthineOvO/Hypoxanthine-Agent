@@ -157,7 +157,7 @@ def test_model_router_fallback_sanitizes_tool_call_ids_for_gpt5_responses_models
                     "id": original_tool_call_id,
                     "type": "function",
                     "function": {
-                        "name": "run_command",
+                        "name": "exec_command",
                         "arguments": "{\"command\": \"echo hi\"}",
                     },
                 }
@@ -389,7 +389,7 @@ def test_model_router_call_passes_tools_to_acompletion(
     tools = [
         {
             "type": "function",
-            "function": {"name": "run_command", "parameters": {"type": "object"}},
+            "function": {"name": "exec_command", "parameters": {"type": "object"}},
         }
     ]
 
@@ -420,7 +420,7 @@ def test_model_router_stream_passes_tools_to_acompletion(
     tools = [
         {
             "type": "function",
-            "function": {"name": "run_command", "parameters": {"type": "object"}},
+            "function": {"name": "exec_command", "parameters": {"type": "object"}},
         }
     ]
 
@@ -464,7 +464,7 @@ def test_model_router_call_with_tools_extracts_tool_calls(
                                 "id": "call_1",
                                 "type": "function",
                                 "function": {
-                                    "name": "run_command",
+                                    "name": "exec_command",
                                     "arguments": "{\"command\": \"echo hi\"}",
                                 },
                             }
@@ -484,7 +484,7 @@ def test_model_router_call_with_tools_extracts_tool_calls(
                 {
                     "type": "function",
                     "function": {
-                        "name": "run_command",
+                        "name": "exec_command",
                         "parameters": {"type": "object"},
                     },
                 }
@@ -493,7 +493,7 @@ def test_model_router_call_with_tools_extracts_tool_calls(
     )
 
     assert payload["text"] == ""
-    assert payload["tool_calls"][0]["function"]["name"] == "run_command"
+    assert payload["tool_calls"][0]["function"]["name"] == "exec_command"
 
 
 def test_model_router_call_with_tools_extracts_legacy_function_call(
@@ -507,7 +507,7 @@ def test_model_router_call_with_tools_extracts_legacy_function_call(
                     "message": {
                         "content": "",
                         "function_call": {
-                            "name": "run_command",
+                            "name": "exec_command",
                             "arguments": {"command": "echo hello"},
                         },
                     }
@@ -525,7 +525,7 @@ def test_model_router_call_with_tools_extracts_legacy_function_call(
                 {
                     "type": "function",
                     "function": {
-                        "name": "run_command",
+                        "name": "exec_command",
                         "parameters": {"type": "object"},
                     },
                 }
@@ -533,7 +533,7 @@ def test_model_router_call_with_tools_extracts_legacy_function_call(
         )
     )
 
-    assert payload["tool_calls"][0]["function"]["name"] == "run_command"
+    assert payload["tool_calls"][0]["function"]["name"] == "exec_command"
     assert "\"command\": \"echo hello\"" in payload["tool_calls"][0]["function"]["arguments"]
 
 
@@ -550,7 +550,7 @@ def test_model_router_call_with_tools_extracts_gemini_content_tool_part(
                             {
                                 "type": "function_call",
                                 "id": "gemini_1",
-                                "name": "run_command",
+                                "name": "exec_command",
                                 "arguments": {"command": "echo gemini"},
                             }
                         ]
@@ -569,7 +569,7 @@ def test_model_router_call_with_tools_extracts_gemini_content_tool_part(
                 {
                     "type": "function",
                     "function": {
-                        "name": "run_command",
+                        "name": "exec_command",
                         "parameters": {"type": "object"},
                     },
                 }
@@ -578,7 +578,7 @@ def test_model_router_call_with_tools_extracts_gemini_content_tool_part(
     )
 
     assert payload["tool_calls"][0]["id"] == "gemini_1"
-    assert payload["tool_calls"][0]["function"]["name"] == "run_command"
+    assert payload["tool_calls"][0]["function"]["name"] == "exec_command"
 
 
 def test_model_router_call_with_tools_extracts_text_embedded_json_tool_call(

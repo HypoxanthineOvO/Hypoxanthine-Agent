@@ -407,6 +407,8 @@ class SlashCommandHandler:
         text = str(description or "").strip()
         combined = " ".join([str(skill_name or ""), text, ",".join(tool_names)]).lower()
         mapping = [
+            ("exec", "命令执行"),
+            ("exec_command", "命令执行"),
             ("tmux", "终端会话操控"),
             ("code_run", "沙箱代码执行"),
             ("run_code", "沙箱代码执行"),

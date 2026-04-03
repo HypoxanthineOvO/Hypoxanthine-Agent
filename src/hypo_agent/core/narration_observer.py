@@ -116,7 +116,7 @@ class NarrationObserver:
         except asyncio.TimeoutError:
             logger.debug("narration.timeout", tool_name=normalized_tool_name)
             return None
-        except Exception:
+        except (OSError, RuntimeError, TypeError, ValueError):
             logger.exception("narration.failed", tool_name=normalized_tool_name)
             return None
 

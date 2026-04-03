@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Any
 
 import hypo_agent.core.heartbeat as heartbeat_module
+from hypo_agent.core.config_loader import RuntimeModelConfig
 from hypo_agent.core.event_queue import EventQueue
 from hypo_agent.core.heartbeat import HeartbeatService, SILENT_SENTINEL
+from hypo_agent.core.model_router import ModelRouter
 from hypo_agent.core.pipeline import ChatPipeline
 from hypo_agent.models import Message, SkillOutput
 
@@ -75,7 +77,7 @@ class HeartbeatRouter:
                         "id": "call-run-command",
                         "type": "function",
                         "function": {
-                            "name": "run_command",
+                            "name": "exec_command",
                             "arguments": json.dumps({"command": "uptime"}, ensure_ascii=False),
                         },
                     },
@@ -115,7 +117,7 @@ class RecordingSkillManager:
             {
                 "type": "function",
                 "function": {
-                    "name": "run_command",
+                    "name": "exec_command",
                     "parameters": {
                         "type": "object",
                         "properties": {"command": {"type": "string"}},
@@ -151,8 +153,9 @@ class RecordingSkillManager:
         params: dict[str, Any],
         *,
         session_id: str | None = None,
+        skill_name: str | None = None,
     ) -> SkillOutput:
-        self.invocations.append((tool_name, dict(params), session_id))
+        self.invocations.append((tool_name, dict(params), session_id, skill_name))
         return SkillOutput(
             status="success",
             result={"tool": tool_name, "ok": True},
@@ -273,12 +276,13 @@ def test_heartbeat_pipeline_invokes_tools_and_stays_silent_when_agent_returns_se
         await pipeline.stop_event_consumer()
 
         assert result["should_push"] is False
-        assert [name for name, _, _ in skill_manager.invocations] == [
-            "run_command",
+        assert [entry[0] for entry in skill_manager.invocations] == [
+            "exec_command",
             "scan_emails",
             "list_reminders",
         ]
         assert skill_manager.invocations[1][1]["triggered_by"] == "heartbeat"
+        assert skill_manager.invocations[1][3] == "direct"
         assert memory.appended == []
         assert pushed == []
 
@@ -314,18 +318,94 @@ def test_heartbeat_pipeline_invokes_tools_and_emits_single_final_push(tmp_path: 
         await pipeline.stop_event_consumer()
 
         assert result["should_push"] is True
-        assert [name for name, _, _ in skill_manager.invocations] == [
-            "run_command",
+        assert [entry[0] for entry in skill_manager.invocations] == [
+            "exec_command",
             "scan_emails",
             "list_reminders",
         ]
         assert skill_manager.invocations[1][1]["triggered_by"] == "heartbeat"
+        assert skill_manager.invocations[1][3] == "direct"
         assert len(memory.appended) == 1
         assert memory.appended[0].message_tag == "heartbeat"
         assert "重要邮件" in str(memory.appended[0].text)
         assert len(pushed) == 1
         assert pushed[0].message_tag == "heartbeat"
         assert "重要邮件" in str(pushed[0].text)
+
+    asyncio.run(_run())
+
+
+def test_heartbeat_model_timeout_falls_back_to_backup_model(tmp_path: Path) -> None:
+    async def _run() -> None:
+        prompt_path = tmp_path / "heartbeat_prompt.md"
+        prompt_path.write_text("run heartbeat", encoding="utf-8")
+        queue = EventQueue()
+        memory = StubSessionMemory()
+        pushed: list[Message] = []
+        calls: list[dict[str, Any]] = []
+
+        runtime = RuntimeModelConfig.model_validate(
+            {
+                "default_model": "GPT",
+                "task_routing": {"chat": "GPT"},
+                "models": {
+                    "GPT": {
+                        "provider": "AISTOCK",
+                        "litellm_model": "openai/gpt-5.2",
+                        "fallback": "KimiK25",
+                        "api_base": "https://example.invalid/v1",
+                        "api_key": "primary-key",
+                    },
+                    "KimiK25": {
+                        "provider": "volcengine_coding",
+                        "litellm_model": "openai/kimi-k2.5",
+                        "fallback": None,
+                        "api_base": "https://example.invalid/v1",
+                        "api_key": "fallback-key",
+                    },
+                },
+            }
+        )
+
+        async def fake_acompletion(**kwargs):
+            calls.append({"model": kwargs["model"], "timeout": kwargs.get("timeout")})
+            if kwargs["model"] == "openai/gpt-5.2":
+                raise TimeoutError("primary timed out")
+
+            async def _gen():
+                yield {"choices": [{"delta": {"content": "fallback heartbeat ok"}}]}
+
+            return _gen()
+
+        pipeline = ChatPipeline(
+            router=ModelRouter(runtime, acompletion_fn=fake_acompletion),
+            chat_model="GPT",
+            session_memory=memory,
+            event_queue=queue,
+            on_proactive_message=pushed.append,
+            heartbeat_model_timeout_seconds=60,
+        )
+        service = HeartbeatService(
+            message_queue=queue,
+            scheduler=StubScheduler(running=True),
+            default_session_id="main",
+            prompt_path=prompt_path,
+        )
+
+        await pipeline.start_event_consumer()
+        result = await service.run()
+        await asyncio.sleep(0.05)
+        await pipeline.stop_event_consumer()
+
+        assert result["should_push"] is True
+        assert result["summary"] == "fallback heartbeat ok"
+        assert [call["model"] for call in calls] == [
+            "openai/gpt-5.2",
+            "openai/kimi-k2.5",
+        ]
+        assert calls[0]["timeout"] == 60.0
+        assert calls[1]["timeout"] == 60.0
+        assert pushed[0].text == "💓 fallback heartbeat ok"
 
     asyncio.run(_run())
 

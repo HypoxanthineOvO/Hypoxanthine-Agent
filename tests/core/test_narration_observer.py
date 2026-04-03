@@ -39,7 +39,7 @@ def _config(*, max_narration_length: int = 80, debounce_seconds: float = 2.0) ->
         enabled=True,
         model="lightweight",
         tool_levels=NarrationToolLevels(
-            heavy=["scan_emails", "run_command"],
+            heavy=["scan_emails", "exec_command"],
             medium=["write_file"],
         ),
         debounce_seconds=debounce_seconds,

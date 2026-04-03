@@ -73,10 +73,12 @@ class StubSkillManager:
         params: dict[str, object],
         *,
         session_id: str | None = None,
+        skill_name: str | None = None,
     ) -> SkillOutput:
         assert tool_name == "scan_emails"
         assert params == {"limit": 5}
         assert session_id == "main"
+        assert skill_name == "direct"
         await asyncio.sleep(self.delay_seconds)
         return SkillOutput(status="success", result={"emails": []})
 

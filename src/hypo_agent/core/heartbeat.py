@@ -14,6 +14,15 @@ from hypo_agent.models import Message
 logger = structlog.get_logger("hypo_agent.heartbeat")
 
 SILENT_SENTINEL = "**SILENT**"
+_HEARTBEAT_QUEUE_ERRORS = (asyncio.QueueFull, OSError, RuntimeError, TypeError, ValueError)
+_HEARTBEAT_CALLBACK_ERRORS = (
+    asyncio.TimeoutError,
+    TimeoutError,
+    OSError,
+    RuntimeError,
+    TypeError,
+    ValueError,
+)
 
 
 class HeartbeatService:
@@ -31,7 +40,7 @@ class HeartbeatService:
         scheduler: Any | None = None,
         default_session_id: str = "main",
         prompt_path: Path | str = "config/heartbeat_prompt.md",
-        timeout_seconds: int = 240,
+        timeout_seconds: int = 120,
     ) -> None:
         self.message_queue = message_queue
         self.scheduler = scheduler
@@ -48,7 +57,7 @@ class HeartbeatService:
             return self.prompt_path.read_text(encoding="utf-8").strip()
         except FileNotFoundError:
             return ""
-        except Exception:
+        except OSError:
             logger.exception("heartbeat.prompt.load_failed", path=str(self.prompt_path))
             return ""
 
@@ -154,7 +163,7 @@ class HeartbeatService:
                     "emit": emit,
                 }
             )
-        except Exception:
+        except _HEARTBEAT_QUEUE_ERRORS:
             logger.exception(
                 "heartbeat.enqueue.failed",
                 session_id=self.default_session_id,
@@ -259,7 +268,7 @@ class HeartbeatService:
                     "description": cleaned,
                 }
             )
-        except Exception:
+        except _HEARTBEAT_QUEUE_ERRORS:
             logger.exception(
                 "heartbeat.enqueue.failed",
                 session_id=self.default_session_id,
@@ -292,7 +301,7 @@ class HeartbeatService:
                 payload = callback()
                 if inspect.isawaitable(payload):
                     payload = await payload
-            except Exception as exc:
+            except _HEARTBEAT_CALLBACK_ERRORS as exc:
                 status = "timeout" if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) else "failed"
                 error_message = str(exc).strip() or exc.__class__.__name__
                 statuses[name] = {"status": status, "error": error_message}

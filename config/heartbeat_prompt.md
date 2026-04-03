@@ -3,13 +3,13 @@
 你每次被唤醒时，请按以下清单自主检查并汇报。
 
 ## 服务器状态
-- 只用 run_command 检查服务器负载（load average）是否过高，并给出概览：uptime、load average、CPU/内存概览。
+- 只用 exec_command 检查服务器负载（load average）是否过高，并给出概览：uptime、load average、CPU/内存概览。
 - 如果负载不高，只需要给出一行"负载正常"的结论，不要展开长列表。
-- 注意：用 run_command 检查系统资源的时候：
+- 注意：用 exec_command 检查系统资源的时候：
   - 不要强制只用白名单命令；以"非阻塞"为原则即可。
   - 严禁使用已知阻塞/交互式/可能卡住的命令（黑名单）：`top`、`htop`、`iotop`、`iftop`、`dstat`（持续模式）、`watch`、不带结束条件的 `tail -f`/`journalctl -f` 等。
-  - 系统检查必须拆成多次 `run_command` 调用，不要把 `free/uptime/ps/df/nvidia-smi` 串成一个超长 shell。
-  - 推荐按下面的粒度分别执行；每一条是一条独立的 `run_command`：
+  - 系统检查必须拆成多次 `exec_command` 调用，不要把 `free/uptime/ps/df/nvidia-smi` 串成一个超长 shell。
+  - 推荐按下面的粒度分别执行；每一条是一条独立的 `exec_command`：
     - 负载/概览：`uptime`
     - CPU/内存概览：`free -h`
     - GPU 概览（必须执行）：`nvidia-smi --query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits`
@@ -19,7 +19,7 @@
 ## 项目概览（按人汇报）
 - **人名映射规则**：在汇报时，必须读取 `memory/people/index.md` 文件，将账号（如 heyx/dingqh）映射为对应的中文姓名（如 贺云翔/丁麒涵）。如果索引中找不到该账号，则保留原账号名。
 - 不需要筛「高消耗进程」。只需要回答「每个人在跑什么项目」。
-- 用 run_command 从 `ps` 输出里归并：按用户（如 heyx/dingqh/lichf/jiangye/chenqy/liyx）分组，每个用户列出主要在跑的 1-3 个命令/项目关键词即可。
+- 用 exec_command 从 `ps` 输出里归并：按用户（如 heyx/dingqh/lichf/jiangye/chenqy/liyx）分组，每个用户列出主要在跑的 1-3 个命令/项目关键词即可。
 - 建议命令：`ps -eo user,etime,pcpu,pmem,comm,args --sort=-pcpu | head -80`
 - 输出格式要求：
   - 每个用户一行：`user(姓名): 项目/命令的整理介绍）+ 负载情况`
@@ -36,11 +36,12 @@
 - 如果机器无 NVIDIA/无权限/命令不可用：明确写失败原因（stderr 关键行），不要静默跳过。
 
 ## Notion ToDo（HYX 的计划通）
-- 执行 SOP：`Notion HYX 计划通 - 今日 ToDo 提取`
-- 只做一件事：从 Notion 数据库 `a19e5a0d-fd23-441e-9d55-9c5fc4a6206c` 提取“今天（Asia/Shanghai）新建”的 ToDo 列表。
-- 汇报规则：
-  - 若有条目：用一个小节 `今日 ToDo` 输出（每条一行：`YYYY-MM-DD - 标题`）。
-  - 若无条目：不需要单独汇报（避免打扰）。
+- 检查 Notion 数据库 HYX 的计划通的内容：
+  - 筛选出日期包含今天的未完成任务
+    - 详细描述高优先级任务
+    - 列出其他中低优先级的未完成任务
+  - 如果有三天内到期的高优先级未完成任务，着重提醒
+  - 简单描述一下今天到期的已完成任务
 
 ## 邮件
 - 调用 scan_emails 扫描未读邮件。

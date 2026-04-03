@@ -212,7 +212,7 @@ class OutputCompressor:
             if not isinstance(response, str):
                 return str(response)
             return response
-        except Exception as exc:  # pragma: no cover - fallback safeguard
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:  # pragma: no cover - fallback safeguard
             logger.warning(
                 "output_compressor.model_failed",
                 error=str(exc),

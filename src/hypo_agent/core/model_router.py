@@ -20,6 +20,15 @@ except ImportError:  # pragma: no cover - depends on runtime environment
 
 from hypo_agent.core.config_loader import RuntimeModelConfig
 
+_MODEL_ROUTER_ERRORS = (
+    asyncio.TimeoutError,
+    TimeoutError,
+    OSError,
+    RuntimeError,
+    TypeError,
+    ValueError,
+)
+
 
 class ModelRouter:
     def __init__(
@@ -51,12 +60,14 @@ class ModelRouter:
         *,
         session_id: str | None = None,
         tools: list[dict[str, Any]] | None = None,
+        timeout_seconds: float | None = None,
     ) -> str:
         payload = await self.call_with_tools(
             model_name,
             messages,
             tools=tools,
             session_id=session_id,
+            timeout_seconds=timeout_seconds,
         )
         return payload["text"]
 
@@ -67,6 +78,7 @@ class ModelRouter:
         *,
         tools: list[dict[str, Any]] | None = None,
         session_id: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         attempted: list[str] = []
         last_error: Exception | None = None
@@ -99,6 +111,8 @@ class ModelRouter:
                     kwargs["api_key"] = cfg.api_key
                 if tools is not None:
                     kwargs["tools"] = tools
+                if timeout_seconds is not None:
+                    kwargs["timeout"] = timeout_seconds
                 if remapped_ids:
                     self.logger.info(
                         "tool_call_ids_sanitized",
@@ -144,7 +158,7 @@ class ModelRouter:
                     }
                 )
                 return {"text": text, "tool_calls": tool_calls}
-            except Exception as exc:  # pragma: no cover - exercised in tests
+            except _MODEL_ROUTER_ERRORS as exc:  # pragma: no cover - exercised in tests
                 attempted.append(candidate)
                 last_error = exc
                 self.logger.warning(
@@ -165,6 +179,7 @@ class ModelRouter:
         *,
         session_id: str | None = None,
         tools: list[dict[str, Any]] | None = None,
+        timeout_seconds: float | None = None,
     ) -> AsyncIterator[str]:
         attempted: list[str] = []
         last_error: Exception | None = None
@@ -201,6 +216,8 @@ class ModelRouter:
                     kwargs["api_key"] = cfg.api_key
                 if tools is not None:
                     kwargs["tools"] = tools
+                if timeout_seconds is not None:
+                    kwargs["timeout"] = timeout_seconds
                 if remapped_ids:
                     self.logger.info(
                         "tool_call_ids_sanitized",
@@ -241,7 +258,7 @@ class ModelRouter:
                 )
                 await self._emit_stream_success(event_payload)
                 return
-            except Exception as exc:  # pragma: no cover - exercised in tests
+            except _MODEL_ROUTER_ERRORS as exc:  # pragma: no cover - exercised in tests
                 if started:
                     self.logger.error(
                         "model_stream_failed_after_output",
@@ -308,7 +325,7 @@ class ModelRouter:
                             f"expected {len(texts)}, got {len(embeddings)}"
                         )
                     return embeddings
-                except Exception as exc:  # pragma: no cover - exercised in tests
+                except _MODEL_ROUTER_ERRORS as exc:  # pragma: no cover - exercised in tests
                     last_error = exc
                     attempted.append(f"{candidate}#{attempt}")
                     self.logger.warning(

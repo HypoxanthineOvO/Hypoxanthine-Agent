@@ -7,7 +7,7 @@ tool_levels:
   heavy:
     - scan_emails
     - search_emails
-    - run_command
+    - exec_command
     - run_code
     - web_search
   medium:
