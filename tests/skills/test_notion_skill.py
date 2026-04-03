@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 from hypo_agent.channels.notion.notion_client import NotionUnavailableError
 from hypo_agent.skills.notion_skill import NotionSkill
@@ -154,6 +155,14 @@ class FakeNotionClient:
     async def get_database(self, database_id: str) -> dict:
         assert database_id
         return dict(self.database_payload)
+
+
+class DummyHeartbeatService:
+    def __init__(self) -> None:
+        self.registrations: list[tuple[str, object]] = []
+
+    def register_event_source(self, name: str, callback: object) -> None:
+        self.registrations.append((name, callback))
 
 
 def test_read_page_formats_title_properties_and_markdown() -> None:
@@ -369,5 +378,39 @@ def test_query_db_timeout() -> None:
 
         assert result.status == "error"
         assert "超时" in result.error_info
+
+    asyncio.run(_run())
+
+
+def test_notion_registers_todo_heartbeat_source_when_configured(tmp_path) -> None:
+    async def _run() -> None:
+        secrets_path = tmp_path / "secrets.yaml"
+        secrets_path.write_text(
+            """
+providers: {}
+services:
+  notion:
+    integration_secret: "secret_xxx"
+    todo_database_id: "22222222-2222-2222-2222-222222222222"
+""".strip(),
+            encoding="utf-8",
+        )
+        heartbeat_service = DummyHeartbeatService()
+        client = FakeNotionClient()
+        skill = NotionSkill(
+            secrets_path=secrets_path,
+            notion_client=client,
+            heartbeat_service=heartbeat_service,
+            now_fn=lambda: datetime(2026, 4, 3, 9, 0, 0, tzinfo=UTC),
+        )
+
+        assert skill.name == "notion"
+        assert heartbeat_service.registrations[0][0] == "notion_todo"
+
+        payload = await heartbeat_service.registrations[0][1]()
+
+        assert payload == {"items": [{"title": "完成测试（截止今天）"}]}
+        assert client.query_calls[0]["database_id"] == "22222222-2222-2222-2222-222222222222"
+        assert client.query_calls[0]["page_size"] == 50
 
     asyncio.run(_run())

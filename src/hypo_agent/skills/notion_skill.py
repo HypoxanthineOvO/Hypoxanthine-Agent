@@ -12,6 +12,7 @@ from hypo_agent.channels.notion import NotionClient, NotionUnavailableError, blo
 from hypo_agent.core.config_loader import load_secrets_config
 from hypo_agent.models import SkillOutput
 from hypo_agent.skills.base import BaseSkill
+from hypo_agent.skills.notion_heartbeat import NotionTodoHeartbeatSource
 
 logger = structlog.get_logger("hypo_agent.skills.notion_skill")
 _SERVICE_UNAVAILABLE = "Notion 当前不可用，请检查网络、集成密钥和页面授权"
@@ -40,7 +41,15 @@ class NotionSkill(BaseSkill):
         if self._todo_database_id and heartbeat_service is not None and hasattr(
             heartbeat_service, "register_event_source"
         ):
-            heartbeat_service.register_event_source("notion_todo", self._heartbeat_todo_source)
+            heartbeat_service.register_event_source(
+                "notion_todo",
+                NotionTodoHeartbeatSource(
+                    notion_client=self._client,
+                    todo_database_id=self._todo_database_id,
+                    now_fn=self.now_fn,
+                    title_getter=self._extract_title,
+                ).collect,
+            )
 
     @property
     def tools(self) -> list[dict[str, Any]]:
@@ -48,8 +57,20 @@ class NotionSkill(BaseSkill):
             {
                 "type": "function",
                 "function": {
+                    "name": "notion_get_schema",
+                    "description": "Get the property schema for a Notion database.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"database_id": {"type": "string"}},
+                        "required": ["database_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "notion_read_page",
-                    "description": "读取 Notion 页面的属性和正文内容，支持 page_id 或完整页面 URL。",
+                    "description": "Read a Notion page's properties and body content.",
                     "parameters": {
                         "type": "object",
                         "properties": {"page_id": {"type": "string"}},
@@ -61,7 +82,7 @@ class NotionSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "notion_write_page",
-                    "description": "向 Notion 页面写入 Markdown 内容，支持 append 或 replace。",
+                    "description": "Write markdown content to a Notion page.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -81,7 +102,7 @@ class NotionSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "notion_update_page",
-                    "description": "更新 Notion 页面属性，properties 使用 JSON 字符串。",
+                    "description": "Update a Notion page's properties from JSON input.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -96,7 +117,7 @@ class NotionSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "notion_query_db",
-                    "description": "查询 Notion 数据库，filter 和 sorts 使用 Notion API JSON。",
+                    "description": "Query a Notion database with optional filter and sort JSON.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -113,7 +134,7 @@ class NotionSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "notion_create_entry",
-                    "description": "在 Notion 数据库中创建新条目，可附带 Markdown 正文。",
+                    "description": "Create a new entry in a Notion database.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -129,7 +150,7 @@ class NotionSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "notion_search",
-                    "description": "在 Notion 工作区搜索页面或数据库。",
+                    "description": "Search pages or databases in the connected Notion workspace.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -144,6 +165,9 @@ class NotionSkill(BaseSkill):
 
     async def execute(self, tool_name: str, params: dict[str, Any]) -> SkillOutput:
         try:
+            if tool_name == "notion_get_schema":
+                database_id = self._normalize_page_id(params.get("database_id"))
+                return SkillOutput(status="success", result=await self.notion_get_schema(database_id))
             if tool_name == "notion_read_page":
                 page_id = self._normalize_page_id(params.get("page_id"))
                 return SkillOutput(status="success", result=await self.notion_read_page(page_id))
@@ -202,7 +226,7 @@ class NotionSkill(BaseSkill):
             if error_text:
                 return SkillOutput(status="error", error_info=f"{_SERVICE_UNAVAILABLE}：{error_text}")
             return SkillOutput(status="error", error_info=_SERVICE_UNAVAILABLE)
-        except Exception as exc:
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning("notion_skill.execute_failed", tool_name=tool_name, error=str(exc))
             return SkillOutput(status="error", error_info=str(exc))
         return SkillOutput(status="error", error_info=f"Unsupported tool '{tool_name}'")
@@ -312,22 +336,15 @@ class NotionSkill(BaseSkill):
             )
         return "\n".join(lines).strip()
 
-    async def _heartbeat_todo_source(self) -> dict[str, Any] | None:
-        database_id = str(self._todo_database_id or "").strip()
-        if not database_id:
-            return None
-        rows = await self._client.query_database(database_id, page_size=50)
-        today = self.now_fn().date().isoformat()
-        items: list[dict[str, str]] = []
-        for row in rows:
-            due = self._extract_due_date(row)
-            status = self._extract_status(row)
-            if due == today and status.casefold() not in {"done", "complete", "completed", "已完成"}:
-                title = self._extract_title(row) or str(row.get("id") or "")
-                items.append({"title": f"{title}（截止今天）"})
-        if not items:
-            return None
-        return {"items": items}
+    async def notion_get_schema(self, database_id: str) -> str:
+        database = await self._client.get_database(database_id)
+        properties = database.get("properties", {})
+        title = self._extract_database_title(database) or database_id
+        lines = [f"📊 {title} 字段列表：", ""]
+        for name, value in properties.items():
+            prop_type = str(value.get("type") or "").strip() if isinstance(value, dict) else ""
+            lines.append(f"- `{name}` ({prop_type})")
+        return "\n".join(lines)
 
     def _build_client_from_config(self) -> NotionClient:
         try:

@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 import pytest
 
-from hypo_agent.skills.info_reach_skill import InfoReachSkill
+from hypo_agent.skills.info_reach_skill import HypoInfoClient, HypoInfoError, InfoReachSkill
 
 
 class DummyQueue:
@@ -117,6 +117,115 @@ def test_info_query_returns_friendly_error_on_http_failures(tmp_path: Path, exc:
 
     assert output.status == "error"
     assert "Hypo-Info" in output.error_info
+
+
+def test_info_query_returns_friendly_error_on_http_500(tmp_path: Path) -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(500, json={"detail": "boom"})
+    )
+    skill = _build_skill(tmp_path=tmp_path, transport=transport)
+
+    output = asyncio.run(skill.execute("info_query", {"time_range": "today"}))
+
+    assert output.status == "error"
+    assert "500" in output.error_info
+    assert "Hypo-Info" in output.error_info
+
+
+def test_hypo_info_client_supports_summary_and_categories(tmp_path: Path) -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/agent/summary":
+            return httpx.Response(
+                200,
+                json={
+                    "time_range": "today",
+                    "generated_at": "2026-03-30T01:00:00Z",
+                    "categories": [{"category": "AI", "article_count": 2, "top_articles": []}],
+                    "total_articles": 2,
+                },
+            )
+        if request.url.path == "/api/agent/categories":
+            return httpx.Response(
+                200,
+                json={
+                    "categories": [
+                        {"category_l1": "AI", "subcategories": ["模型"], "article_count": 12}
+                    ]
+                },
+            )
+        raise AssertionError(f"unexpected path: {request.url.path}")
+
+    client = HypoInfoClient("http://localhost:8200", transport=httpx.MockTransport(_handler))
+
+    summary = asyncio.run(client.summary(time_range="today", min_importance=7))
+    categories = asyncio.run(client.categories())
+
+    assert summary["total_articles"] == 2
+    assert categories["categories"][0]["category_l1"] == "AI"
+
+
+def test_info_reach_skill_loads_base_url_from_secrets_when_not_passed(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "secrets.yaml").write_text(
+        """
+providers: {}
+services:
+  hypo_info:
+    base_url: "http://localhost:9200"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    skill = InfoReachSkill(
+        db_path=tmp_path / "hypo.db",
+        secrets_path=config_dir / "secrets.yaml",
+    )
+
+    assert skill._client._base_url == "http://localhost:9200"
+
+
+def test_info_reach_skill_uses_default_base_url_when_secrets_missing(tmp_path: Path) -> None:
+    skill = InfoReachSkill(
+        db_path=tmp_path / "hypo.db",
+        secrets_path=tmp_path / "missing-secrets.yaml",
+    )
+
+    assert skill._client._base_url == "http://localhost:8200"
+
+
+def test_info_reach_tools_descriptions_mark_proactive_usage(tmp_path: Path) -> None:
+    skill = _build_skill(tmp_path=tmp_path)
+    tools = {tool["function"]["name"]: tool["function"] for tool in skill.tools}
+
+    assert "natural-language" in tools["info_query"]["description"]
+    assert "raw JSON" in tools["info_query"]["description"]
+    assert "natural-language" in tools["info_summary"]["description"]
+    assert "raw JSON" in tools["info_summary"]["description"]
+
+
+def test_info_reach_skill_has_proactive_push_docstring() -> None:
+    assert "Hypo-Info 主动推送与订阅管理" in (InfoReachSkill.__doc__ or "")
+
+
+def test_info_portal_and_info_reach_tool_descriptions_are_separated(tmp_path: Path) -> None:
+    from hypo_agent.skills.info_portal_skill import InfoPortalSkill
+
+    portal = InfoPortalSkill(info_client=object())
+    reach = InfoReachSkill(db_path=tmp_path / "hypo.db")
+    portal_tools = {tool["function"]["name"]: tool["function"] for tool in portal.tools}
+    reach_tools = {tool["function"]["name"]: tool["function"] for tool in reach.tools}
+
+    assert portal_tools["info_today"]["description"] == "Get today's news digest, optionally filtered by section."
+    assert portal_tools["info_search"]["description"] == "Search Hypo-Info articles by keyword."
+    assert "natural-language" in reach_tools["info_query"]["description"]
+    assert "natural-language" in reach_tools["info_summary"]["description"]
+
+
+def test_info_query_description_marks_internal_push_usage(tmp_path: Path) -> None:
+    skill = InfoReachSkill(db_path=tmp_path / "hypo.db")
+    tools = {tool["function"]["name"]: tool["function"] for tool in skill.tools}
+    assert "raw JSON" in tools["info_query"]["description"]
 
 
 # ---------------------------------------------------------------------------
