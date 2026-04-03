@@ -183,6 +183,7 @@ def test_create_reminder_auto_confirm_persists_without_confirm() -> None:
                 "schedule_type": "once",
                 "schedule_value": "2099-03-08T15:00:00+08:00",
                 "channel": "all",
+                "__session_id": "smoke-session",
             },
         )
 
@@ -190,6 +191,7 @@ def test_create_reminder_auto_confirm_persists_without_confirm() -> None:
         assert result.result["reminder_id"] == 1
         assert len(store.created) == 1
         assert store.created[0]["status"] == "active"
+        assert store.created[0]["session_id"] == "smoke-session"
         assert len(scheduler.registered) == 1
         assert scheduler.registered[0]["id"] == 1
 

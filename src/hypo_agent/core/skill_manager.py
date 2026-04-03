@@ -281,6 +281,10 @@ class SkillManager:
                 self._attach_invocation_id(blocked, invocation_id)
                 return blocked
 
+        internal_params = dict(params)
+        if session_id is not None:
+            internal_params.setdefault("__session_id", session_id)
+
         try:
             if builtin is not None:
                 _, handler, _ = builtin
@@ -289,7 +293,7 @@ class SkillManager:
                     result = await result
             else:
                 assert skill is not None
-                result = await skill.execute(tool_name, params)
+                result = await skill.execute(tool_name, internal_params)
         except _SKILL_MANAGER_ERRORS as exc:
             logger.error(
                 "skill.invoke.exception",

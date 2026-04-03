@@ -14,13 +14,20 @@ import structlog
 try:
     from litellm import acompletion as litellm_acompletion
     from litellm import aembedding as litellm_aembedding
+    from litellm.exceptions import OpenAIError as LiteLLMOpenAIError
 except ImportError:  # pragma: no cover - depends on runtime environment
     litellm_acompletion = None
     litellm_aembedding = None
+    LiteLLMOpenAIError = None
+
+try:
+    from openai import OpenAIError as OpenAIClientError
+except ImportError:  # pragma: no cover - optional runtime dependency
+    OpenAIClientError = None
 
 from hypo_agent.core.config_loader import RuntimeModelConfig
 
-_MODEL_ROUTER_ERRORS = (
+_MODEL_ROUTER_BASE_ERRORS = (
     asyncio.TimeoutError,
     TimeoutError,
     OSError,
@@ -28,6 +35,12 @@ _MODEL_ROUTER_ERRORS = (
     TypeError,
     ValueError,
 )
+_MODEL_ROUTER_PROVIDER_ERRORS = tuple(
+    error_type
+    for error_type in (LiteLLMOpenAIError, OpenAIClientError)
+    if isinstance(error_type, type)
+)
+_MODEL_ROUTER_ERRORS = _MODEL_ROUTER_BASE_ERRORS + _MODEL_ROUTER_PROVIDER_ERRORS
 
 
 class ModelRouter:

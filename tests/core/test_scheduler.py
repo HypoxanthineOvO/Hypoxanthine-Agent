@@ -169,6 +169,7 @@ def test_scheduler_enqueues_reminder_event_on_trigger() -> None:
                     "schedule_value": "2099-01-01T00:00:00+00:00",
                     "status": "active",
                     "channel": "all",
+                    "session_id": "smoke-123",
                 }
             ]
         )
@@ -179,7 +180,7 @@ def test_scheduler_enqueues_reminder_event_on_trigger() -> None:
         queue.task_done()
         assert event["event_type"] == "reminder_trigger"
         assert event["reminder_id"] == 10
-        assert event["session_id"] == "main"
+        assert event["session_id"] == "smoke-123"
         assert store.completed == [10]
         assert store.reminders[0]["status"] == "completed"
 

@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from litellm.exceptions import InternalServerError
 
 from hypo_agent.core.config_loader import RuntimeModelConfig
 from hypo_agent.core.model_router import ModelRouter
@@ -108,6 +109,32 @@ def test_model_router_fallback_on_failure(runtime_config: RuntimeModelConfig) ->
         called_models.append(kwargs["model"])
         if kwargs["model"] == "openai/gemini-2.5-pro":
             raise RuntimeError("boom")
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="fallback ok"))],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    router = ModelRouter(runtime_config, acompletion_fn=fake_acompletion)
+    text = asyncio.run(router.call("Gemini3Pro", [{"role": "user", "content": "hi"}]))
+
+    assert text == "fallback ok"
+    assert called_models == [
+        "openai/gemini-2.5-pro",
+        "openai/ep-20251215171209-4z5qk",
+    ]
+
+
+def test_model_router_fallback_on_litellm_api_error(runtime_config: RuntimeModelConfig) -> None:
+    called_models: list[str] = []
+
+    async def fake_acompletion(**kwargs):
+        called_models.append(kwargs["model"])
+        if kwargs["model"] == "openai/gemini-2.5-pro":
+            raise InternalServerError(
+                message="gateway returned html",
+                llm_provider="openai",
+                model=kwargs["model"],
+            )
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content="fallback ok"))],
             usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),

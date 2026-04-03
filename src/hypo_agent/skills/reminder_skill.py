@@ -235,6 +235,7 @@ class ReminderSkill(BaseSkill):
             schedule_value=schedule_value,
             channel=channel,
             status="active",
+            session_id=str(params.get("__session_id") or "").strip() or "main",
             next_run_at=schedule_value if schedule_type == "once" else None,
             heartbeat_config=heartbeat_config,
         )

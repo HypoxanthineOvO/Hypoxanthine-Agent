@@ -225,6 +225,7 @@ class StructuredStore:
                         schedule_value TEXT NOT NULL,
                         channel TEXT NOT NULL DEFAULT 'all',
                         status TEXT NOT NULL DEFAULT 'active',
+                        session_id TEXT NOT NULL DEFAULT 'main',
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
                         next_run_at TEXT,
@@ -326,6 +327,9 @@ class StructuredStore:
                 async with db.execute("PRAGMA table_info(tool_invocations)") as cursor:
                     tool_columns = await cursor.fetchall()
                 tool_column_names = {str(column[1]) for column in tool_columns}
+                async with db.execute("PRAGMA table_info(reminders)") as cursor:
+                    reminder_columns = await cursor.fetchall()
+                reminder_column_names = {str(column[1]) for column in reminder_columns}
                 async with db.execute("PRAGMA table_info(sessions)") as cursor:
                     session_columns = await cursor.fetchall()
                 session_column_names = {str(column[1]) for column in session_columns}
@@ -342,6 +346,10 @@ class StructuredStore:
                 if "compressed_meta_json" not in tool_column_names:
                     await db.execute(
                         "ALTER TABLE tool_invocations ADD COLUMN compressed_meta_json TEXT"
+                    )
+                if "session_id" not in reminder_column_names:
+                    await db.execute(
+                        "ALTER TABLE reminders ADD COLUMN session_id TEXT NOT NULL DEFAULT 'main'"
                     )
 
                 # Backfill from legacy columns when they exist.
@@ -1046,6 +1054,7 @@ class StructuredStore:
         schedule_value: str,
         channel: str = "all",
         status: str = "active",
+        session_id: str = "main",
         next_run_at: str | None = None,
         heartbeat_config: str | None = None,
     ) -> int:
@@ -1061,12 +1070,13 @@ class StructuredStore:
                     schedule_value,
                     channel,
                     status,
+                    session_id,
                     created_at,
                     updated_at,
                     next_run_at,
                     heartbeat_config
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     title,
@@ -1075,6 +1085,7 @@ class StructuredStore:
                     schedule_value,
                     channel,
                     status,
+                    session_id,
                     now,
                     now,
                     next_run_at,
@@ -1098,6 +1109,7 @@ class StructuredStore:
                     schedule_value,
                     channel,
                     status,
+                    session_id,
                     created_at,
                     updated_at,
                     next_run_at,
@@ -1134,6 +1146,7 @@ class StructuredStore:
                     schedule_value,
                     channel,
                     status,
+                    session_id,
                     created_at,
                     updated_at,
                     next_run_at,

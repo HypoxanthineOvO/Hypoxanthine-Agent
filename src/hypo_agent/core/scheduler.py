@@ -256,7 +256,7 @@ class SchedulerService:
                 event = {
                     "event_type": "reminder_trigger",
                     "reminder_id": reminder_id,
-                    "session_id": self.default_session_id,
+                    "session_id": str(payload.get("session_id") or self.default_session_id),
                     "title": payload.get("title", ""),
                     "description": payload.get("description"),
                     "channel": payload.get("channel", "all"),

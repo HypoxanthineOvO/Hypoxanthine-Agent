@@ -6,12 +6,27 @@ from pydantic import ValidationError
 import structlog
 from uuid import uuid4
 
+try:
+    from litellm.exceptions import OpenAIError as LiteLLMOpenAIError
+except ImportError:  # pragma: no cover - depends on runtime environment
+    LiteLLMOpenAIError = None
+
+try:
+    from openai import OpenAIError as OpenAIClientError
+except ImportError:  # pragma: no cover - optional runtime dependency
+    OpenAIClientError = None
+
 from hypo_agent.core.pipeline import ChatPipeline
 from hypo_agent.core.time_utils import utc_isoformat, utc_now
 from hypo_agent.models import Message
 
 router = APIRouter()
 logger = structlog.get_logger("hypo_agent.gateway.ws")
+_LLM_RUNTIME_ERRORS = tuple(
+    error_type
+    for error_type in (LiteLLMOpenAIError, OpenAIClientError)
+    if isinstance(error_type, type)
+)
 
 
 def _error_fields(exc: Exception) -> dict[str, str]:
@@ -111,7 +126,7 @@ def _build_error_event(session_id: str, exc: Exception) -> dict[str, object]:
             "session_id": session_id,
         }
 
-    if isinstance(exc, RuntimeError):
+    if isinstance(exc, (RuntimeError, *_LLM_RUNTIME_ERRORS)):
         return {
             "type": "error",
             "code": "LLM_RUNTIME_ERROR",

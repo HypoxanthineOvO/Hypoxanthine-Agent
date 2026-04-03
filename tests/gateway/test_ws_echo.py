@@ -1,5 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
+from litellm.exceptions import InternalServerError
 from starlette.websockets import WebSocketDisconnect
 
 class StubPipeline:
@@ -30,6 +31,18 @@ class TimeoutPipeline:
         if False:  # pragma: no cover
             yield {}
         raise TimeoutError("llm timeout")
+
+
+class ProviderErrorPipeline:
+    async def stream_reply(self, inbound):
+        del inbound
+        if False:  # pragma: no cover
+            yield {}
+        raise InternalServerError(
+            message="gateway returned html",
+            llm_provider="openai",
+            model="openai/gpt-5.4",
+        )
 
 
 class ToolEventPipeline:
@@ -179,6 +192,23 @@ def test_ws_sends_retryable_timeout_error_event(app_factory) -> None:
                 "type": "error",
                 "code": "LLM_TIMEOUT",
                 "message": "LLM 调用超时，请稍后重试",
+                "retryable": True,
+                "session_id": "s1",
+            }
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                ws.receive_json()
+            assert exc_info.value.code == 1011
+
+
+def test_ws_maps_provider_api_error_to_llm_runtime_error(app_factory) -> None:
+    with _client(app_factory, pipeline=ProviderErrorPipeline()) as client:
+        with client.websocket_connect("/ws?token=test-token") as ws:
+            ws.send_json({"text": "hello", "sender": "user", "session_id": "s1"})
+            event = ws.receive_json()
+            assert event == {
+                "type": "error",
+                "code": "LLM_RUNTIME_ERROR",
+                "message": "LLM 调用失败，请检查配置或稍后重试",
                 "retryable": True,
                 "session_id": "s1",
             }
