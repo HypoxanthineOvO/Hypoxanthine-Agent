@@ -16,7 +16,7 @@ class AgentWatchdog:
         pipeline: Any,
         heartbeat_service: Any | None = None,
         check_interval_seconds: float = 30.0,
-        inactivity_timeout_seconds: float = 900.0,
+        inactivity_timeout_seconds: float = 0.0,
         max_consecutive_heartbeat_failures: int = 3,
         exit_fn: Callable[[int], Any] = sys.exit,
     ) -> None:

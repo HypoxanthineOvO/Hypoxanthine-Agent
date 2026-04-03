@@ -39,6 +39,19 @@ def test_agent_watchdog_requests_exit_after_repeated_heartbeat_failures() -> Non
     assert exits == [1]
 
 
+def test_agent_watchdog_does_not_exit_on_idle_pipeline_by_default() -> None:
+    exits: list[int] = []
+    watchdog = AgentWatchdog(
+        pipeline=RunningPipeline(activity_age_seconds=901.0),
+        heartbeat_service=HeartbeatStub(consecutive_failures=0),
+        exit_fn=exits.append,
+    )
+
+    watchdog._check_once()
+
+    assert exits == []
+
+
 def test_agent_watchdog_requests_exit_after_pipeline_inactivity() -> None:
     exits: list[int] = []
     watchdog = AgentWatchdog(

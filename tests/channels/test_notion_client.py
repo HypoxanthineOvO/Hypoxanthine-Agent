@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import httpx
+import notion_client
 from notion_client.errors import APIErrorCode, APIResponseError
 import pytest
 
 from hypo_agent.channels.notion.notion_client import NotionClient
 from hypo_agent.channels.notion.notion_client import NotionTimeoutError, NotionUnavailableError
+
+
+def test_notion_client_import_resolves_to_installed_dependency() -> None:
+    assert "site-packages" in str(Path(notion_client.__file__).resolve())
 
 
 def test_notion_client_preserves_auth_when_options_are_set() -> None:
