@@ -2,7 +2,7 @@ default_model: KimiK25
 
 task_routing:
   chat: GPT
-  lightweight: DeepseekV3_2
+  lightweight: GLM47Coding
   embedding: VolcanoEmbedding
   vision: GPT
 
@@ -20,6 +20,13 @@ models:
     supports_tool_calling: true
     description: "Kimi K2.5 via 火山引擎 Coding Plan (OpenAI compat)"
     fallback: DeepseekV3_2_Core
+
+  GLM47Coding:
+    litellm_model: "openai/glm-4.7"
+    provider: "volcengine_coding"
+    supports_tool_calling: true
+    description: "GLM-4.7 via 火山引擎 Coding Plan (OpenAI compat)"
+    fallback: KimiK25
 
   Gemini3Pro:
     provider: Hiapi
