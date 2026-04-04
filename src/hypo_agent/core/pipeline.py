@@ -83,6 +83,12 @@ REPLY_BOUNDARY_SYSTEM_PROMPT = (
 KILL_SWITCH_MESSAGE = "⚠️ Kill Switch 已激活。所有执行已停止。发送 /resume 恢复。"
 SESSION_FUSED_MESSAGE = "⚠️ 本次对话累计错误过多（5 次），已暂停执行。请检查问题后重新发送消息继续。"
 COMPRESSED_MARKER_PREFIX = "[📦 Output compressed"
+HEARTBEAT_TOOL_CONTENT_CHAR_LIMIT = 1800
+HEARTBEAT_TOOL_CONTENT_LINE_LIMIT = 80
+HEARTBEAT_TOOL_VALUE_CHAR_LIMIT = 600
+HEARTBEAT_TOOL_COLLECTION_LIMIT = 8
+HEARTBEAT_TOOL_DEPTH_LIMIT = 3
+HEARTBEAT_TRUNCATION_MARKER = "... [truncated for heartbeat]"
 
 TOOL_STATUS_TEMPLATES: dict[str, dict[str, str]] = {
     "create_reminder": {
@@ -829,9 +835,10 @@ class ChatPipeline:
                                 error=output.error_info,
                             )
                         serialized_output = json.dumps(output.model_dump(mode="json"), ensure_ascii=False)
-                        tool_content = self._tool_content_for_llm(
+                        tool_content = self._tool_content_for_react(
                             output,
                             serialized_output=serialized_output,
+                            inbound=inbound,
                         )
                         tool_result_for_event: Any = output.result
                         tool_metadata_for_event = dict(output.metadata)
@@ -1604,6 +1611,156 @@ class ChatPipeline:
             if stripped:
                 return stripped
         return serialized_output
+
+    def _tool_content_for_react(
+        self,
+        output: SkillOutput,
+        *,
+        serialized_output: str,
+        inbound: Message | None,
+    ) -> str:
+        content = self._tool_content_for_llm(output, serialized_output=serialized_output)
+        if not self._is_heartbeat_request(inbound):
+            return content
+        return self._compact_tool_content_for_heartbeat(output, fallback_content=content)
+
+    def _compact_tool_content_for_heartbeat(
+        self,
+        output: SkillOutput,
+        *,
+        fallback_content: str,
+    ) -> str:
+        if self._heartbeat_tool_content_is_small_enough(fallback_content):
+            return fallback_content
+
+        result = output.result
+        if output.status == "success" and isinstance(result, str):
+            return self._truncate_heartbeat_text(result)
+
+        payload: dict[str, Any] = {"status": output.status}
+        if result not in (None, "", [], {}):
+            payload["result"] = self._compact_heartbeat_value(result, depth=0)
+        if output.error_info:
+            payload["error_info"] = self._truncate_heartbeat_text(
+                output.error_info,
+                limit=min(HEARTBEAT_TOOL_VALUE_CHAR_LIMIT, HEARTBEAT_TOOL_CONTENT_CHAR_LIMIT),
+            )
+        if output.metadata:
+            payload["metadata"] = self._compact_heartbeat_value(output.metadata, depth=0)
+        if output.attachments:
+            payload["attachment_count"] = len(output.attachments)
+
+        compact = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if self._heartbeat_tool_content_is_small_enough(compact):
+            return compact
+        return self._truncate_heartbeat_text(compact)
+
+    def _heartbeat_tool_content_is_small_enough(self, content: str) -> bool:
+        return (
+            len(content) <= HEARTBEAT_TOOL_CONTENT_CHAR_LIMIT
+            and content.count("\n") + 1 <= HEARTBEAT_TOOL_CONTENT_LINE_LIMIT
+        )
+
+    def _compact_heartbeat_value(self, value: Any, *, depth: int) -> Any:
+        if isinstance(value, str):
+            return self._truncate_heartbeat_text(value, limit=HEARTBEAT_TOOL_VALUE_CHAR_LIMIT)
+
+        if depth >= HEARTBEAT_TOOL_DEPTH_LIMIT:
+            return self._summarize_heartbeat_value(value)
+
+        if isinstance(value, dict):
+            compact: dict[str, Any] = {}
+            ordered_items = list(self._iter_heartbeat_dict_items(value))
+            for key, item in ordered_items[:HEARTBEAT_TOOL_COLLECTION_LIMIT]:
+                compact[str(key)] = self._compact_heartbeat_value(item, depth=depth + 1)
+            truncated_keys = len(ordered_items) - HEARTBEAT_TOOL_COLLECTION_LIMIT
+            if truncated_keys > 0:
+                compact["_truncated_keys"] = truncated_keys
+            return compact
+
+        if isinstance(value, list):
+            compact_items = [
+                self._compact_heartbeat_value(item, depth=depth + 1)
+                for item in value[:HEARTBEAT_TOOL_COLLECTION_LIMIT]
+            ]
+            truncated_items = len(value) - HEARTBEAT_TOOL_COLLECTION_LIMIT
+            if truncated_items > 0:
+                compact_items.append(f"... ({truncated_items} more items truncated for heartbeat)")
+            return compact_items
+
+        if isinstance(value, tuple):
+            return self._compact_heartbeat_value(list(value), depth=depth)
+
+        if isinstance(value, set):
+            return self._compact_heartbeat_value(sorted(value, key=str), depth=depth)
+
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+
+        return self._truncate_heartbeat_text(str(value), limit=HEARTBEAT_TOOL_VALUE_CHAR_LIMIT)
+
+    def _iter_heartbeat_dict_items(self, value: dict[Any, Any]) -> list[tuple[Any, Any]]:
+        priority_keys = (
+            "status",
+            "exit_code",
+            "code",
+            "ok",
+            "success",
+            "error",
+            "error_info",
+            "message",
+            "summary",
+            "text",
+            "stdout",
+            "stderr",
+            "output",
+            "content",
+        )
+        seen: set[Any] = set()
+        ordered: list[tuple[Any, Any]] = []
+        for key in priority_keys:
+            if key in value:
+                ordered.append((key, value[key]))
+                seen.add(key)
+        for key, item in value.items():
+            if key in seen:
+                continue
+            ordered.append((key, item))
+        return ordered
+
+    def _summarize_heartbeat_value(self, value: Any) -> str:
+        if isinstance(value, dict):
+            return f"<dict with {len(value)} keys truncated for heartbeat>"
+        if isinstance(value, (list, tuple, set)):
+            return f"<{type(value).__name__} with {len(value)} items truncated for heartbeat>"
+        return self._truncate_heartbeat_text(str(value), limit=HEARTBEAT_TOOL_VALUE_CHAR_LIMIT)
+
+    def _truncate_heartbeat_text(
+        self,
+        text: Any,
+        *,
+        limit: int = HEARTBEAT_TOOL_CONTENT_CHAR_LIMIT,
+    ) -> str:
+        normalized = str(text).strip()
+        if not normalized:
+            return ""
+
+        if normalized.count("\n") + 1 > HEARTBEAT_TOOL_CONTENT_LINE_LIMIT:
+            lines = normalized.splitlines()
+            head_count = max(1, HEARTBEAT_TOOL_CONTENT_LINE_LIMIT // 2)
+            tail_count = max(1, HEARTBEAT_TOOL_CONTENT_LINE_LIMIT // 4)
+            omitted = max(0, len(lines) - head_count - tail_count)
+            selected = lines[:head_count]
+            if omitted > 0:
+                selected.append(f"... [{omitted} lines truncated for heartbeat]")
+            selected.extend(lines[-tail_count:])
+            normalized = "\n".join(selected)
+
+        if len(normalized) <= limit:
+            return normalized
+
+        body_budget = max(0, limit - len(HEARTBEAT_TRUNCATION_MARKER))
+        return f"{normalized[:body_budget]}{HEARTBEAT_TRUNCATION_MARKER}"
 
     async def _send_tool_status(
         self,

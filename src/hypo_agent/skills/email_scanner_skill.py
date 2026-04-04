@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -24,7 +25,15 @@ from hypo_agent.skills.base import BaseSkill
 
 logger = structlog.get_logger("hypo_agent.skills.email_scanner_skill")
 
-_EMAIL_MODEL_ERRORS = (ModelError, OSError, RuntimeError, TypeError, ValueError)
+_EMAIL_MODEL_ERRORS = (
+    ModelError,
+    asyncio.TimeoutError,
+    TimeoutError,
+    OSError,
+    RuntimeError,
+    TypeError,
+    ValueError,
+)
 _EMAIL_IMAP_ERRORS = (imaplib.IMAP4.error, OSError, RuntimeError, TypeError, ValueError)
 _EMAIL_DATE_ERRORS = (TypeError, ValueError, OverflowError)
 
@@ -53,6 +62,7 @@ class EmailScannerSkill(BaseSkill):
     description = "Scan emails from IMAP accounts and generate summaries."
     required_permissions: list[str] = []
     HEARTBEAT_SCAN_STARTED_AT_PREF_KEY = "email_scanner.last_heartbeat_scan_started_at"
+    HEARTBEAT_LAYER2_TIMEOUT_SECONDS = 8.0
 
     def __init__(
         self,
@@ -287,8 +297,14 @@ class EmailScannerSkill(BaseSkill):
             "skip_llm": False,
         }
 
-    async def _classify_email(self, email_payload: dict[str, Any]) -> dict[str, Any]:
+    async def _classify_email(
+        self,
+        email_payload: dict[str, Any],
+        *,
+        triggered_by: str = "",
+    ) -> dict[str, Any]:
         layer1 = self._apply_layer1_rules(email_payload)
+        heartbeat_mode = str(triggered_by or "").strip().lower() == "heartbeat"
         if layer1["matched"] and layer1["skip_llm"]:
             return {
                 "layer": "rule",
@@ -299,14 +315,19 @@ class EmailScannerSkill(BaseSkill):
             }
 
         # Layer 2: lightweight classification for unmatched or non-skip rules.
-        layer2 = await self._layer2_classify(email_payload, layer1)
+        layer2_timeout = self.HEARTBEAT_LAYER2_TIMEOUT_SECONDS if heartbeat_mode else None
+        layer2 = await self._layer2_classify(
+            email_payload,
+            layer1,
+            timeout_seconds=layer2_timeout,
+        )
         category = str(layer2.get("category") or layer1["category"] or "low_priority")
         if category not in {"important", "system", "low_priority", "archive"}:
             category = "low_priority"
 
-        # Layer 3: strong model summary for high-priority categories.
+        # Keep heartbeat scans cheap: classification is enough, subject remains as summary.
         summary = str(email_payload.get("subject") or "").strip() or "(no subject)"
-        if category in {"important", "system"}:
+        if category in {"important", "system"} and not heartbeat_mode:
             generated_summary = await self._layer3_summarize(email_payload)
             if generated_summary:
                 summary = generated_summary
@@ -324,6 +345,8 @@ class EmailScannerSkill(BaseSkill):
         self,
         email_payload: dict[str, Any],
         layer1: dict[str, Any],
+        *,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         fallback_category = str(layer1.get("category") or "low_priority")
         if not (
@@ -350,11 +373,17 @@ class EmailScannerSkill(BaseSkill):
             f"\nbody={str(email_payload.get('body', ''))[:600]}"
         )
         try:
-            result = await self.model_router.call_lightweight_json(prompt)
+            result = await self._await_model_result(
+                self.model_router.call_lightweight_json(prompt),
+                timeout_seconds=timeout_seconds,
+            )
         except TypeError:
-            result = await self.model_router.call_lightweight_json(
-                prompt,
-                session_id="main",
+            result = await self._await_model_result(
+                self.model_router.call_lightweight_json(
+                    prompt,
+                    session_id="main",
+                ),
+                timeout_seconds=timeout_seconds,
             )
         except _EMAIL_MODEL_ERRORS as exc:
             # FALLBACK: category falls back to layer1 when the lightweight classifier is unavailable.
@@ -403,10 +432,13 @@ class EmailScannerSkill(BaseSkill):
 
         try:
             return str(
-                await self.model_router.call(
-                    model_name,
-                    messages,
-                    session_id="main",
+                await self._await_model_result(
+                    self.model_router.call(
+                        model_name,
+                        messages,
+                        session_id="main",
+                    ),
+                    timeout_seconds=None,
                 )
             ).strip()
         except _EMAIL_MODEL_ERRORS as exc:
@@ -416,6 +448,16 @@ class EmailScannerSkill(BaseSkill):
                 **_error_fields(exc),
             )
             return ""
+
+    async def _await_model_result(
+        self,
+        awaitable: Any,
+        *,
+        timeout_seconds: float | None,
+    ) -> Any:
+        if timeout_seconds is None:
+            return await awaitable
+        return await asyncio.wait_for(awaitable, timeout=timeout_seconds)
 
     async def scan_emails(self, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
@@ -470,6 +512,7 @@ class EmailScannerSkill(BaseSkill):
                         cutoff_dt=cutoff_dt,
                         unread_only=unread_only,
                         dedupe_message_ids=dedupe_message_ids,
+                        triggered_by=triggered_by,
                     )
                 except _EMAIL_IMAP_ERRORS as exc:
                     logger.warning(
@@ -732,6 +775,7 @@ class EmailScannerSkill(BaseSkill):
         cutoff_dt: datetime | None,
         unread_only: bool,
         dedupe_message_ids: set[str] | None,
+        triggered_by: str,
     ) -> tuple[list[dict[str, Any]], int]:
         host = str(account.get("host") or "")
         port = int(account.get("port") or 993)
@@ -781,7 +825,7 @@ class EmailScannerSkill(BaseSkill):
                     duplicate_count += 1
                     continue
 
-                classification = await self._classify_email(payload)
+                classification = await self._classify_email(payload, triggered_by=triggered_by)
                 category = str(classification.get("category") or "low_priority")
                 attachment_paths = self._save_attachments(
                     parsed,

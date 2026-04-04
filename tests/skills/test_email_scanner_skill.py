@@ -13,6 +13,7 @@ from email.header import decode_header, make_header
 
 from hypo_agent.core.event_queue import EventQueue
 from hypo_agent.memory.email_store import EmailStore
+import hypo_agent.skills.email_scanner_skill as email_scanner_skill_module
 from hypo_agent.skills.email_scanner_skill import EmailScannerSkill
 
 
@@ -944,6 +945,32 @@ class LlmRouterStub:
         return "这是重点邮件摘要"
 
 
+class SlowHeartbeatLlmRouterStub:
+    def __init__(self) -> None:
+        self.lightweight_calls = 0
+        self.chat_calls = 0
+
+    def call_lightweight_json(self, prompt: str, *, session_id: str | None = None):
+        del prompt, session_id
+        self.lightweight_calls += 1
+
+        async def _pending() -> dict:
+            await asyncio.sleep(3600)
+            return {"category": "important", "confidence": 0.9, "reason": "slow"}
+
+        return _pending()
+
+    def call(self, model_name: str, messages: list[dict], *, session_id: str | None = None, tools=None):
+        del model_name, messages, session_id, tools
+        self.chat_calls += 1
+
+        async def _pending() -> str:
+            await asyncio.sleep(3600)
+            return "slow summary"
+
+        return _pending()
+
+
 def test_layer2_calls_lightweight_json_for_unmatched_mail(tmp_path: Path) -> None:
     rules_path = tmp_path / "email_rules.yaml"
     rules_path.write_text("rules: []", encoding="utf-8")
@@ -1003,6 +1030,46 @@ def test_layer3_calls_default_model_for_important_and_system(tmp_path: Path) -> 
     assert outcome["category"] in {"important", "system"}
     assert router.chat_calls == 1
     assert "摘要" in outcome["summary"]
+
+
+def test_heartbeat_classification_times_out_layer2_and_skips_layer3(tmp_path: Path, monkeypatch) -> None:
+    rules_path = tmp_path / "email_rules.yaml"
+    rules_path.write_text("rules: []", encoding="utf-8")
+    secrets_path = tmp_path / "secrets.yaml"
+    _write_secrets(secrets_path)
+    router = SlowHeartbeatLlmRouterStub()
+    skill = EmailScannerSkill(
+        structured_store=StubStore(),
+        model_router=router,
+        message_queue=None,
+        rules_path=rules_path,
+        secrets_path=secrets_path,
+    )
+
+    async def fake_wait_for(awaitable, timeout):
+        del timeout
+        awaitable.close()
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(email_scanner_skill_module.asyncio, "wait_for", fake_wait_for)
+
+    outcome = asyncio.run(
+        skill._classify_email(
+            {
+                "account_name": "main",
+                "message_id": "<heartbeat-layer2-1>",
+                "from": "finance@example.com",
+                "subject": "Monthly invoice",
+                "body": "Please pay before Friday",
+            },
+            triggered_by="heartbeat",
+        )
+    )
+
+    assert router.lightweight_calls == 1
+    assert router.chat_calls == 0
+    assert outcome["category"] == "low_priority"
+    assert outcome["summary"] == "Monthly invoice"
 
 
 def test_email_attachments_saved_under_memory_email_attachments(tmp_path: Path) -> None:

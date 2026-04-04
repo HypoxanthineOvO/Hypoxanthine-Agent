@@ -740,6 +740,86 @@ def test_pipeline_stream_reply_uses_heartbeat_specific_round_limit() -> None:
     assert router.tools_history[2] is None
 
 
+def test_pipeline_heartbeat_compacts_tool_output_for_followup_round() -> None:
+    memory = StubSessionMemory()
+    huge_stdout = "\n".join(f"line {index}: {'x' * 80}" for index in range(240))
+    skills = StubSkillManager(
+        output=SkillOutput(
+            status="success",
+            result={"stdout": huge_stdout, "stderr": "", "exit_code": 0},
+        )
+    )
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.last_messages: list[dict] = []
+
+        async def call_with_tools(
+            self,
+            model_name,
+            messages,
+            *,
+            tools=None,
+            session_id=None,
+            timeout_seconds=None,
+        ):
+            del model_name, session_id, timeout_seconds
+            self.calls += 1
+            if self.calls == 1:
+                assert tools is not None
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"command\": \"uptime\"}",
+                            },
+                        }
+                    ],
+                }
+            self.last_messages = messages
+            return {"text": "heartbeat ok", "tool_calls": []}
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None, timeout_seconds=None):
+            del model_name, messages, session_id, tools, timeout_seconds
+            raise AssertionError("stream should not be called")
+            yield ""  # pragma: no cover
+
+    router = StubRouter()
+    pipeline = ChatPipeline(
+        router=router,
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skills,
+        heartbeat_allowed_tools={"exec_command"},
+        heartbeat_model_timeout_seconds=60,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(
+            text="heartbeat",
+            sender="user",
+            session_id="s1",
+            channel="system",
+            message_tag="heartbeat",
+            metadata={"source": "heartbeat", "skip_memory_search": True},
+        )
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+    assert events[-1]["type"] == "assistant_done"
+    tool_messages = [message for message in router.last_messages if message.get("role") == "tool"]
+    assert len(tool_messages) == 1
+    tool_content = str(tool_messages[0]["content"])
+    assert len(tool_content) < 2500
+    assert "truncated for heartbeat" in tool_content
+    assert "exit_code" in tool_content
+
+
 def test_pipeline_stream_reply_emits_error_when_tool_blocked() -> None:
     memory = StubSessionMemory()
     skills = StubSkillManager(
