@@ -440,7 +440,7 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
 
     runtime_config = load_runtime_model_config()
     router = ModelRouter(runtime_config, on_stream_success=on_stream_success)
-    skill_catalog = SkillCatalog(get_agent_root() / "skills")
+    skill_catalog = SkillCatalog(get_agent_root() / "skills", check_cli_availability=True)
     skill_catalog.scan()
     persona_path = Path("config/persona.yaml")
     knowledge_dir = get_memory_dir() / "knowledge"
@@ -642,12 +642,14 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
     return ChatPipeline(
         router=router,
         chat_model=chat_model,
+        heartbeat_chat_model=router.get_model_for_task("lightweight"),
         session_memory=deps.session_memory,
         history_window=20,
         skill_manager=deps.skill_manager,
         structured_store=deps.structured_store,
         max_react_rounds=15,
-        heartbeat_model_timeout_seconds=60,
+        heartbeat_max_react_rounds=3,
+        heartbeat_model_timeout_seconds=25,
         heartbeat_allowed_tools=heartbeat_allowed_tools,
         slash_commands=slash_commands,
         output_compressor=deps.output_compressor,
@@ -659,6 +661,28 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
         sop_manager=deps.sop_manager,
         skill_catalog=skill_catalog,
     )
+
+
+def _derive_heartbeat_service_timeout_seconds(
+    pipeline_obj: Any,
+    *,
+    default_timeout_seconds: int = 120,
+) -> int:
+    default_timeout = max(5, int(default_timeout_seconds))
+    max_rounds = int(getattr(pipeline_obj, "heartbeat_max_react_rounds", 0) or 0)
+    per_round_timeout = getattr(pipeline_obj, "heartbeat_model_timeout_seconds", None)
+    if max_rounds <= 0 or per_round_timeout is None:
+        return default_timeout
+    per_round_budget = max(5, int(float(per_round_timeout)))
+    # Leave room for tool execution and a final summarization pass.
+    derived_timeout = (max_rounds * (per_round_budget + 10)) + 15
+    return max(default_timeout, derived_timeout)
+
+
+def _configure_heartbeat_service_timeout(heartbeat_service: Any | None, pipeline_obj: Any) -> None:
+    if heartbeat_service is None or not hasattr(heartbeat_service, "timeout_seconds"):
+        return
+    heartbeat_service.timeout_seconds = _derive_heartbeat_service_timeout_seconds(pipeline_obj)
 
 
 def _ensure_pipeline_lifecycle_hooks(pipeline_obj: Any) -> None:
@@ -840,6 +864,7 @@ def create_app(
 
     pipeline_instance = pipeline or _build_default_pipeline(resolved_deps)
     _ensure_pipeline_lifecycle_hooks(pipeline_instance)
+    _configure_heartbeat_service_timeout(resolved_deps.heartbeat_service, pipeline_instance)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -900,6 +925,10 @@ def create_app(
                             error=str(exc),
                         )
                         pass
+                    _configure_heartbeat_service_timeout(
+                        resolved_deps.heartbeat_service,
+                        app.state.pipeline,
+                    )
                     heartbeat_prompt_path = (
                         Path(getattr(app.state, "config_dir", Path("config")))
                         / "heartbeat_prompt.md"

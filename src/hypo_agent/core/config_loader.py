@@ -191,6 +191,11 @@ def load_runtime_model_config(
         raise ValueError(
             f"default_model '{model_config.default_model}' is not defined in models"
         )
+    for task_type, model_name in model_config.task_routing.items():
+        if model_name not in resolved_models:
+            raise ValueError(
+                f"task_routing '{task_type}' model '{model_name}' is not defined in models"
+            )
 
     return RuntimeModelConfig(
         default_model=model_config.default_model,

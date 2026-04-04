@@ -595,7 +595,7 @@ def test_pipeline_stream_reply_respects_max_react_rounds() -> None:
 
     events = asyncio.run(_collect())
     assert events[-2]["type"] == "assistant_chunk"
-    assert "max react rounds" in events[-2]["text"].lower()
+    assert "best-effort summary" in events[-2]["text"].lower()
     assert events[-1]["type"] == "assistant_done"
 
 
@@ -818,6 +818,78 @@ def test_pipeline_heartbeat_compacts_tool_output_for_followup_round() -> None:
     assert len(tool_content) < 2500
     assert "truncated for heartbeat" in tool_content
     assert "exit_code" in tool_content
+
+
+def test_pipeline_queued_heartbeat_event_forces_skip_memory_and_timeout() -> None:
+    memory = StubSessionMemory()
+
+    class SemanticMemory:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int]] = []
+
+        def search(self, query: str, top_k: int = 5):
+            self.calls.append((query, top_k))
+            return []
+
+    semantic_memory = SemanticMemory()
+    captured: dict[str, object] = {}
+
+    class StubRouter:
+        async def call_with_tools(
+            self,
+            model_name,
+            messages,
+            *,
+            tools=None,
+            session_id=None,
+            timeout_seconds=None,
+        ):
+            del model_name, tools
+            captured["session_id"] = session_id
+            captured["timeout_seconds"] = timeout_seconds
+            captured["messages"] = messages
+            return {"text": "heartbeat ok", "tool_calls": []}
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None, timeout_seconds=None):
+            del model_name, messages, session_id, tools, timeout_seconds
+            raise AssertionError("stream should not be called")
+            yield ""  # pragma: no cover
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=StubSkillManager(),
+        semantic_memory=semantic_memory,
+        heartbeat_model_timeout_seconds=25,
+        heartbeat_max_react_rounds=2,
+    )
+
+    emitted: list[dict] = []
+
+    async def _run() -> None:
+        inbound = Message(
+            text="heartbeat",
+            sender="user",
+            session_id="main",
+            channel="webui",
+            metadata={},
+            message_tag="heartbeat",
+        )
+        await pipeline._consume_user_message_event(
+            {
+                "event_type": "user_message",
+                "message": inbound,
+                "emit": emitted.append,
+            }
+        )
+
+    asyncio.run(_run())
+
+    assert semantic_memory.calls == []
+    assert captured["session_id"] == "main"
+    assert captured["timeout_seconds"] == 25.0
+    assert emitted[-1]["type"] == "assistant_done"
 
 
 def test_pipeline_stream_reply_emits_error_when_tool_blocked() -> None:

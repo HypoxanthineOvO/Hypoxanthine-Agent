@@ -698,6 +698,35 @@ def test_model_router_get_model_for_task_uses_task_routing(
     assert router.get_model_for_task("missing_task") == "Gemini3Pro"
 
 
+def test_model_router_get_model_for_task_falls_back_when_routed_model_missing() -> None:
+    runtime = RuntimeModelConfig.model_validate(
+        {
+            "default_model": "Gemini3Pro",
+            "task_routing": {"lightweight": "DeepseekV3_2"},
+            "models": {
+                "Gemini3Pro": {
+                    "provider": "Hiapi",
+                    "litellm_model": "openai/gemini-2.5-pro",
+                    "fallback": None,
+                    "api_base": "https://hiapi.online/v1",
+                    "api_key": "sk-hiapi",
+                }
+            },
+        }
+    )
+
+    async def fake_acompletion(**kwargs):
+        del kwargs
+        return {
+            "choices": [{"message": {"content": "{\"ok\": true}", "tool_calls": []}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    router = ModelRouter(runtime, acompletion_fn=fake_acompletion)
+
+    assert router.get_model_for_task("lightweight") == "Gemini3Pro"
+
+
 def test_model_router_call_with_tools_emits_success_event_with_latency(
     runtime_config: RuntimeModelConfig,
 ) -> None:

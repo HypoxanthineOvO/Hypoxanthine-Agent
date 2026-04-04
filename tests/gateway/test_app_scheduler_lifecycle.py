@@ -8,7 +8,11 @@ from fastapi.testclient import TestClient
 
 from hypo_agent.core.event_queue import EventQueue
 from hypo_agent.core.pipeline import ChatPipeline
-from hypo_agent.gateway.app import AppDeps, create_app
+from hypo_agent.gateway.app import (
+    AppDeps,
+    _derive_heartbeat_service_timeout_seconds,
+    create_app,
+)
 from hypo_agent.memory.session import SessionMemory
 from hypo_agent.memory.structured_store import StructuredStore
 
@@ -714,3 +718,11 @@ email_store:
         assert skill_manager._skills["email_scanner"].scan_params == [
             {"hours_back": 168, "triggered_by": "cache_warmup"}
         ]
+
+
+def test_heartbeat_service_timeout_budget_scales_with_rounds_and_per_round_timeout() -> None:
+    class PipelineStub:
+        heartbeat_max_react_rounds = 4
+        heartbeat_model_timeout_seconds = 25
+
+    assert _derive_heartbeat_service_timeout_seconds(PipelineStub()) == 155

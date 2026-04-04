@@ -180,6 +180,39 @@ providers:
         load_runtime_model_config(models_yaml, secrets_yaml)
 
 
+def test_load_runtime_model_config_rejects_missing_task_routing_model(
+    tmp_path: Path,
+) -> None:
+    models_yaml = tmp_path / "models.yaml"
+    models_yaml.write_text(
+        """
+default_model: Gemini3Pro
+task_routing:
+  lightweight: DeepseekV3_2
+models:
+  Gemini3Pro:
+    provider: Hiapi
+    litellm_model: openai/gemini-2.5-pro
+    fallback: null
+""".strip(),
+        encoding="utf-8",
+    )
+
+    secrets_yaml = tmp_path / "secrets.yaml"
+    secrets_yaml.write_text(
+        """
+providers:
+  Hiapi:
+    api_base: https://hiapi.online/v1
+    api_key: sk-hiapi
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="task_routing 'lightweight' model 'DeepseekV3_2'"):
+        load_runtime_model_config(models_yaml, secrets_yaml)
+
+
 def test_load_tasks_config_accepts_heartbeat_email_store_and_hypo_info_digest(tmp_path: Path) -> None:
     tasks_yaml = tmp_path / "tasks.yaml"
     tasks_yaml.write_text(

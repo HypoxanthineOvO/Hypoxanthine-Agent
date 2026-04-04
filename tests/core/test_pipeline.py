@@ -395,6 +395,97 @@ def test_pipeline_injects_skill_instructions_and_exec_profile() -> None:
     ]
 
 
+def test_pipeline_injects_cli_json_metadata_into_exec_command() -> None:
+    memory = StubSessionMemory()
+
+    class StubCatalog:
+        def match_candidates(self, user_message: str):
+            assert "json cli" in user_message
+            return [
+                SkillManifest(
+                    name="external-cli",
+                    description="JSON CLI workflow",
+                    category="pure",
+                    path=Path("/tmp/external-cli"),
+                    allowed_tools=["exec_command"],
+                    backend="exec",
+                    exec_profile="cli-json",
+                    triggers=["json cli"],
+                    risk="low",
+                    dependencies=["json-cli"],
+                    compatibility="linux",
+                    cli_package="@acme/json-cli",
+                    cli_commands=["json-cli"],
+                    io_format="json-stdio",
+                )
+            ]
+
+        def load_body(self, skill_name: str) -> str:
+            assert skill_name == "external-cli"
+            return "Use the JSON CLI."
+
+    class StubRouter:
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            if not hasattr(self, "called"):
+                self.called = 1
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_exec",
+                            "function": {
+                                "name": "exec_command",
+                                "arguments": "{\"command\":\"json-cli ping\"}",
+                            },
+                        }
+                    ],
+                }
+            return {"text": "done", "tool_calls": []}
+
+    class RecordingSkillManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict, str | None, str | None]] = []
+
+        def get_tools_schema(self):
+            return [{"type": "function", "function": {"name": "exec_command"}}]
+
+        async def invoke(self, tool_name, params, *, session_id=None, skill_name=None):
+            self.calls.append((tool_name, params, session_id, skill_name))
+            return SkillOutput(status="success", result={"stdout": '{"ok":true}'})
+
+    skills = RecordingSkillManager()
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        skill_manager=skills,
+        skill_catalog=StubCatalog(),
+    )
+
+    async def _collect() -> None:
+        inbound = Message(text="please run the json cli", sender="user", session_id="s1")
+        async for _ in pipeline.stream_reply(inbound):
+            pass
+
+    asyncio.run(_collect())
+
+    assert skills.calls == [
+        (
+            "exec_command",
+            {
+                "command": "json-cli ping",
+                "exec_profile": "cli-json",
+                "allowed_commands": ["json-cli"],
+                "io_format": "json-stdio",
+            },
+            "s1",
+            "external-cli",
+        )
+    ]
+
+
 def test_pipeline_invokes_tools_with_direct_skill_name() -> None:
     memory = StubSessionMemory()
 
@@ -1018,6 +1109,100 @@ def test_pipeline_skips_semantic_memory_for_heartbeat_messages() -> None:
     )
 
     assert reply.text == "heartbeat ok"
+
+
+def test_pipeline_heartbeat_bypasses_persona_dynamic_semantic_memory() -> None:
+    memory = StubSessionMemory()
+
+    class StubSemanticMemory:
+        async def search(self, query: str, top_k: int = 5) -> list[ChunkResult]:
+            raise AssertionError(
+                f"persona semantic memory should be skipped for heartbeat: {query=} {top_k=}"
+            )
+
+    class StubPersonaManager:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def get_system_prompt_section(self, query: str | None = None) -> str:
+            self.calls.append(str(query or ""))
+            return "persona-with-dynamic-memory"
+
+    class StubRouter:
+        async def call(self, model_name, messages):
+            del model_name
+            system_messages = [item for item in messages if item["role"] == "system"]
+            assert all("persona-with-dynamic-memory" not in item["content"] for item in system_messages)
+            return "heartbeat ok"
+
+    persona_manager = StubPersonaManager()
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        persona_system_prompt="static persona only",
+        persona_manager=persona_manager,
+        semantic_memory=StubSemanticMemory(),
+    )
+
+    reply = asyncio.run(
+        pipeline.run_once(
+            Message(
+                text="heartbeat prompt",
+                sender="user",
+                session_id="s1",
+                channel="system",
+                message_tag="heartbeat",
+                metadata={"source": "heartbeat", "skip_memory_search": True},
+            )
+        )
+    )
+
+    assert reply.text == "heartbeat ok"
+    assert persona_manager.calls == []
+
+
+def test_pipeline_heartbeat_prefers_lightweight_model_route() -> None:
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.models: list[str] = []
+
+        def get_model_for_task(self, task_type: str) -> str:
+            if task_type == "lightweight":
+                return "DeepseekV3_2_Core"
+            return "GPT"
+
+        async def call(self, model_name, messages):
+            del messages
+            self.models.append(model_name)
+            return "heartbeat ok"
+
+    router = StubRouter()
+    pipeline = ChatPipeline(
+        router=router,
+        chat_model="GPT",
+        session_memory=memory,
+        history_window=20,
+    )
+
+    reply = asyncio.run(
+        pipeline.run_once(
+            Message(
+                text="heartbeat prompt",
+                sender="user",
+                session_id="s1",
+                channel="system",
+                message_tag="heartbeat",
+                metadata={"source": "heartbeat", "skip_memory_search": True},
+            )
+        )
+    )
+
+    assert reply.text == "heartbeat ok"
+    assert router.models == ["DeepseekV3_2_Core"]
 
 
 def test_pipeline_marks_sop_usage_after_semantic_hit() -> None:

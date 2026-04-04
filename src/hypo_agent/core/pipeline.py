@@ -223,6 +223,7 @@ class ChatPipeline:
         router: ChatModelRouter,
         chat_model: str,
         session_memory: SessionMemory,
+        heartbeat_chat_model: str | None = None,
         history_window: int = 20,
         skill_manager: ChatSkillManager | None = None,
         structured_store: Any | None = None,
@@ -252,6 +253,7 @@ class ChatPipeline:
         self.structured_store = structured_store
         self.circuit_breaker = circuit_breaker
         self.max_react_rounds = max_react_rounds
+        self.heartbeat_chat_model = str(heartbeat_chat_model or "").strip() or None
         self.heartbeat_max_react_rounds = heartbeat_max_react_rounds
         self.heartbeat_model_timeout_seconds = heartbeat_model_timeout_seconds
         self.heartbeat_allowed_tools = set(heartbeat_allowed_tools or set())
@@ -345,6 +347,11 @@ class ChatPipeline:
             and skill_manifest.exec_profile
         ):
             updated.setdefault("exec_profile", skill_manifest.exec_profile)
+            if skill_manifest.exec_profile == "cli-json":
+                if skill_manifest.cli_commands:
+                    updated.setdefault("allowed_commands", list(skill_manifest.cli_commands))
+                if skill_manifest.io_format:
+                    updated.setdefault("io_format", skill_manifest.io_format)
         return updated
 
     def _metadata_flag_enabled(self, metadata: dict[str, Any], key: str) -> bool:
@@ -387,6 +394,20 @@ class ChatPipeline:
         if timeout_seconds is None:
             return None
         return float(timeout_seconds)
+
+    def _resolve_heartbeat_model(self) -> str:
+        configured = str(self.heartbeat_chat_model or "").strip()
+        if configured:
+            return configured
+        getter = getattr(self.router, "get_model_for_task", None)
+        if callable(getter):
+            try:
+                candidate = str(getter("lightweight") or "").strip()
+            except Exception:
+                candidate = ""
+            if candidate:
+                return candidate
+        return self.chat_model
 
     def _filter_tools_for_inbound(
         self,
@@ -465,6 +486,7 @@ class ChatPipeline:
         self,
         react_messages: list[dict[str, Any]],
         *,
+        model_name: str,
         session_id: str,
         max_react_rounds: int,
     ) -> str:
@@ -492,7 +514,7 @@ class ChatPipeline:
             ):
                 decision_kwargs["timeout_seconds"] = self.heartbeat_model_timeout_seconds
             decision = await self.router.call_with_tools(
-                self.chat_model,
+                model_name,
                 final_messages,
                 **decision_kwargs,
             )
@@ -512,7 +534,7 @@ class ChatPipeline:
                 ):
                     stream_kwargs["timeout_seconds"] = self.heartbeat_model_timeout_seconds
                 async for chunk in self.router.stream(
-                    self.chat_model,
+                    model_name,
                     final_messages,
                     **stream_kwargs,
                 ):
@@ -528,7 +550,7 @@ class ChatPipeline:
                 max_rounds=max_react_rounds,
             )
 
-        return "Stopped due to max ReAct rounds limit."
+        return "Based on the information gathered so far, here is the best-effort summary."
 
     def _append_session_message(self, message: Message) -> None:
         if self._session_persistence_suppressed():
@@ -919,7 +941,7 @@ class ChatPipeline:
                         max_react_rounds=max_react_rounds,
                     ):
                         reached_round_limit = False
-                        logger.warning(
+                        logger.info(
                             "react.round_limit.degrading",
                             session_id=inbound.session_id,
                             round=round_num,
@@ -927,6 +949,7 @@ class ChatPipeline:
                         )
                         full_text = await self._generate_round_limit_summary(
                             react_messages,
+                            model_name=model_name,
                             session_id=inbound.session_id,
                             max_react_rounds=max_react_rounds,
                         )
@@ -1088,7 +1111,7 @@ class ChatPipeline:
             user_content = text
 
         llm_messages: list[dict[str, Any]] = []
-        persona_prompt = await self._resolve_persona_prompt(text)
+        persona_prompt = await self._resolve_persona_prompt(text, inbound=inbound)
         if persona_prompt:
             llm_messages.append({"role": "system", "content": persona_prompt})
         if use_tools:
@@ -1124,7 +1147,9 @@ class ChatPipeline:
         llm_messages.append({"role": "user", "content": user_content})
         return llm_messages
 
-    async def _resolve_persona_prompt(self, query: str) -> str:
+    async def _resolve_persona_prompt(self, query: str, *, inbound: Message | None = None) -> str:
+        if inbound is not None and self._is_heartbeat_request(inbound):
+            return self.persona_system_prompt
         if self.persona_manager is not None:
             getter = getattr(self.persona_manager, "get_system_prompt_section", None)
             if callable(getter):
@@ -1336,6 +1361,8 @@ class ChatPipeline:
         return {"role": role, "content": text}
 
     def _resolve_model_for_inbound(self, inbound: Message) -> str:
+        if self._is_heartbeat_request(inbound):
+            return self._resolve_heartbeat_model()
         if self._has_image_attachments(inbound):
             getter = getattr(self.router, "get_model_for_task", None)
             if callable(getter):
@@ -1955,6 +1982,17 @@ class ChatPipeline:
 
         tokens: list[tuple[ContextVar[Any], object]] = []
         if self._is_internal_heartbeat_message(inbound):
+            inbound = inbound.model_copy(
+                update={
+                    "channel": "system",
+                    "message_tag": "heartbeat",
+                    "metadata": {
+                        **dict(inbound.metadata),
+                        "source": "heartbeat",
+                        "skip_memory_search": True,
+                    },
+                }
+            )
             tokens = [
                 (_PIPELINE_INTERNAL_SOURCE, _PIPELINE_INTERNAL_SOURCE.set("heartbeat")),
                 (_PIPELINE_SUPPRESS_PERSISTENCE, _PIPELINE_SUPPRESS_PERSISTENCE.set(True)),

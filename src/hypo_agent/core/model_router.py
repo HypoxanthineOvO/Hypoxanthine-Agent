@@ -295,7 +295,17 @@ class ModelRouter:
         ) from last_error
 
     def get_model_for_task(self, task_type: str) -> str:
-        return self.config.task_routing.get(task_type, self.config.default_model)
+        routed_model = self.config.task_routing.get(task_type)
+        if routed_model and routed_model in self.config.models:
+            return routed_model
+        if routed_model:
+            self.logger.warning(
+                "task_routing_model_missing",
+                task_type=task_type,
+                configured_model=routed_model,
+                fallback_model=self.config.default_model,
+            )
+        return self.config.default_model
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
