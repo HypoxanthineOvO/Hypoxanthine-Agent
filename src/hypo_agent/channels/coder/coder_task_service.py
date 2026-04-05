@@ -32,22 +32,27 @@ class CoderTaskService:
         checker = getattr(self.coder_client, "supports_continuation", None)
         return bool(checker()) if callable(checker) else False
 
+    def supports_incremental_output(self) -> bool:
+        checker = getattr(self.coder_client, "supports_incremental_output", None)
+        return bool(checker()) if callable(checker) else False
+
     async def submit_task(
         self,
         *,
         session_id: str,
         prompt: str,
         working_directory: str | None = None,
-        model: str = "o4-mini",
+        model: str | None = None,
     ) -> dict[str, Any]:
         resolved_directory = await self.resolve_working_directory(
             session_id=session_id,
             explicit_directory=working_directory,
         )
+        normalized_model = str(model or "").strip() or None
         payload = await self.coder_client.create_task(
             prompt=prompt,
             working_directory=resolved_directory,
-            model=model,
+            model=normalized_model,
             approval_policy="full-auto",
             webhook=self.webhook_url,
         )
@@ -59,7 +64,7 @@ class CoderTaskService:
                 session_id=session_id,
                 working_directory=resolved_directory,
                 prompt_summary=prompt.strip()[:200],
-                model=model,
+                model=normalized_model,
                 status=status,
                 attached=True,
             )
@@ -70,7 +75,7 @@ class CoderTaskService:
             "session_id": session_id,
             "working_directory": resolved_directory,
             "prompt_summary": prompt.strip()[:200],
-            "model": model,
+            "model": normalized_model,
             "status": status,
             "attached": 1,
             "done": 0,
@@ -176,6 +181,20 @@ class CoderTaskService:
 
     async def health(self) -> dict[str, Any]:
         return dict(await self.coder_client.health())
+
+    async def get_task_output(
+        self,
+        *,
+        task_id: str,
+        after: str | None = None,
+    ) -> dict[str, Any]:
+        getter = getattr(self.coder_client, "get_task_output", None)
+        if not callable(getter):
+            return {"cursor": str(after or "").strip(), "lines": [], "done": False}
+        payload = getter(task_id, after=after)
+        if hasattr(payload, "__await__"):
+            payload = await payload
+        return dict(payload) if isinstance(payload, dict) else {"cursor": str(after or "").strip(), "lines": [], "done": False}
 
     async def send_to_task(
         self,

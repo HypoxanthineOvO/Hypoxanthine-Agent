@@ -153,6 +153,7 @@ class HypoCoderConfig(BaseModel):
     agent_token: str
     webhook_secret: str
     webhook_url: str = ""
+    incremental_output_enabled: bool = False
 
 
 class ProbeConfig(BaseModel):

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TypedDict
 
 import httpx
 
@@ -13,6 +13,12 @@ class CoderUnavailableError(ExternalServiceError):
     """Raised when Hypo-Coder cannot be reached or returns an unusable response."""
 
 
+class TaskOutput(TypedDict):
+    cursor: str
+    lines: list[str]
+    done: bool
+
+
 class CoderClient:
     def __init__(
         self,
@@ -20,10 +26,12 @@ class CoderClient:
         agent_token: str,
         *,
         timeout_seconds: float = 15.0,
+        incremental_output_enabled: bool = False,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.agent_token = agent_token
         self.timeout_seconds = timeout_seconds
+        self._incremental_output_enabled = bool(incremental_output_enabled)
 
     def supports_streaming(self) -> bool:
         return False
@@ -31,20 +39,25 @@ class CoderClient:
     def supports_continuation(self) -> bool:
         return False
 
+    def supports_incremental_output(self) -> bool:
+        return self._incremental_output_enabled
+
     async def create_task(
         self,
         prompt: str,
         working_directory: str,
-        model: str = "o4-mini",
+        model: str | None = None,
         approval_policy: str = "full-auto",
         webhook: str | None = None,
     ) -> dict:
         payload: dict[str, Any] = {
             "prompt": prompt,
             "workingDirectory": working_directory,
-            "model": model,
             "approvalPolicy": approval_policy,
         }
+        normalized_model = str(model or "").strip()
+        if normalized_model:
+            payload["model"] = normalized_model
         if webhook:
             payload["webhook"] = webhook
         response = await self._request("POST", "/api/tasks", json=payload)
@@ -74,6 +87,34 @@ class CoderClient:
         response = await self._request("GET", "/api/health")
         return response if isinstance(response, dict) else {}
 
+    async def get_task_output(self, task_id: str, after: str | None = None) -> TaskOutput:
+        params = {"after": after} if after else None
+        headers = {"Authorization": f"Bearer {self.agent_token}"}
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.base_url,
+                timeout=self.timeout_seconds,
+                headers=headers,
+            ) as client:
+                response = await client.request(
+                    "GET",
+                    f"/api/tasks/{task_id}/output",
+                    params=params,
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, ValueError):
+            return self._empty_task_output(after=after)
+
+        if not isinstance(payload, dict):
+            return self._empty_task_output(after=after)
+
+        raw_lines = payload.get("lines")
+        lines = [str(item) for item in raw_lines if item is not None] if isinstance(raw_lines, list) else []
+        cursor = str(payload.get("cursor") or after or "").strip()
+        done = bool(payload.get("done"))
+        return {"cursor": cursor, "lines": lines, "done": done}
+
     async def _request(
         self,
         method: str,
@@ -94,3 +135,6 @@ class CoderClient:
                 return response.json()
         except (httpx.HTTPError, ValueError) as exc:
             raise CoderUnavailableError(_UNAVAILABLE_MESSAGE) from exc
+
+    def _empty_task_output(self, *, after: str | None = None) -> TaskOutput:
+        return {"cursor": str(after or "").strip(), "lines": [], "done": False}

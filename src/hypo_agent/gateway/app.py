@@ -438,9 +438,18 @@ def _load_hypo_coder_runtime(
     agent_token = str(coder_cfg.agent_token or "").strip()
     webhook_secret = str(coder_cfg.webhook_secret or "").strip()
     webhook_url = str(coder_cfg.webhook_url or "").strip() or None
+    incremental_output_enabled = bool(getattr(coder_cfg, "incremental_output_enabled", False))
     if not base_url or not agent_token or not webhook_secret:
         return None, webhook_secret or None, webhook_url
-    return CoderClient(base_url=base_url, agent_token=agent_token), webhook_secret, webhook_url
+    return (
+        CoderClient(
+            base_url=base_url,
+            agent_token=agent_token,
+            incremental_output_enabled=incremental_output_enabled,
+        ),
+        webhook_secret,
+        webhook_url,
+    )
 
 
 def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
