@@ -258,6 +258,55 @@ def test_info_reach_execute_formats_subscription_results_for_llm(tmp_path: Path)
     assert "ai-watch" in deleted.result
 
 
+def test_info_reach_execute_returns_rendered_text_for_query_and_summary(tmp_path: Path) -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/agent/query":
+            return httpx.Response(
+                200,
+                json={
+                    "articles": [
+                        {
+                            "title": "推理模型发布",
+                            "summary": "重点在推理吞吐和成本下降。",
+                            "importance": 9,
+                            "source_name": "OpenAI",
+                            "url": "https://example.com/query",
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/api/agent/digest":
+            return httpx.Response(
+                200,
+                json={
+                    "highlight": "今天 AI 新闻偏多。",
+                    "sections": [{"category": "AI", "items": ["推理模型发布"]}],
+                    "stats": {"total_articles": 1},
+                },
+            )
+        raise AssertionError(f"unexpected path: {request.url.path}")
+
+    skill = _build_skill(tmp_path=tmp_path, transport=httpx.MockTransport(_handler))
+
+    query_output = asyncio.run(
+        skill.execute(
+            "info_query",
+            {"category": "AI", "keyword": "推理", "time_range": "today"},
+        )
+    )
+    summary_output = asyncio.run(skill.execute("info_summary", {"time_range": "today"}))
+
+    assert query_output.status == "success"
+    assert isinstance(query_output.result, str)
+    assert "推理模型发布" in query_output.result
+    assert query_output.metadata == {"rendered": True}
+
+    assert summary_output.status == "success"
+    assert isinstance(summary_output.result, str)
+    assert "今天 AI 新闻偏多" in summary_output.result
+    assert summary_output.metadata == {"rendered": True}
+
+
 # ---------------------------------------------------------------------------
 # Task 3: subscriptions, migration, heartbeat
 # ---------------------------------------------------------------------------

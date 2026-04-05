@@ -153,7 +153,8 @@ class InfoReachSkill(BaseSkill):
                     "description": (
                         "Retrieve Hypo-Info articles for internal news lookup. "
                         "After calling, answer the user with a concise natural-language summary of the findings. "
-                        "Do not dump raw JSON, field names, or internal payloads."
+                        "Do not dump raw JSON, field names, or internal payloads. "
+                        "Treat the tool result as source material to summarize, not text to echo verbatim."
                     ),
                     "parameters": {
                         "type": "object",
@@ -177,7 +178,8 @@ class InfoReachSkill(BaseSkill):
                     "name": "info_summary",
                     "description": (
                         "Retrieve a Hypo-Info digest for proactive updates. "
-                        "Summarize the digest in natural-language sections for the user instead of repeating raw JSON."
+                        "Summarize the digest in natural-language sections for the user instead of repeating raw JSON. "
+                        "Treat the tool result as source material to summarize, not text to echo verbatim."
                     ),
                     "parameters": {
                         "type": "object",
@@ -252,12 +254,12 @@ class InfoReachSkill(BaseSkill):
                     min_importance=params.get("min_importance"),
                     source_name=str(params.get("source_name") or "").strip() or None,
                 )
-                return SkillOutput(status="success", result=result)
+                return SkillOutput(status="success", result=result, metadata={"rendered": True})
             if tool_name == "info_summary":
                 result = await self.info_summary(
                     time_range=str(params.get("time_range") or "today").strip() or "today",
                 )
-                return SkillOutput(status="success", result=result)
+                return SkillOutput(status="success", result=result, metadata={"rendered": True})
             if tool_name == "info_subscribe":
                 name = str(params.get("name") or "").strip()
                 keywords = self._normalize_string_list(params.get("keywords"))
