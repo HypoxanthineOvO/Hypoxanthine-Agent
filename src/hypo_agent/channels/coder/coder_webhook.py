@@ -36,17 +36,34 @@ async def coder_webhook(request: Request) -> JSONResponse:
     if not event or event != event_header:
         return JSONResponse(status_code=400, content={"detail": "event mismatch"})
 
+    structured_store = getattr(request.app.state, "structured_store", None)
+    task_id = str(payload.get("taskId") or "").strip()
+    task_row: dict[str, Any] | None = None
+    if structured_store is not None and task_id:
+        getter = getattr(structured_store, "get_coder_task", None)
+        if callable(getter):
+            result = getter(task_id)
+            task_row = await result if hasattr(result, "__await__") else result
+        updater = getattr(structured_store, "update_coder_task_status", None)
+        if callable(updater):
+            status, last_error = _task_status_from_event(payload)
+            result = updater(task_id=task_id, status=status, last_error=last_error)
+            if hasattr(result, "__await__"):
+                await result
+
     text = _format_event_message(payload)
     callback = getattr(getattr(request.app.state, "pipeline", None), "on_proactive_message", None)
-    if callback is not None and text:
+    session_id = str(task_row.get("session_id") or "").strip() if isinstance(task_row, dict) else ""
+    attached = bool(int(task_row.get("attached") or 0)) if isinstance(task_row, dict) else False
+    if callback is not None and text and session_id and attached:
         result = callback(
             Message(
                 text=text,
                 sender="hypo-coder",
-                session_id="main",
+                session_id=session_id,
                 channel="system",
                 message_tag="tool_status",
-                metadata={"source": "hypo_coder", "task_id": str(payload.get("taskId") or "").strip()},
+                metadata={"source": "hypo_coder", "task_id": task_id},
             )
         )
         if hasattr(result, "__await__"):
@@ -86,3 +103,14 @@ def _format_event_message(payload: dict[str, Any]) -> str:
         command = str(payload.get("command") or payload.get("message") or "未知操作").strip() or "未知操作"
         return f"Hypo-Coder 需要你审批一个操作：{command}"
     return f"Hypo-Coder 事件：{event}"
+
+
+def _task_status_from_event(payload: dict[str, Any]) -> tuple[str, str]:
+    event = str(payload.get("event") or "").strip()
+    if event == "task.completed":
+        return "completed", ""
+    if event == "task.failed":
+        return "failed", str(payload.get("error") or "未知错误").strip() or "未知错误"
+    if event == "task.approval_required":
+        return "approval_required", ""
+    return event.replace("task.", "").strip() or "unknown"

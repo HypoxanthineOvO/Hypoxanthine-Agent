@@ -38,3 +38,26 @@ async def list_session_tool_invocations(
     structured_store = request.app.state.structured_store
     rows = await structured_store.list_tool_invocations(session_id=session_id)
     return rows
+
+
+@router.get("/sessions/{session_id}/coder-tasks")
+async def list_session_coder_tasks(
+    session_id: str,
+    request: Request,
+) -> list[dict]:
+    require_api_token(request)
+
+    structured_store = request.app.state.structured_store
+    rows = await structured_store.list_coder_tasks(session_id=session_id)
+    return rows
+
+
+@router.get("/sessions/{session_id}/coder-task")
+async def get_session_attached_coder_task(
+    session_id: str,
+    request: Request,
+) -> dict | None:
+    require_api_token(request)
+
+    structured_store = request.app.state.structured_store
+    return await structured_store.get_attached_coder_task_for_session(session_id)

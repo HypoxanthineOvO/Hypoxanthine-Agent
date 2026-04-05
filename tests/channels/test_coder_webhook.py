@@ -56,6 +56,17 @@ def test_webhook_completed(tmp_path: Path) -> None:
     body, signature = _sign("coder-secret", payload)
 
     with client:
+        asyncio.run(
+            client.app.state.structured_store.create_coder_task(
+                task_id="task-abc123",
+                session_id="s-coder",
+                working_directory="/repo/demo",
+                prompt_summary="fix hello",
+                model="o4-mini",
+                status="running",
+                attached=True,
+            )
+        )
         client.app.state.coder_webhook_secret = "coder-secret"
         client.app.state.pipeline.on_proactive_message = capture
         response = client.post(
@@ -72,10 +83,13 @@ def test_webhook_completed(tmp_path: Path) -> None:
     assert response.json() == {"status": "ok"}
     assert len(pushed) == 1
     assert pushed[0].message_tag == "tool_status"
-    assert pushed[0].session_id == "main"
+    assert pushed[0].session_id == "s-coder"
     assert "编码任务完成！" in str(pushed[0].text)
     assert "文件变更：1 个文件" in str(pushed[0].text)
     assert "测试：通过" in str(pushed[0].text)
+    task = asyncio.run(client.app.state.structured_store.get_coder_task("task-abc123"))
+    assert task is not None
+    assert task["status"] == "completed"
 
 
 def test_webhook_failed(tmp_path: Path) -> None:
@@ -94,6 +108,17 @@ def test_webhook_failed(tmp_path: Path) -> None:
     body, signature = _sign("coder-secret", payload)
 
     with client:
+        asyncio.run(
+            client.app.state.structured_store.create_coder_task(
+                task_id="task-abc123",
+                session_id="s-coder",
+                working_directory="/repo/demo",
+                prompt_summary="fix hello",
+                model="o4-mini",
+                status="running",
+                attached=True,
+            )
+        )
         client.app.state.coder_webhook_secret = "coder-secret"
         client.app.state.pipeline.on_proactive_message = capture
         response = client.post(
@@ -109,6 +134,61 @@ def test_webhook_failed(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert len(pushed) == 1
     assert "编码任务失败：pytest failed" == pushed[0].text
+    assert pushed[0].session_id == "s-coder"
+    task = asyncio.run(client.app.state.structured_store.get_coder_task("task-abc123"))
+    assert task is not None
+    assert task["status"] == "failed"
+    assert task["last_error"] == "pytest failed"
+
+
+def test_webhook_detached_task_updates_db_without_push(tmp_path: Path) -> None:
+    client = _build_client(tmp_path)
+    pushed: list[Message] = []
+
+    async def capture(message: Message) -> None:
+        pushed.append(message)
+
+    payload = {
+        "event": "task.completed",
+        "taskId": "task-abc123",
+        "timestamp": "2026-03-27T11:00:00Z",
+        "result": {
+            "summary": "已修复 hello.py 并通过校验。",
+            "fileChanges": [{"path": "hello.py", "changeType": "modified"}],
+            "testsPassed": True,
+        },
+    }
+    body, signature = _sign("coder-secret", payload)
+
+    with client:
+        asyncio.run(
+            client.app.state.structured_store.create_coder_task(
+                task_id="task-abc123",
+                session_id="s-coder",
+                working_directory="/repo/demo",
+                prompt_summary="fix hello",
+                model="o4-mini",
+                status="running",
+                attached=False,
+            )
+        )
+        client.app.state.coder_webhook_secret = "coder-secret"
+        client.app.state.pipeline.on_proactive_message = capture
+        response = client.post(
+            "/api/coder/webhook",
+            content=body,
+            headers={
+                "content-type": "application/json",
+                "X-HypoCoder-Event": "task.completed",
+                "X-HypoCoder-Signature": signature,
+            },
+        )
+
+    assert response.status_code == 200
+    assert pushed == []
+    task = asyncio.run(client.app.state.structured_store.get_coder_task("task-abc123"))
+    assert task is not None
+    assert task["status"] == "completed"
 
 
 def test_webhook_invalid_secret(tmp_path: Path) -> None:

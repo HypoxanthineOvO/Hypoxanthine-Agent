@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from hypo_agent.channels.coder import CoderClient, CoderUnavailableError
+from hypo_agent.channels.coder import CoderClient, CoderTaskService, CoderUnavailableError
 from hypo_agent.core.config_loader import load_secrets_config
 from hypo_agent.models import SkillOutput
 from hypo_agent.skills.base import BaseSkill
@@ -20,6 +20,7 @@ class CoderSkill(BaseSkill):
         *,
         secrets_path: Path | str = "config/secrets.yaml",
         coder_client: Any | None = None,
+        coder_task_service: CoderTaskService | None = None,
         webhook_url: str | None = None,
         now_fn: Callable[[], datetime] | None = None,
     ) -> None:
@@ -27,6 +28,12 @@ class CoderSkill(BaseSkill):
         self.now_fn = now_fn or (lambda: datetime.now(UTC))
         self.webhook_url = str(webhook_url or "").strip() or None
         self._client = coder_client or self._build_client_from_config()
+        self._service = coder_task_service or CoderTaskService(
+            coder_client=self._client,
+            structured_store=None,
+            webhook_url=self.webhook_url,
+            now_fn=self.now_fn,
+        )
 
     @property
     def tools(self) -> list[dict[str, Any]]:
@@ -138,18 +145,17 @@ class CoderSkill(BaseSkill):
         working_directory: str,
         model: str = "o4-mini",
     ) -> str:
-        payload = await self._client.create_task(
+        payload = await self._service.submit_task(
+            session_id="skill-coder",
             prompt=prompt,
             working_directory=working_directory,
             model=model,
-            approval_policy="full-auto",
-            webhook=self.webhook_url,
         )
-        task_id = str(payload.get("taskId") or "").strip() or "unknown"
+        task_id = str(payload.get("task_id") or payload.get("taskId") or "").strip() or "unknown"
         return f"任务已提交，task_id={task_id}，正在执行中。完成后会通知你。"
 
     async def coder_task_status(self, task_id: str) -> str:
-        task = await self._client.get_task(task_id)
+        task = await self._service.get_task_status(task_id=task_id)
         status = str(task.get("status") or "unknown").strip().lower()
         if status in {"queued", "running", "in_progress"}:
             minutes = self._elapsed_minutes(task)
@@ -175,7 +181,7 @@ class CoderSkill(BaseSkill):
         return f"任务 {task_id} 当前状态：{status or 'unknown'}"
 
     async def coder_list_tasks(self, *, status: str | None = None) -> str:
-        tasks = await self._client.list_tasks(status=status)
+        tasks = await self._service.list_tasks(status=status)
         if not tasks:
             return "当前没有编码任务"
         lines = [f"编码任务列表（共 {len(tasks)} 个）"]
@@ -187,12 +193,12 @@ class CoderSkill(BaseSkill):
         return "\n".join(lines)
 
     async def coder_abort_task(self, task_id: str) -> str:
-        payload = await self._client.abort_task(task_id)
+        payload = await self._service.abort_task(task_id=task_id)
         status = str(payload.get("status") or "aborted").strip() or "aborted"
         return f"任务 {task_id} 已请求中止，当前状态：{status}"
 
     async def coder_health(self) -> str:
-        payload = await self._client.health()
+        payload = await self._service.health()
         status = str(payload.get("status") or "unknown").strip() or "unknown"
         return f"Hypo-Coder 状态：{status}"
 

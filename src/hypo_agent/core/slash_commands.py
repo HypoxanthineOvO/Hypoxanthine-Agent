@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import inspect
+import shlex
 from typing import Any, Awaitable, Callable, Protocol
 
 import structlog
@@ -58,6 +59,7 @@ class SlashCommandHandler:
         structured_store: SlashStructuredStore,
         circuit_breaker: Any | None = None,
         skill_manager: Any | None = None,
+        coder_task_service: Any | None = None,
         memory_gc: Any | None = None,
         model_probe_fn: Callable[[str, Any], Awaitable[Any]] | None = None,
     ) -> None:
@@ -66,6 +68,7 @@ class SlashCommandHandler:
         self.structured_store = structured_store
         self.circuit_breaker = circuit_breaker
         self.skill_manager = skill_manager
+        self.coder_task_service = coder_task_service
         self.memory_gc = memory_gc
         self.model_probe_fn = model_probe_fn
         self._registry: list[SlashCommandEntry] = [
@@ -127,6 +130,11 @@ class SlashCommandHandler:
                 description="手动触发 Memory GC",
                 handler=self._handle_gc,
             ),
+            SlashCommandEntry(
+                command="/codex",
+                description="调用 Hypo-Coder 提交、查询、挂载和管理编码任务",
+                handler=self._handle_codex,
+            ),
         ]
 
     async def try_handle(self, inbound: Message) -> str | None:
@@ -136,6 +144,8 @@ class SlashCommandHandler:
 
         command = " ".join(raw.split())
         command_lower = command.lower()
+        if command_lower == "/codex" or command_lower.startswith("/codex "):
+            return await self._handle_codex(inbound)
         if command_lower == "/reminders" or command_lower.startswith("/reminders "):
             return await self._handle_reminders(inbound)
 
@@ -389,6 +399,149 @@ class SlashCommandHandler:
         skipped = int(result.get("skipped_count") or 0)
         errors = int(result.get("error_count") or 0)
         return f"Memory GC 完成：processed={processed} skipped={skipped} errors={errors}"
+
+    async def _handle_codex(self, inbound: Message) -> str:
+        if self.coder_task_service is None:
+            return "Codex 不可用。"
+
+        raw = (inbound.text or "").strip()
+        payload = raw[len("/codex") :].strip()
+        if not payload:
+            return self._codex_help_text()
+
+        lowered = payload.lower()
+        if lowered.startswith("send "):
+            instruction = payload[5:].strip()
+            if not instruction:
+                return "用法：/codex send <追加指令>"
+            result = await self.coder_task_service.send_to_task(
+                session_id=inbound.session_id,
+                instruction=instruction,
+                task_id="last",
+            )
+            return f"当前后端暂不支持 /codex send：{result}"
+
+        if lowered.startswith("status"):
+            parts = payload.split(maxsplit=1)
+            task_id = parts[1].strip() if len(parts) > 1 else "last"
+            result = await self.coder_task_service.get_task_status(
+                task_id=task_id,
+                session_id=inbound.session_id,
+            )
+            return (
+                f"Codex 任务状态：task_id={result.get('task_id', task_id)} "
+                f"status={result.get('status', 'unknown')}"
+            )
+
+        if lowered.startswith("list"):
+            parts = payload.split(maxsplit=1)
+            status = parts[1].strip() if len(parts) > 1 else None
+            rows = await self.coder_task_service.list_tasks(status=status)
+            if not rows:
+                return "当前没有 Codex 任务。"
+            lines = ["Codex 任务列表："]
+            for row in rows:
+                task_id = str(row.get("task_id") or row.get("taskId") or "-")
+                task_status = str(row.get("status") or "unknown")
+                model = str(row.get("model") or "-")
+                lines.append(f"- {task_id} | {task_status} | model={model}")
+            return "\n".join(lines)
+
+        if lowered.startswith("abort"):
+            parts = payload.split(maxsplit=1)
+            task_id = parts[1].strip() if len(parts) > 1 else "last"
+            result = await self.coder_task_service.abort_task(
+                task_id=task_id,
+                session_id=inbound.session_id,
+            )
+            return (
+                f"Codex 任务已请求中止：task_id={result.get('task_id', task_id)} "
+                f"status={result.get('status', 'unknown')}"
+            )
+
+        if lowered == "done":
+            await self.coder_task_service.mark_done(inbound.session_id)
+            return "已结束当前 Codex 会话绑定。"
+
+        if lowered.startswith("attach "):
+            task_id = payload.split(maxsplit=1)[1].strip()
+            if not task_id:
+                return "用法：/codex attach <task_id>"
+            await self.coder_task_service.attach_task(
+                session_id=inbound.session_id,
+                task_id=task_id,
+            )
+            return f"已挂载 Codex 任务：{task_id}"
+
+        if lowered == "detach":
+            await self.coder_task_service.detach_task(inbound.session_id)
+            return "已解除当前 Codex 任务挂载。"
+
+        if lowered == "health":
+            result = await self.coder_task_service.health()
+            status = str(result.get("status") or "unknown").strip() or "unknown"
+            return f"Hypo-Coder 状态：{status}"
+
+        submit = self._parse_codex_submit(payload)
+        if submit is None:
+            return self._codex_help_text()
+        result = await self.coder_task_service.submit_task(
+            session_id=inbound.session_id,
+            prompt=submit["prompt"],
+            working_directory=submit["working_directory"],
+            model="o4-mini",
+        )
+        return "\n".join(
+            [
+                "Codex 任务已提交",
+                f"task_id={result.get('task_id', 'unknown')}",
+                f"status={result.get('status', 'unknown')}",
+                f"目录：{result.get('working_directory', 'unknown')}",
+            ]
+        )
+
+    def _parse_codex_submit(self, payload: str) -> dict[str, str | None] | None:
+        try:
+            tokens = shlex.split(payload)
+        except ValueError:
+            return None
+        if not tokens:
+            return None
+
+        working_directory: str | None = None
+        prompt_tokens: list[str] = []
+        idx = 0
+        while idx < len(tokens):
+            token = tokens[idx]
+            if token == "--dir":
+                idx += 1
+                if idx >= len(tokens):
+                    return None
+                working_directory = tokens[idx].strip() or None
+            else:
+                prompt_tokens.append(token)
+            idx += 1
+
+        prompt = " ".join(token for token in prompt_tokens if token.strip()).strip()
+        if not prompt:
+            return None
+        return {"prompt": prompt, "working_directory": working_directory}
+
+    def _codex_help_text(self) -> str:
+        return "\n".join(
+            [
+                "Codex 用法：",
+                "/codex <prompt> [--dir /path]",
+                "/codex send <追加指令>",
+                "/codex status <task_id|last>",
+                "/codex list [status]",
+                "/codex abort <task_id|last>",
+                "/codex attach <task_id>",
+                "/codex detach",
+                "/codex done",
+                "/codex health",
+            ]
+        )
 
     def _reminder_status_badge(self, status: str) -> str:
         mapping = {

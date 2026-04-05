@@ -54,6 +54,98 @@ class EchoSkill(BaseSkill):
         return SkillOutput(status="success", result={"echo": params.get("text", "")})
 
 
+class FakeCoderTaskService:
+    def __init__(self) -> None:
+        self.submit_calls: list[dict[str, object]] = []
+        self.status_calls: list[dict[str, object]] = []
+        self.list_calls: list[str | None] = []
+        self.abort_calls: list[dict[str, object]] = []
+        self.attach_calls: list[tuple[str, str]] = []
+        self.detach_calls: list[str] = []
+        self.done_calls: list[str] = []
+        self.send_calls: list[dict[str, object]] = []
+        self.submit_result = {
+            "task_id": "task-123",
+            "status": "running",
+            "working_directory": "/home/heyx/Hypo-Agent",
+        }
+        self.status_result = {"task_id": "task-123", "status": "running"}
+        self.list_result = [
+            {"taskId": "task-123", "status": "running", "model": "o4-mini"},
+            {"taskId": "task-456", "status": "completed", "model": "o4-mini"},
+        ]
+        self.abort_result = {"task_id": "task-123", "status": "aborted"}
+        self.health_result = {"status": "ok"}
+        self.send_result = "Hypo-Coder API 暂不支持 session continuation。"
+
+    async def submit_task(
+        self,
+        *,
+        session_id: str,
+        prompt: str,
+        working_directory: str | None = None,
+        model: str = "o4-mini",
+    ) -> dict[str, object]:
+        self.submit_calls.append(
+            {
+                "session_id": session_id,
+                "prompt": prompt,
+                "working_directory": working_directory,
+                "model": model,
+            }
+        )
+        payload = dict(self.submit_result)
+        if working_directory:
+            payload["working_directory"] = working_directory
+        return payload
+
+    async def get_task_status(
+        self,
+        *,
+        task_id: str,
+        session_id: str | None = None,
+    ) -> dict[str, object]:
+        self.status_calls.append({"task_id": task_id, "session_id": session_id})
+        return dict(self.status_result)
+
+    async def list_tasks(self, *, status: str | None = None) -> list[dict[str, object]]:
+        self.list_calls.append(status)
+        return [dict(item) for item in self.list_result]
+
+    async def abort_task(
+        self,
+        *,
+        task_id: str,
+        session_id: str | None = None,
+    ) -> dict[str, object]:
+        self.abort_calls.append({"task_id": task_id, "session_id": session_id})
+        return dict(self.abort_result)
+
+    async def attach_task(self, *, session_id: str, task_id: str) -> None:
+        self.attach_calls.append((session_id, task_id))
+
+    async def detach_task(self, session_id: str) -> None:
+        self.detach_calls.append(session_id)
+
+    async def mark_done(self, session_id: str) -> None:
+        self.done_calls.append(session_id)
+
+    async def send_to_task(
+        self,
+        *,
+        session_id: str,
+        instruction: str,
+        task_id: str = "last",
+    ) -> str:
+        self.send_calls.append(
+            {"session_id": session_id, "instruction": instruction, "task_id": task_id}
+        )
+        return self.send_result
+
+    async def health(self) -> dict[str, object]:
+        return dict(self.health_result)
+
+
 async def _build_handler(tmp_path: Path) -> tuple[
     SlashCommandHandler,
     SessionMemory,
@@ -97,14 +189,17 @@ async def _build_handler(tmp_path: Path) -> tuple[
         }
     )
     router = StubRouter(runtime)
+    coder_task_service = FakeCoderTaskService()
     handler = SlashCommandHandler(
         router=router,
         session_memory=session_memory,
         structured_store=store,
         circuit_breaker=breaker,
         skill_manager=skill_manager,
+        coder_task_service=coder_task_service,
         model_probe_fn=None,
     )
+    handler.coder_task_service = coder_task_service
     return handler, session_memory, store, breaker
 
 
@@ -373,6 +468,95 @@ def test_slash_commands_gc_runs_memory_gc(tmp_path: Path) -> None:
         assert "Memory GC" in result
         assert "processed=2" in result
         assert memory_gc.calls == 1
+
+    asyncio.run(_run())
+
+
+def test_codex_submit_uses_service_and_parses_dir(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, _, _ = await _build_handler(tmp_path)
+
+        text = await handler.try_handle(
+            Message(
+                text="/codex 修复登录页 --dir /tmp/repo",
+                sender="user",
+                session_id="s1",
+            )
+        )
+
+        assert text is not None
+        assert "Codex 任务已提交" in text
+        assert "task-123" in text
+        assert "/tmp/repo" in text
+        assert handler.coder_task_service.submit_calls == [
+            {
+                "session_id": "s1",
+                "prompt": "修复登录页",
+                "working_directory": "/tmp/repo",
+                "model": "o4-mini",
+            }
+        ]
+
+    asyncio.run(_run())
+
+
+def test_codex_send_status_list_abort_attach_detach_done_and_health(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, _, _ = await _build_handler(tmp_path)
+
+        send_text = await handler.try_handle(
+            Message(text="/codex send 再补测试", sender="user", session_id="s1")
+        )
+        status_text = await handler.try_handle(
+            Message(text="/codex status last", sender="user", session_id="s1")
+        )
+        list_text = await handler.try_handle(
+            Message(text="/codex list running", sender="user", session_id="s1")
+        )
+        abort_text = await handler.try_handle(
+            Message(text="/codex abort last", sender="user", session_id="s1")
+        )
+        attach_text = await handler.try_handle(
+            Message(text="/codex attach task-456", sender="user", session_id="s1")
+        )
+        detach_text = await handler.try_handle(
+            Message(text="/codex detach", sender="user", session_id="s1")
+        )
+        done_text = await handler.try_handle(
+            Message(text="/codex done", sender="user", session_id="s1")
+        )
+        health_text = await handler.try_handle(
+            Message(text="/codex health", sender="user", session_id="s1")
+        )
+
+        assert send_text is not None
+        assert "暂不支持" in send_text
+        assert status_text is not None
+        assert "task-123" in status_text
+        assert "running" in status_text
+        assert list_text is not None
+        assert "Codex 任务列表" in list_text
+        assert "task-456" in list_text
+        assert abort_text is not None
+        assert "aborted" in abort_text
+        assert attach_text is not None and "task-456" in attach_text
+        assert detach_text is not None and "解除" in detach_text
+        assert done_text is not None and "结束" in done_text
+        assert health_text is not None and "ok" in health_text
+
+        assert handler.coder_task_service.send_calls == [
+            {"session_id": "s1", "instruction": "再补测试", "task_id": "last"}
+        ]
+        assert handler.coder_task_service.status_calls == [
+            {"task_id": "last", "session_id": "s1"}
+        ]
+        assert handler.coder_task_service.list_calls == ["running"]
+        assert handler.coder_task_service.abort_calls == [
+            {"task_id": "last", "session_id": "s1"}
+        ]
+        assert handler.coder_task_service.attach_calls == [("s1", "task-456")]
+        assert handler.coder_task_service.detach_calls == ["s1"]
+        assert handler.coder_task_service.done_calls == ["s1"]
 
     asyncio.run(_run())
 

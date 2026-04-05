@@ -117,10 +117,11 @@ graph LR
 ```
 
 - **Preprocess**：用廉价模型对消息进行意图分类、提取关键实体、判断是否需要调用工具。
-- **Slash Commands Pre-dispatch（M6）**：若用户消息以 `/` 开头且命中内置指令（如 `/model status`、`/token`、`/kill`），直接在 Pipeline 内处理并返回，跳过 LLM 调用（零 token）。
+- **Slash Commands Pre-dispatch（M6 / Codex 扩展）**：若用户消息以 `/` 开头且命中内置指令（如 `/model status`、`/token`、`/kill`、`/codex ...`），直接在 Pipeline 内处理并返回，跳过 LLM 调用（零 token）。
 - **Memory Injection**：根据当前上下文从三层记忆中检索相关信息，注入到 Prompt 中。
 - **LLM Reasoning**：由 Model Router 选定的模型执行推理。
 - **Skill Execution**：如果 LLM 返回工具调用请求，通过 Skill Manager 执行，结果回馈给 LLM 继续推理（标准的 ReAct 循环）。
+- **Codex Session Overlay**：普通 assistant 回复在出站阶段可附加当前 attached Codex task 状态栏；slash `/codex` 自身回复不附加，避免重复。
 
 **② Model Router（多模型路由器）**
 
@@ -218,6 +219,7 @@ class BaseSkill:
 | **ExecSkill** | 直接子进程执行一次性命令/脚本，支持硬超时与输出截断保护 | `required_permissions=[]` |
 | **TmuxSkill** | 管理持久 tmux 会话（`tmux_send` / `tmux_read`），仅用于长生命周期终端场景 | `required_permissions=[]` |
 | **CodeRunSkill** | 将 Python / shell 代码写入临时文件后执行，优先使用 bwrap 沙箱，缺失时 fallback 直执并告警 | `required_permissions=[]`（通过 PM 白名单生成 bwrap rw 绑定） |
+| **CoderSkill / CoderTaskService** | 统一复用 Hypo-Coder：tool calling 走 `CoderSkill`，`/codex` slash family 走 `CoderTaskService`，两者共享同一任务映射与 webhook 路由 | `required_permissions=[]` |
 | **FileSystemSkill** | 智能文件读取/写入/目录列表 + 目录树索引（`directory_index.yaml`） | `required_permissions=["filesystem"]` |
 | **EmailScannerSkill（M9）** | 多账户 IMAP 扫描、三层分类、摘要、附件落盘、定时扫描入队 | `required_permissions=[]`（依赖白名单限制附件目录） |
 
@@ -230,8 +232,17 @@ class BaseSkill:
 
 **后期扩展**：
 
-- `CodingBridgeSkill`：对接 Hypo-Coder / Codex / Claude Code
 - `NotionSkill`：接入 Notion API
+
+**Codex 会话层补充**：
+
+- `coder_tasks` 表持久化 `task_id -> session_id`、`working_directory`、`attached/done/status`，作为 slash、webhook、status bar 与 session API 的唯一事实来源。
+- `CoderTaskService` 负责 `/codex submit/status/list/abort/attach/detach/done/health` 编排，并在提交或 attach 后尝试启动降级 watcher。
+- `coder_webhook` 不再写死 `session_id="main"`；到达事件后先查 `coder_tasks`，只对 `attached=true` 的会话做主动推送。
+- 当前 Hypo-Coder API 尚未暴露 continuation / streaming endpoint，因此：
+  - `/codex send` 明确返回“不支持 session continuation”
+  - `CoderClient.supports_streaming()` / `supports_continuation()` 均为 `False`
+  - `CoderStreamWatcher` 仅做状态轮询与状态变化推送，字符聚合上限约 `800`
 
 ### 3.6 安全架构
 
