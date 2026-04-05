@@ -314,13 +314,22 @@ def _register_enabled_skills(
         _register(email_skill)
 
     if "heartbeat_snapshot" in enabled_skills:
-        _register(
-            HeartbeatSnapshotSkill(
-                email_skill=email_skill,
-                reminder_skill=reminder_skill,
-                notion_skill=notion_skill,
-            )
+        heartbeat_snapshot_skill = HeartbeatSnapshotSkill(
+            email_skill=email_skill,
+            reminder_skill=reminder_skill,
+            notion_skill=notion_skill,
         )
+        _register(heartbeat_snapshot_skill)
+        if heartbeat_service is not None and callable(
+            getattr(heartbeat_service, "configure_snapshot_provider", None)
+        ):
+            async def _heartbeat_snapshot_provider() -> dict[str, Any]:
+                result = await heartbeat_snapshot_skill.execute("get_heartbeat_snapshot", {})
+                if result.status != "success" or not isinstance(result.result, dict):
+                    return {}
+                return result.result
+
+            heartbeat_service.configure_snapshot_provider(_heartbeat_snapshot_provider)
 
     if "probe" in enabled_skills and probe_server is not None:
         _register(ProbeSkill(probe_server=probe_server))

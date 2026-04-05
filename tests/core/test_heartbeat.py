@@ -218,6 +218,51 @@ def test_heartbeat_reads_prompt_and_enqueues_non_silent_push(tmp_path: Path) -> 
     asyncio.run(_run())
 
 
+def test_heartbeat_replaces_generic_reply_with_snapshot_summary(tmp_path: Path) -> None:
+    async def _run() -> None:
+        prompt_path = tmp_path / "heartbeat_prompt.md"
+        prompt_path.write_text("heartbeat prompt", encoding="utf-8")
+        queue = AutoRespondingQueue(
+            [
+                {"type": "assistant_chunk", "text": "进程概况：已获取。机器整体正常。"},
+                {"type": "assistant_done"},
+            ]
+        )
+        service = HeartbeatService(
+            message_queue=queue,
+            scheduler=StubScheduler(running=True),
+            default_session_id="main",
+            prompt_path=prompt_path,
+            snapshot_provider=lambda: {
+                "system": {
+                    "human_summary": (
+                        "主机：genesis\n"
+                        "按人运行情况：\n"
+                        "- heyx：2 个进程，CPU 80%，主要进程：python train.py\n"
+                        "- shenby：1 个进程，CPU 30%，主要进程：java metals"
+                    ),
+                    "project_activity_summary": [
+                        "heyx：2 个进程，CPU 80%，主要进程：python train.py",
+                        "shenby：1 个进程，CPU 30%，主要进程：java metals",
+                    ],
+                },
+                "mail": {"human_summary": "没有新邮件。"},
+                "notion_todo": {"human_summary": "Notion 待办暂无需要汇报的事项。"},
+                "reminders": {"human_summary": "暂无过期或半天内提醒。"},
+            },
+        )
+
+        result = await service.run()
+
+        assert result["should_push"] is True
+        assert "按人运行情况" in result["summary"]
+        proactive_event = queue.events[1]
+        assert "heyx" in proactive_event["summary"]
+        assert "shenby" in proactive_event["summary"]
+
+    asyncio.run(_run())
+
+
 def test_heartbeat_silent_sentinel_does_not_enqueue_proactive_push(tmp_path: Path) -> None:
     async def _run() -> None:
         prompt_path = tmp_path / "heartbeat_prompt.md"

@@ -128,7 +128,38 @@ async def _fake_system_snapshot() -> dict:
     return {
         "host": "devbox",
         "projects_by_user": [
-            {"account": "heyx", "display_name": "贺云翔", "top_processes": ["pytest -q"]}
+            {
+                "account": "heyx",
+                "display_name": "贺云翔",
+                "process_count": 2,
+                "top_processes": ["pytest -q", "python train.py"],
+                "top_process_details": [
+                    {
+                        "pid": 123,
+                        "cpu_percent": 80.0,
+                        "memory_percent": 1.2,
+                        "gpu_memory_mb": 4096,
+                        "gpu_cards": ["0"],
+                        "command": "python train.py --project fast-ridge",
+                    }
+                ],
+                "activity_summary": "贺云翔/heyx：2 个进程，CPU 80.0%，内存 1.2%，GPU 4096 MiB（0）；主要进程：python train.py --project fast-ridge；pytest -q",
+            }
+        ],
+        "project_activity_summary": [
+            "贺云翔/heyx：2 个进程，CPU 80.0%，内存 1.2%，GPU 4096 MiB（0）；主要进程：python train.py --project fast-ridge；pytest -q"
+        ],
+        "top_system_processes": [
+            {
+                "user": "heyx",
+                "display_name": "贺云翔",
+                "pid": 123,
+                "cpu_percent": 80.0,
+                "memory_percent": 1.2,
+                "gpu_memory_mb": 4096,
+                "gpu_cards": ["0"],
+                "command": "python train.py --project fast-ridge",
+            }
         ],
     }
 
@@ -173,6 +204,11 @@ def test_heartbeat_snapshot_skill_returns_structured_sections(tmp_path: Path) ->
     payload = result.result
     assert payload["checked_at"] == "2026-04-05T12:00:00+08:00"
     assert payload["system"]["host"] == "devbox"
+    assert payload["system"]["projects_by_user"][0]["process_count"] == 2
+    assert payload["system"]["projects_by_user"][0]["top_process_details"][0]["pid"] == 123
+    assert "贺云翔/heyx" in payload["system"]["project_activity_summary"][0]
+    assert payload["system"]["top_system_processes"][0]["gpu_memory_mb"] == 4096
+    assert "按人运行情况" in payload["system"]["human_summary"]
     assert payload["mail"]["counts"] == {
         "important": 1,
         "low_priority": 1,
@@ -180,12 +216,15 @@ def test_heartbeat_snapshot_skill_returns_structured_sections(tmp_path: Path) ->
         "system": 0,
         "failed": 0,
     }
+    assert "重要邮件" in payload["mail"]["human_summary"]
     assert payload["mail"]["important"][0]["attachments"] == ["a.pdf"]
     assert payload["notion_todo"]["pending_today"][0]["title"] == "今天高优任务"
     assert payload["notion_todo"]["high_priority_due_soon"][0]["title"] == "今天高优任务"
     assert payload["notion_todo"]["completed_today"][0]["title"] == "今日已完成"
+    assert "今日到期未完成" in payload["notion_todo"]["human_summary"]
     assert payload["reminders"]["overdue"][0]["title"] == "过期提醒"
     assert payload["reminders"]["due_soon"][0]["title"] == "半天内提醒"
+    assert "过期提醒" in payload["reminders"]["human_summary"]
 
 
 def test_heartbeat_snapshot_skill_mail_snapshot_uses_heartbeat_scan_mode() -> None:
@@ -201,4 +240,3 @@ def test_heartbeat_snapshot_skill_mail_snapshot_uses_heartbeat_scan_mode() -> No
     assert result.status == "success"
     assert email_skill.calls == [{"triggered_by": "heartbeat", "unread_only": True}]
     assert result.result["new_emails"] == 2
-

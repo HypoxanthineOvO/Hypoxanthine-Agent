@@ -154,6 +154,11 @@ class HeartbeatSnapshotSkill(BaseSkill):
             "counts": counts,
             "important": important,
             "other": other,
+            "human_summary": self._render_mail_human_summary(
+                counts=counts,
+                important=important,
+                other=other,
+            ),
         }
 
     async def _get_reminder_snapshot(self) -> dict[str, Any]:
@@ -191,6 +196,11 @@ class HeartbeatSnapshotSkill(BaseSkill):
             "overdue": overdue,
             "due_soon": due_soon,
             "items": active,
+            "human_summary": self._render_reminder_human_summary(
+                overdue=overdue,
+                due_soon=due_soon,
+                total=len(active),
+            ),
         }
 
     async def _get_notion_todo_snapshot(self) -> dict[str, Any]:
@@ -237,6 +247,11 @@ class HeartbeatSnapshotSkill(BaseSkill):
             "high_priority_due_soon": high_priority_due_soon,
             "completed_today": completed_today,
             "other_pending": other_pending,
+            "human_summary": self._render_notion_human_summary(
+                pending_today=pending_today,
+                high_priority_due_soon=high_priority_due_soon,
+                completed_today=completed_today,
+            ),
         }
 
     async def _get_system_snapshot(self) -> dict[str, Any]:
@@ -244,6 +259,16 @@ class HeartbeatSnapshotSkill(BaseSkill):
             payload = await self.system_snapshot_provider()
             payload.setdefault("available", True)
             payload.setdefault("checked_at", self._now_iso())
+            payload.setdefault(
+                "project_activity_summary",
+                [
+                    str(item.get("activity_summary") or "").strip()
+                    for item in (payload.get("projects_by_user") or [])
+                    if isinstance(item, dict) and str(item.get("activity_summary") or "").strip()
+                ],
+            )
+            payload.setdefault("top_system_processes", [])
+            payload.setdefault("human_summary", self._render_system_human_summary(payload))
             return payload
         people = self._load_people_index()
         results = await asyncio.gather(
@@ -293,7 +318,7 @@ class HeartbeatSnapshotSkill(BaseSkill):
             for item in results
             if not item.get("ok", False)
         ]
-        return {
+        payload = {
             "available": True,
             "checked_at": self._now_iso(),
             "host": platform.node() or "",
@@ -307,8 +332,16 @@ class HeartbeatSnapshotSkill(BaseSkill):
                 "error": "" if gpu_result.get("ok", False) else str(gpu_result.get("stderr") or ""),
             },
             "projects_by_user": projects_by_user,
+            "project_activity_summary": [
+                str(item.get("activity_summary") or "").strip()
+                for item in projects_by_user
+                if str(item.get("activity_summary") or "").strip()
+            ],
+            "top_system_processes": self._top_system_processes(processes, people, pid_to_gpu=gpu_processes),
             "errors": errors,
         }
+        payload["human_summary"] = self._render_system_human_summary(payload)
+        return payload
 
     async def _run_command(self, *args: str, timeout_seconds: float = 5.0) -> dict[str, Any]:
         command = " ".join(args)
@@ -498,15 +531,38 @@ class HeartbeatSnapshotSkill(BaseSkill):
                     "memory_percent_total": 0.0,
                     "gpu_memory_mb": 0,
                     "gpu_cards": set(),
+                    "process_count": 0,
                     "top_processes": [],
+                    "top_process_details": [],
                 },
             )
             entry["cpu_percent_total"] += float(proc.get("pcpu") or 0.0)
             entry["memory_percent_total"] += float(proc.get("pmem") or 0.0)
+            entry["process_count"] += 1
+            gpu_items = pid_to_gpu.get(int(proc.get("pid") or 0), [])
+            proc_gpu_memory = sum(int(item.get("used_memory_mb") or 0) for item in gpu_items)
+            proc_gpu_cards = sorted(
+                {
+                    str(item.get("gpu_index") or "").strip()
+                    for item in gpu_items
+                    if str(item.get("gpu_index") or "").strip()
+                }
+            )
             if len(entry["top_processes"]) < 3:
                 command = str(proc.get("args") or proc.get("comm") or "").strip()
                 entry["top_processes"].append(command[:160])
-            for gpu_item in pid_to_gpu.get(int(proc.get("pid") or 0), []):
+            if len(entry["top_process_details"]) < 3:
+                entry["top_process_details"].append(
+                    {
+                        "pid": int(proc.get("pid") or 0),
+                        "cpu_percent": round(float(proc.get("pcpu") or 0.0), 2),
+                        "memory_percent": round(float(proc.get("pmem") or 0.0), 2),
+                        "gpu_memory_mb": proc_gpu_memory,
+                        "gpu_cards": proc_gpu_cards,
+                        "command": str(proc.get("args") or proc.get("comm") or "").strip()[:240],
+                    }
+                )
+            for gpu_item in gpu_items:
                 gpu_index = str(gpu_item.get("gpu_index") or "").strip()
                 if gpu_index:
                     entry["gpu_cards"].add(gpu_index)
@@ -521,11 +577,191 @@ class HeartbeatSnapshotSkill(BaseSkill):
                     "memory_percent_total": round(float(item["memory_percent_total"]), 2),
                     "gpu_memory_mb": int(item["gpu_memory_mb"]),
                     "gpu_cards": sorted(item["gpu_cards"]),
+                    "process_count": int(item["process_count"]),
                     "top_processes": item["top_processes"],
+                    "top_process_details": item["top_process_details"],
+                    "activity_summary": self._build_user_activity_summary(item),
                 }
             )
         ordered.sort(key=lambda item: (item["cpu_percent_total"], item["memory_percent_total"]), reverse=True)
         return ordered
+
+    def _top_system_processes(
+        self,
+        processes: list[dict[str, Any]],
+        people: dict[str, str],
+        *,
+        pid_to_gpu: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        gpu_map: dict[int, list[dict[str, Any]]] = {}
+        for item in pid_to_gpu:
+            pid = int(item.get("pid") or 0)
+            if pid <= 0:
+                continue
+            gpu_map.setdefault(pid, []).append(item)
+
+        top_rows: list[dict[str, Any]] = []
+        for proc in processes[:8]:
+            user = str(proc.get("user") or "").strip()
+            gpu_items = gpu_map.get(int(proc.get("pid") or 0), [])
+            top_rows.append(
+                {
+                    "user": user,
+                    "display_name": people.get(user, user),
+                    "pid": int(proc.get("pid") or 0),
+                    "cpu_percent": round(float(proc.get("pcpu") or 0.0), 2),
+                    "memory_percent": round(float(proc.get("pmem") or 0.0), 2),
+                    "gpu_memory_mb": sum(int(item.get("used_memory_mb") or 0) for item in gpu_items),
+                    "gpu_cards": sorted(
+                        {
+                            str(item.get("gpu_index") or "").strip()
+                            for item in gpu_items
+                            if str(item.get("gpu_index") or "").strip()
+                        }
+                    ),
+                    "command": str(proc.get("args") or proc.get("comm") or "").strip()[:240],
+                }
+            )
+        return top_rows
+
+    def _build_user_activity_summary(self, item: dict[str, Any]) -> str:
+        display_name = str(item.get("display_name") or item.get("account") or "").strip()
+        account = str(item.get("account") or "").strip()
+        name = f"{display_name}/{account}" if display_name and display_name != account else (display_name or account)
+        process_count = int(item.get("process_count") or 0)
+        cpu_percent = round(float(item.get("cpu_percent_total") or 0.0), 2)
+        memory_percent = round(float(item.get("memory_percent_total") or 0.0), 2)
+        gpu_memory_mb = int(item.get("gpu_memory_mb") or 0)
+        gpu_cards = [str(card) for card in (item.get("gpu_cards") or []) if str(card).strip()]
+        gpu_text = "无 GPU 占用"
+        if gpu_memory_mb > 0:
+            card_text = f"（{', '.join(gpu_cards)}）" if gpu_cards else ""
+            gpu_text = f"GPU {gpu_memory_mb} MiB{card_text}"
+        processes = [str(proc).strip() for proc in (item.get("top_processes") or []) if str(proc).strip()]
+        process_text = "；".join(processes[:3]) if processes else "无显著进程"
+        return (
+            f"{name}：{process_count} 个进程，CPU {cpu_percent}%，内存 {memory_percent}%，"
+            f"{gpu_text}；主要进程：{process_text}"
+        )
+
+    def _render_system_human_summary(self, payload: dict[str, Any]) -> str:
+        lines: list[str] = []
+        host = str(payload.get("host") or "").strip()
+        if host:
+            lines.append(f"主机：{host}")
+        load = payload.get("load") if isinstance(payload.get("load"), dict) else {}
+        load_avg = load.get("load_average") if isinstance(load, dict) else {}
+        if isinstance(load_avg, dict) and load_avg:
+            lines.append(
+                "负载："
+                f"{load_avg.get('1m', '—')} / {load_avg.get('5m', '—')} / {load_avg.get('15m', '—')}"
+            )
+        memory = payload.get("memory") if isinstance(payload.get("memory"), dict) else {}
+        total = str(memory.get("total") or "").strip()
+        used = str(memory.get("used") or "").strip()
+        available = str(memory.get("available") or "").strip()
+        if total or used or available:
+            lines.append(f"内存：总 {total or '—'}，已用 {used or '—'}，可用 {available or '—'}")
+        disk = payload.get("disk") if isinstance(payload.get("disk"), dict) else {}
+        if disk:
+            lines.append(
+                f"磁盘：{str(disk.get('mounted_on') or '/')} "
+                f"{str(disk.get('used') or '—')}/{str(disk.get('size') or '—')} "
+                f"（{str(disk.get('use_percent') or '—')}）"
+            )
+        gpu = payload.get("gpu") if isinstance(payload.get("gpu"), dict) else {}
+        cards = gpu.get("cards") if isinstance(gpu, dict) else []
+        if isinstance(cards, list) and cards:
+            lines.append(f"GPU：{len(cards)} 张卡在线")
+        activity_lines = [
+            str(item).strip()
+            for item in (payload.get("project_activity_summary") or [])
+            if str(item).strip()
+        ]
+        if activity_lines:
+            lines.append("按人运行情况：")
+            lines.extend(f"- {item}" for item in activity_lines[:5])
+        top_processes = payload.get("top_system_processes")
+        if isinstance(top_processes, list) and top_processes:
+            top = top_processes[0]
+            if isinstance(top, dict):
+                lines.append(
+                    "最高 CPU 进程："
+                    f"{top.get('display_name') or top.get('user') or 'unknown'} "
+                    f"PID {top.get('pid') or '—'} "
+                    f"CPU {top.get('cpu_percent') or 0}% "
+                    f"{str(top.get('command') or '')[:160]}"
+                )
+        return "\n".join(lines).strip()
+
+    def _render_mail_human_summary(
+        self,
+        *,
+        counts: dict[str, int],
+        important: list[dict[str, Any]],
+        other: list[dict[str, Any]],
+    ) -> str:
+        lines = [
+            f"邮件统计：重要 {counts.get('important', 0)}，普通 {counts.get('low_priority', 0)}，"
+            f"归档 {counts.get('archive', 0)}，系统 {counts.get('system', 0)}。"
+        ]
+        if important:
+            lines.append("重要邮件：")
+            for item in important[:3]:
+                lines.append(
+                    f"- {item.get('from') or '未知发件人'} / {item.get('subject') or '无主题'}："
+                    f"{item.get('summary') or '暂无摘要'}"
+                )
+        elif other:
+            lines.append("暂无重要邮件。")
+        else:
+            lines.append("没有新邮件。")
+        return "\n".join(lines).strip()
+
+    def _render_notion_human_summary(
+        self,
+        *,
+        pending_today: list[dict[str, Any]],
+        high_priority_due_soon: list[dict[str, Any]],
+        completed_today: list[dict[str, Any]],
+    ) -> str:
+        lines: list[str] = []
+        if pending_today:
+            lines.append("今日到期未完成：")
+            lines.extend(f"- {item.get('title') or '未命名任务'}" for item in pending_today[:5])
+        if high_priority_due_soon:
+            lines.append("三天内高优未完成：")
+            lines.extend(f"- {item.get('title') or '未命名任务'}" for item in high_priority_due_soon[:5])
+        if completed_today:
+            lines.append("今日已完成：")
+            lines.extend(f"- {item.get('title') or '未命名任务'}" for item in completed_today[:5])
+        if not lines:
+            return "Notion 待办暂无需要汇报的事项。"
+        return "\n".join(lines).strip()
+
+    def _render_reminder_human_summary(
+        self,
+        *,
+        overdue: list[dict[str, Any]],
+        due_soon: list[dict[str, Any]],
+        total: int,
+    ) -> str:
+        lines = [f"提醒总数：{total}"]
+        if overdue:
+            lines.append("过期提醒：")
+            for item in overdue[:5]:
+                lines.append(
+                    f"- {item.get('title') or '未命名提醒'} @ {item.get('next_run_at') or '未知时间'}"
+                )
+        if due_soon:
+            lines.append("半天内提醒：")
+            for item in due_soon[:5]:
+                lines.append(
+                    f"- {item.get('title') or '未命名提醒'} @ {item.get('next_run_at') or '未知时间'}"
+                )
+        if not overdue and not due_soon:
+            lines.append("暂无过期或半天内提醒。")
+        return "\n".join(lines).strip()
 
     def _normalize_email_item(self, item: dict[str, Any]) -> dict[str, Any]:
         normalized = {

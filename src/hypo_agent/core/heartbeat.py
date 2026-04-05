@@ -41,6 +41,7 @@ class HeartbeatService:
         default_session_id: str = "main",
         prompt_path: Path | str = "config/heartbeat_prompt.md",
         timeout_seconds: int = 120,
+        snapshot_provider: Any | None = None,
     ) -> None:
         self.message_queue = message_queue
         self.scheduler = scheduler
@@ -53,6 +54,7 @@ class HeartbeatService:
         self._prompt_missing_reported = False
         self._run_lock = asyncio.Lock()
         self._event_sources: dict[str, Any] = {}
+        self._snapshot_provider = snapshot_provider
 
     def _load_prompt_text(self) -> str:
         try:
@@ -70,6 +72,9 @@ class HeartbeatService:
         if not callable(callback):
             raise TypeError("event source callback must be callable")
         self._event_sources[source_name] = callback
+
+    def configure_snapshot_provider(self, callback: Any | None) -> None:
+        self._snapshot_provider = callback
 
     async def run(self) -> dict[str, Any]:
         if self._run_lock.locked():
@@ -122,6 +127,16 @@ class HeartbeatService:
                 "error": "prompt_missing",
                 "event_sources": {},
             }
+
+        snapshot_payload = await self._collect_snapshot_payload()
+        snapshot_context = self._render_snapshot_context(snapshot_payload)
+        if snapshot_context:
+            prompt = (
+                f"{prompt}\n\n## 预取心跳快照\n"
+                f"{snapshot_context}\n\n"
+                "上面是已经整理好的 heartbeat 细节。"
+                "如果后续工具结果一致，优先保留这些细节，不要再压缩成一句空话。"
+            )
 
         event_source_context, event_source_statuses = await self._collect_event_source_context()
         if event_source_context:
@@ -249,6 +264,11 @@ class HeartbeatService:
                 "event_sources": event_source_statuses,
             }
 
+        if snapshot_payload:
+            fallback = self._render_snapshot_push_text(snapshot_payload)
+            if fallback:
+                normalized = fallback
+
         self._mark_success()
         await self._push_summary(normalized)
         logger.info(
@@ -308,6 +328,59 @@ class HeartbeatService:
 
     def _mark_failure(self) -> None:
         self.consecutive_failures += 1
+
+    async def _collect_snapshot_payload(self) -> dict[str, Any] | None:
+        if not callable(self._snapshot_provider):
+            return None
+        try:
+            payload = self._snapshot_provider()
+            if inspect.isawaitable(payload):
+                payload = await payload
+        except _HEARTBEAT_CALLBACK_ERRORS as exc:
+            logger.warning(
+                "heartbeat.snapshot_provider.failed",
+                error=str(exc).strip() or exc.__class__.__name__,
+            )
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _render_snapshot_context(self, payload: dict[str, Any] | None) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        sections: list[str] = []
+        for key, title in (
+            ("system", "system"),
+            ("mail", "mail"),
+            ("notion_todo", "notion_todo"),
+            ("reminders", "reminders"),
+        ):
+            section = payload.get(key)
+            if not isinstance(section, dict):
+                continue
+            human_summary = str(section.get("human_summary") or "").strip()
+            if human_summary:
+                sections.append(f"### {title}\n{human_summary}")
+        return "\n\n".join(sections).strip()
+
+    def _render_snapshot_push_text(self, payload: dict[str, Any]) -> str:
+        sections: list[str] = ["心跳检查完成。"]
+        for key, title in (
+            ("system", "系统状态"),
+            ("mail", "邮件"),
+            ("notion_todo", "Notion 待办"),
+            ("reminders", "提醒"),
+        ):
+            section = payload.get(key)
+            if not isinstance(section, dict):
+                continue
+            human_summary = str(section.get("human_summary") or "").strip()
+            if not human_summary:
+                error = str(section.get("error") or "").strip()
+                if error:
+                    human_summary = error
+            if human_summary:
+                sections.append(f"{title}\n{human_summary}")
+        return "\n\n".join(part.strip() for part in sections if part.strip()).strip()
 
     async def _collect_event_source_context(self) -> tuple[str, dict[str, dict[str, str | None]]]:
         if not self._event_sources:
