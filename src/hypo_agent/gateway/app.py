@@ -87,6 +87,7 @@ from hypo_agent.skills import (
     ExecSkill,
     ExportSkill,
     FileSystemSkill,
+    HeartbeatSnapshotSkill,
     InfoPortalSkill,
     InfoReachSkill,
     LogInspectorSkill,
@@ -197,6 +198,9 @@ def _register_enabled_skills(
     info_max_items = int(info_cfg.get("max_items", 15))
     log_service_name = str(log_inspector_cfg.get("service_name", "hypo-agent"))
     registered_summaries: list[dict[str, Any]] = []
+    notion_skill: Any | None = None
+    reminder_skill: Any | None = None
+    email_skill: Any | None = None
 
     def _register(skill: Any, *, source: str = "config") -> None:
         skill_manager.register(skill, source=source)
@@ -270,7 +274,8 @@ def _register_enabled_skills(
 
     if "notion" in enabled_skills:
         try:
-            _register(NotionSkill(heartbeat_service=heartbeat_service))
+            notion_skill = NotionSkill(heartbeat_service=heartbeat_service)
+            _register(notion_skill)
         except ValueError as exc:
             logger.warning("notion_skill.disabled", reason=str(exc))
 
@@ -291,14 +296,13 @@ def _register_enabled_skills(
         )
 
     if "reminder" in enabled_skills and structured_store is not None and scheduler is not None:
-        _register(
-            ReminderSkill(
-                structured_store=structured_store,
-                scheduler=scheduler,
-                model_router=model_router,
-                auto_confirm=auto_confirm,
-            )
+        reminder_skill = ReminderSkill(
+            structured_store=structured_store,
+            scheduler=scheduler,
+            model_router=model_router,
+            auto_confirm=auto_confirm,
         )
+        _register(reminder_skill)
 
     if "email_scanner" in enabled_skills and structured_store is not None:
         email_skill = EmailScannerSkill(
@@ -308,6 +312,15 @@ def _register_enabled_skills(
             mark_as_read=email_mark_as_read,
         )
         _register(email_skill)
+
+    if "heartbeat_snapshot" in enabled_skills:
+        _register(
+            HeartbeatSnapshotSkill(
+                email_skill=email_skill,
+                reminder_skill=reminder_skill,
+                notion_skill=notion_skill,
+            )
+        )
 
     if "probe" in enabled_skills and probe_server is not None:
         _register(ProbeSkill(probe_server=probe_server))
@@ -407,13 +420,11 @@ def _load_hypo_coder_runtime(
 
 def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
     heartbeat_allowed_tools = {
-        "exec_command",
-        "read_file",
-        "list_directory",
-        "get_directory_index",
-        "scan_emails",
-        "search_emails",
-        "list_reminders",
+        "get_system_snapshot",
+        "get_mail_snapshot",
+        "get_notion_todo_snapshot",
+        "get_reminder_snapshot",
+        "get_heartbeat_snapshot",
         "get_recent_logs",
         "get_tool_history",
         "get_error_summary",

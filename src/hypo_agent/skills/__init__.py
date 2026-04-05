@@ -6,6 +6,7 @@ from hypo_agent.skills.email_scanner_skill import EmailScannerSkill
 from hypo_agent.skills.exec_skill import ExecSkill
 from hypo_agent.skills.export_skill import ExportSkill
 from hypo_agent.skills.fs_skill import FileSystemSkill
+from hypo_agent.skills.heartbeat_snapshot_skill import HeartbeatSnapshotSkill
 from hypo_agent.skills.info_portal_skill import InfoPortalSkill
 from hypo_agent.skills.info_reach_skill import InfoReachSkill
 from hypo_agent.skills.log_inspector_skill import LogInspectorSkill
@@ -30,6 +31,7 @@ __all__ = [
     "CodeRunSkill",
     "CoderSkill",
     "FileSystemSkill",
+    "HeartbeatSnapshotSkill",
     "MemorySkill",
     "NotionSkill",
     "ProbeSkill",

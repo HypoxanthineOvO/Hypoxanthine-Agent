@@ -53,3 +53,6 @@ skills:
   email_scanner:
     enabled: true
     mark_as_read: true
+  # Internal heartbeat middle-layer skill. Exposes fixed structured snapshot tools.
+  heartbeat_snapshot:
+    enabled: true
