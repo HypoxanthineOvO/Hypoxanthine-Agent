@@ -217,6 +217,42 @@ class StructuredStore:
                 )
                 await db.execute(
                     """
+                    CREATE TABLE IF NOT EXISTS coder_tasks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        task_id TEXT NOT NULL UNIQUE,
+                        session_id TEXT NOT NULL,
+                        working_directory TEXT NOT NULL,
+                        prompt_summary TEXT,
+                        model TEXT,
+                        status TEXT NOT NULL,
+                        attached INTEGER NOT NULL DEFAULT 0,
+                        done INTEGER NOT NULL DEFAULT 0,
+                        last_error TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_coder_tasks_session
+                    ON coder_tasks(session_id)
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_coder_tasks_status
+                    ON coder_tasks(status)
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_coder_tasks_attached
+                    ON coder_tasks(session_id, attached, done, updated_at)
+                    """
+                )
+                await db.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS reminders (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         title TEXT NOT NULL,
@@ -1028,6 +1064,285 @@ class StructuredStore:
                 rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    async def create_coder_task(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        working_directory: str,
+        prompt_summary: str | None,
+        model: str | None,
+        status: str,
+        attached: bool = False,
+        done: bool = False,
+        last_error: str = "",
+    ) -> None:
+        await self.init()
+        await self.upsert_session(session_id)
+        now = _now_iso()
+        async with aiosqlite.connect(self.db_path) as db:
+            if attached:
+                await db.execute(
+                    "UPDATE coder_tasks SET attached = 0 WHERE session_id = ?",
+                    (session_id,),
+                )
+            await db.execute(
+                """
+                INSERT INTO coder_tasks(
+                    task_id,
+                    session_id,
+                    working_directory,
+                    prompt_summary,
+                    model,
+                    status,
+                    attached,
+                    done,
+                    last_error,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    session_id=excluded.session_id,
+                    working_directory=excluded.working_directory,
+                    prompt_summary=excluded.prompt_summary,
+                    model=excluded.model,
+                    status=excluded.status,
+                    attached=excluded.attached,
+                    done=excluded.done,
+                    last_error=excluded.last_error,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    task_id,
+                    session_id,
+                    working_directory,
+                    prompt_summary,
+                    model,
+                    status,
+                    1 if attached else 0,
+                    1 if done else 0,
+                    last_error,
+                    now,
+                    now,
+                ),
+            )
+            await db.commit()
+
+    async def get_coder_task(self, task_id: str) -> dict[str, Any] | None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT
+                    id,
+                    task_id,
+                    session_id,
+                    working_directory,
+                    prompt_summary,
+                    model,
+                    status,
+                    attached,
+                    done,
+                    last_error,
+                    created_at,
+                    updated_at
+                FROM coder_tasks
+                WHERE task_id = ?
+                LIMIT 1
+                """,
+                (task_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def get_latest_coder_task_for_session(
+        self,
+        session_id: str,
+    ) -> dict[str, Any] | None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT
+                    id,
+                    task_id,
+                    session_id,
+                    working_directory,
+                    prompt_summary,
+                    model,
+                    status,
+                    attached,
+                    done,
+                    last_error,
+                    created_at,
+                    updated_at
+                FROM coder_tasks
+                WHERE session_id = ?
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """,
+                (session_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def get_attached_coder_task_for_session(
+        self,
+        session_id: str,
+    ) -> dict[str, Any] | None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT
+                    id,
+                    task_id,
+                    session_id,
+                    working_directory,
+                    prompt_summary,
+                    model,
+                    status,
+                    attached,
+                    done,
+                    last_error,
+                    created_at,
+                    updated_at
+                FROM coder_tasks
+                WHERE session_id = ? AND attached = 1 AND done = 0
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """,
+                (session_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def list_coder_tasks(
+        self,
+        *,
+        session_id: str | None = None,
+        status: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            clauses: list[str] = []
+            params: list[Any] = []
+            if session_id is not None:
+                clauses.append("session_id = ?")
+                params.append(session_id)
+            if status is not None:
+                clauses.append("status = ?")
+                params.append(status)
+
+            query = """
+                SELECT
+                    id,
+                    task_id,
+                    session_id,
+                    working_directory,
+                    prompt_summary,
+                    model,
+                    status,
+                    attached,
+                    done,
+                    last_error,
+                    created_at,
+                    updated_at
+                FROM coder_tasks
+            """
+            if clauses:
+                query += f" WHERE {' AND '.join(clauses)}"
+            query += " ORDER BY updated_at DESC, id DESC"
+            if limit is not None and limit > 0:
+                query += " LIMIT ?"
+                params.append(limit)
+
+            async with db.execute(query, tuple(params)) as cursor:
+                rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def attach_coder_task(self, *, session_id: str, task_id: str) -> None:
+        await self.init()
+        now = _now_iso()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE coder_tasks SET attached = 0, updated_at = ? WHERE session_id = ?",
+                (now, session_id),
+            )
+            await db.execute(
+                """
+                UPDATE coder_tasks
+                SET attached = 1, done = 0, updated_at = ?
+                WHERE task_id = ? AND session_id = ?
+                """,
+                (now, task_id, session_id),
+            )
+            await db.commit()
+
+    async def detach_coder_task(self, *, session_id: str) -> None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE coder_tasks SET attached = 0, updated_at = ? WHERE session_id = ?",
+                (_now_iso(), session_id),
+            )
+            await db.commit()
+
+    async def mark_coder_task_done(
+        self,
+        *,
+        session_id: str | None = None,
+        task_id: str | None = None,
+    ) -> None:
+        await self.init()
+        if session_id is None and task_id is None:
+            raise ValueError("session_id or task_id is required")
+
+        clauses: list[str] = []
+        params: list[Any] = [_now_iso()]
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if task_id is not None:
+            clauses.append("task_id = ?")
+            params.append(task_id)
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                f"""
+                UPDATE coder_tasks
+                SET done = 1, attached = 0, updated_at = ?
+                WHERE {' AND '.join(clauses)}
+                """,
+                tuple(params),
+            )
+            await db.commit()
+
+    async def update_coder_task_status(
+        self,
+        *,
+        task_id: str,
+        status: str,
+        last_error: str | None = None,
+    ) -> None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE coder_tasks
+                SET status = ?, last_error = ?, updated_at = ?
+                WHERE task_id = ?
+                """,
+                (status, str(last_error or ""), _now_iso(), task_id),
+            )
+            await db.commit()
+
     async def delete_session_data(self, session_id: str) -> None:
         await self.init()
         async with aiosqlite.connect(self.db_path) as db:
@@ -1037,6 +1352,10 @@ class StructuredStore:
             )
             await db.execute(
                 "DELETE FROM token_usage WHERE session_id = ?",
+                (session_id,),
+            )
+            await db.execute(
+                "DELETE FROM coder_tasks WHERE session_id = ?",
                 (session_id,),
             )
             await db.execute(

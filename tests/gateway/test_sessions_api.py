@@ -105,6 +105,53 @@ def test_get_session_tool_invocations_returns_rows(tmp_path) -> None:
         assert row["result_summary"] == "ok"
 
 
+def test_get_session_coder_tasks_requires_token(tmp_path) -> None:
+    with _build_app(tmp_path) as client:
+        response = client.get("/api/sessions/s1/coder-tasks")
+        assert response.status_code == 401
+
+
+def test_get_session_coder_tasks_and_attached_task(tmp_path) -> None:
+    with _build_app(tmp_path) as client:
+        asyncio.run(
+            client.app.state.structured_store.create_coder_task(
+                task_id="task-123",
+                session_id="s1",
+                working_directory="/repo/demo",
+                prompt_summary="fix login",
+                model="o4-mini",
+                status="running",
+                attached=True,
+            )
+        )
+        asyncio.run(
+            client.app.state.structured_store.create_coder_task(
+                task_id="task-456",
+                session_id="s1",
+                working_directory="/repo/demo",
+                prompt_summary="add tests",
+                model="o4-mini",
+                status="completed",
+                attached=False,
+            )
+        )
+
+        list_response = client.get(
+            "/api/sessions/s1/coder-tasks",
+            params={"token": "test-token"},
+        )
+        attached_response = client.get(
+            "/api/sessions/s1/coder-task",
+            params={"token": "test-token"},
+        )
+
+        assert list_response.status_code == 200
+        assert [row["task_id"] for row in list_response.json()] == ["task-456", "task-123"]
+
+        assert attached_response.status_code == 200
+        assert attached_response.json()["task_id"] == "task-123"
+
+
 def test_delete_session_also_clears_structured_store_rows(tmp_path) -> None:
     with _build_app(tmp_path) as client:
         client.app.state.session_memory.append(

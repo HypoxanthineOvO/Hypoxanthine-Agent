@@ -597,6 +597,72 @@ def test_pipeline_run_once_short_circuits_slash_command() -> None:
     assert memory.appended == []
 
 
+def test_pipeline_run_once_appends_codex_status_bar_for_attached_task() -> None:
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        async def call(self, model_name, messages):
+            del model_name, messages
+            return "regular answer"
+
+    class StubCoderTaskService:
+        async def get_attached_task(self, session_id: str) -> dict[str, object] | None:
+            assert session_id == "s1"
+            return {"task_id": "task-123", "status": "running"}
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        coder_task_service=StubCoderTaskService(),
+    )
+
+    reply = asyncio.run(
+        pipeline.run_once(Message(text="hello", sender="user", session_id="s1"))
+    )
+
+    assert reply.text is not None
+    assert "regular answer" in reply.text
+    assert "🤖 Codex · task-123 | ⏳ RUNNING" in reply.text
+    assert "/codex send" in reply.text
+
+
+def test_pipeline_run_once_skips_codex_status_bar_for_slash_command() -> None:
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        async def call(self, model_name, messages):
+            del model_name, messages
+            return "unused"
+
+    class StubSlashCommands:
+        async def try_handle(self, inbound: Message) -> str | None:
+            if (inbound.text or "").startswith("/"):
+                return "slash ok"
+            return None
+
+    class StubCoderTaskService:
+        async def get_attached_task(self, session_id: str) -> dict[str, object] | None:
+            del session_id
+            return {"task_id": "task-123", "status": "running"}
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        slash_commands=StubSlashCommands(),
+        coder_task_service=StubCoderTaskService(),
+    )
+
+    reply = asyncio.run(
+        pipeline.run_once(Message(text="/help", sender="user", session_id="s1"))
+    )
+
+    assert reply.text == "slash ok"
+
+
 class StubBreaker:
     def __init__(self, enabled: bool = False) -> None:
         self._enabled = enabled

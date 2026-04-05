@@ -244,6 +244,7 @@ class ChatPipeline:
         narration_observer: Any | None = None,
         on_narration: Any | None = None,
         skill_catalog: Any | None = None,
+        coder_task_service: Any | None = None,
     ) -> None:
         self.router = router
         self.chat_model = chat_model
@@ -269,6 +270,7 @@ class ChatPipeline:
         self.narration_observer = narration_observer
         self.on_narration = on_narration
         self.skill_catalog = skill_catalog
+        self.coder_task_service = coder_task_service
         self._event_consumer_task: asyncio.Task[None] | None = None
         self._pending_sop_usage: set[str] = set()
         self._last_activity_at = utc_isoformat(utc_now())
@@ -659,6 +661,7 @@ class ChatPipeline:
         model_name = self._resolve_model_for_inbound(inbound)
         self._append_session_message(inbound)
         text = await self._router_call(model_name, llm_messages, inbound=inbound)
+        text = await self._append_codex_status_bar(text, session_id=inbound.session_id)
         outbound = Message(
             text=text,
             sender="assistant",
@@ -1108,6 +1111,17 @@ class ChatPipeline:
                 yield await self._format_event(
                     event_type="assistant_chunk",
                     response=RichResponse(text=extra_chunk),
+                    session_id=inbound.session_id,
+                )
+
+            codex_chunk = await self._codex_status_bar_text(session_id=inbound.session_id)
+            if codex_chunk is not None:
+                if full_text:
+                    codex_chunk = f"\n{codex_chunk}"
+                full_text += codex_chunk
+                yield await self._format_event(
+                    event_type="assistant_chunk",
+                    response=RichResponse(text=codex_chunk),
                     session_id=inbound.session_id,
                 )
 
@@ -1577,6 +1591,53 @@ class ChatPipeline:
             result = callback(message)
         if inspect.isawaitable(result):
             await result
+
+    async def _append_codex_status_bar(self, text: str, *, session_id: str) -> str:
+        status_bar = await self._codex_status_bar_text(session_id=session_id)
+        if not status_bar:
+            return text
+        if not text:
+            return status_bar
+        if text.endswith("\n"):
+            return text + status_bar
+        return f"{text}\n{status_bar}"
+
+    async def _codex_status_bar_text(self, *, session_id: str) -> str | None:
+        if self.coder_task_service is None:
+            return None
+        getter = getattr(self.coder_task_service, "get_attached_task", None)
+        if not callable(getter):
+            return None
+        try:
+            attached = getter(session_id)
+            if inspect.isawaitable(attached):
+                attached = await attached
+        except Exception:
+            logger.warning("pipeline.codex_status_bar_failed", exc_info=True)
+            return None
+        if not isinstance(attached, dict):
+            return None
+        task_id = str(attached.get("task_id") or "").strip()
+        status = str(attached.get("status") or "").strip().lower()
+        if not task_id or not status:
+            return None
+        status_label = {
+            "queued": "🕒 QUEUED",
+            "running": "⏳ RUNNING",
+            "in_progress": "⏳ RUNNING",
+            "completed": "✅ COMPLETED",
+            "failed": "❌ FAILED",
+            "aborted": "⛔ ABORTED",
+        }.get(status, f"ℹ️ {status.upper()}")
+        status_bar = "\n".join(
+            [
+                "─────────────────────────────────",
+                f"🤖 Codex · {task_id} | {status_label}",
+                "   /codex send · /codex status · /codex abort · /codex detach",
+                "─────────────────────────────────",
+            ]
+        )
+        return status_bar
 
     def _system_time_context(self) -> str:
         now = datetime.now().astimezone()

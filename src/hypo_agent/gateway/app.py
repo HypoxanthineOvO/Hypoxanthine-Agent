@@ -21,7 +21,8 @@ from hypo_agent.core.config_loader import (
     get_test_sandbox_dir,
     is_test_mode,
 )
-from hypo_agent.channels.coder import CoderClient
+from hypo_agent.channels.coder import CoderClient, CoderTaskService
+from hypo_agent.channels.coder.coder_stream_watcher import CoderStreamWatcher
 from hypo_agent.channels.coder.coder_webhook import router as coder_webhook_router
 from hypo_agent.channels.feishu_channel import FeishuChannel
 from hypo_agent.channels.probe import ProbeServer, router as probe_ws_router
@@ -138,6 +139,8 @@ class AppDeps:
     heartbeat_service: HeartbeatService | Any | None = None
     memory_gc: MemoryGC | Any | None = None
     coder_client: CoderClient | Any | None = None
+    coder_task_service: CoderTaskService | Any | None = None
+    coder_stream_watcher: CoderStreamWatcher | Any | None = None
     coder_webhook_secret: str | None = None
     coder_webhook_url: str | None = None
     feishu_channel: FeishuChannel | None = None
@@ -164,6 +167,7 @@ def _register_enabled_skills(
     model_router: ModelRouter | None = None,
     heartbeat_service: HeartbeatService | Any | None = None,
     coder_client: CoderClient | Any | None = None,
+    coder_task_service: CoderTaskService | Any | None = None,
     coder_webhook_url: str | None = None,
     image_renderer: ImageRenderer | Any | None = None,
     probe_server: ProbeServer | Any | None = None,
@@ -246,6 +250,7 @@ def _register_enabled_skills(
             _register(
                 CoderSkill(
                     coder_client=coder_client,
+                    coder_task_service=coder_task_service,
                     webhook_url=coder_webhook_url,
                 )
             )
@@ -369,6 +374,15 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
     )
     probe_server = ProbeServer()
     coder_client, coder_webhook_secret, coder_webhook_url = _load_hypo_coder_runtime()
+    coder_task_service = (
+        CoderTaskService(
+            coder_client=coder_client,
+            structured_store=structured_store,
+            webhook_url=coder_webhook_url,
+        )
+        if coder_client is not None
+        else None
+    )
     permission_manager = PermissionManager(resolved_security.directory_whitelist)
     circuit_breaker = CircuitBreaker(resolved_security.circuit_breaker)
     skill_manager = SkillManager(
@@ -384,6 +398,7 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
         message_queue=event_queue,
         heartbeat_service=heartbeat_service,
         coder_client=coder_client,
+        coder_task_service=coder_task_service,
         coder_webhook_url=coder_webhook_url,
         image_renderer=image_renderer,
         probe_server=probe_server,
@@ -397,6 +412,7 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
         scheduler=scheduler,
         heartbeat_service=heartbeat_service,
         coder_client=coder_client,
+        coder_task_service=coder_task_service,
         coder_webhook_secret=coder_webhook_secret,
         coder_webhook_url=coder_webhook_url,
         skill_manager=skill_manager,
@@ -536,6 +552,7 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
         structured_store=deps.structured_store,
         circuit_breaker=deps.circuit_breaker,
         skill_manager=deps.skill_manager,
+        coder_task_service=deps.coder_task_service,
         memory_gc=deps.memory_gc,
     )
     async def _update_persona_memory_tool(
@@ -680,6 +697,7 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
         semantic_memory=deps.semantic_memory,
         sop_manager=deps.sop_manager,
         skill_catalog=skill_catalog,
+        coder_task_service=deps.coder_task_service,
     )
 
 
@@ -1118,6 +1136,8 @@ def create_app(
     app.state.agent_watchdog = None
     app.state.memory_gc = resolved_deps.memory_gc
     app.state.coder_client = resolved_deps.coder_client
+    app.state.coder_task_service = resolved_deps.coder_task_service
+    app.state.coder_stream_watcher = resolved_deps.coder_stream_watcher
     app.state.coder_webhook_secret = resolved_deps.coder_webhook_secret or ""
     app.state.coder_webhook_url = resolved_deps.coder_webhook_url or ""
     app.state.probe_server = resolved_deps.probe_server
@@ -1622,6 +1642,16 @@ def create_app(
 
     app.state.push_ws_message = push_ws_message
     setattr(app.state.pipeline, "on_proactive_message", on_proactive_message)
+    if resolved_deps.coder_task_service is not None:
+        resolved_deps.coder_stream_watcher = CoderStreamWatcher(
+            coder_task_service=resolved_deps.coder_task_service,
+            push_callback=on_proactive_message,
+            poll_interval_seconds=5.0,
+            message_char_limit=800,
+        )
+        resolved_deps.coder_task_service.watcher = resolved_deps.coder_stream_watcher
+        app.state.coder_stream_watcher = resolved_deps.coder_stream_watcher
+        app.state.coder_task_service = resolved_deps.coder_task_service
     app.state.emit_narration = emit_narration
     refresh_narration_observer()
 
@@ -1637,6 +1667,15 @@ def create_app(
             structured_store=deps.structured_store,
         )
         deps.coder_client, deps.coder_webhook_secret, deps.coder_webhook_url = _load_hypo_coder_runtime()
+        deps.coder_task_service = (
+            CoderTaskService(
+                coder_client=deps.coder_client,
+                structured_store=deps.structured_store,
+                webhook_url=deps.coder_webhook_url,
+            )
+            if deps.coder_client is not None
+            else None
+        )
         _register_enabled_skills(
             skill_manager=deps.skill_manager,
             permission_manager=deps.permission_manager,
@@ -1645,6 +1684,7 @@ def create_app(
             message_queue=deps.event_queue,
             heartbeat_service=deps.heartbeat_service,
             coder_client=deps.coder_client,
+            coder_task_service=deps.coder_task_service,
             coder_webhook_url=deps.coder_webhook_url,
             image_renderer=deps.image_renderer,
             probe_server=deps.probe_server,
@@ -1657,6 +1697,7 @@ def create_app(
         app.state.circuit_breaker = deps.circuit_breaker
         app.state.skill_manager = deps.skill_manager
         app.state.coder_client = deps.coder_client
+        app.state.coder_task_service = deps.coder_task_service
         app.state.coder_webhook_secret = deps.coder_webhook_secret or ""
         app.state.coder_webhook_url = deps.coder_webhook_url or ""
         app.state.channel_settings = getattr(settings, "channels", ChannelsConfig())
@@ -1665,6 +1706,17 @@ def create_app(
         app.state.persona_manager = deps.persona_manager
         _ensure_pipeline_lifecycle_hooks(app.state.pipeline)
         setattr(app.state.pipeline, "on_proactive_message", on_proactive_message)
+        if deps.coder_task_service is not None:
+            deps.coder_stream_watcher = CoderStreamWatcher(
+                coder_task_service=deps.coder_task_service,
+                push_callback=on_proactive_message,
+                poll_interval_seconds=5.0,
+                message_char_limit=800,
+            )
+            deps.coder_task_service.watcher = deps.coder_stream_watcher
+        else:
+            deps.coder_stream_watcher = None
+        app.state.coder_stream_watcher = deps.coder_stream_watcher
         app.state.output_compressor = deps.output_compressor
         refresh_narration_observer()
         await app.state.pipeline.start_event_consumer()

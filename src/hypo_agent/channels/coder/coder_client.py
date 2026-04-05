@@ -25,6 +25,12 @@ class CoderClient:
         self.agent_token = agent_token
         self.timeout_seconds = timeout_seconds
 
+    def supports_streaming(self) -> bool:
+        return False
+
+    def supports_continuation(self) -> bool:
+        return False
+
     async def create_task(
         self,
         prompt: str,
