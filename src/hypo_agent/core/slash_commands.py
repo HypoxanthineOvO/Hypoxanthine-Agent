@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import inspect
-from typing import Any, Protocol
+from typing import Any, Awaitable, Callable, Protocol
 
 import structlog
 
+from hypo_agent.core.model_connectivity import probe_model
 from hypo_agent.models import Message
 
 logger = structlog.get_logger("hypo_agent.slash_commands")
@@ -58,6 +59,7 @@ class SlashCommandHandler:
         circuit_breaker: Any | None = None,
         skill_manager: Any | None = None,
         memory_gc: Any | None = None,
+        model_probe_fn: Callable[[str, Any], Awaitable[Any]] | None = None,
     ) -> None:
         self.router = router
         self.session_memory = session_memory
@@ -65,6 +67,7 @@ class SlashCommandHandler:
         self.circuit_breaker = circuit_breaker
         self.skill_manager = skill_manager
         self.memory_gc = memory_gc
+        self.model_probe_fn = model_probe_fn
         self._registry: list[SlashCommandEntry] = [
             SlashCommandEntry(
                 command="/help",
@@ -74,6 +77,7 @@ class SlashCommandHandler:
             ),
             SlashCommandEntry(
                 command="/model status",
+                aliases=["/model"],
                 description="查看模型路由、延迟、Token 消耗",
                 handler=self._handle_model_status,
             ),
@@ -158,10 +162,15 @@ class SlashCommandHandler:
         return str(resolved)
 
     def _handle_help(self, _: Message) -> str:
-        width = max(len(entry.command) for entry in self._registry) + 2
-        lines = ["📋 可用斜杠指令", ""]
+        lines = [
+            "📋 可用斜杠指令",
+            "",
+            "| 指令 | 别名 | 说明 |",
+            "|------|------|------|",
+        ]
         for entry in self._registry:
-            lines.append(f"{entry.command.ljust(width)}— {entry.description}")
+            alias_text = ", ".join(entry.aliases) if entry.aliases else "—"
+            lines.append(f"| {entry.command} | {alias_text} | {entry.description} |")
         return "\n".join(lines)
 
     async def _handle_model_status(self, _: Message) -> str:
@@ -169,6 +178,7 @@ class SlashCommandHandler:
         latency_summary = await self.structured_store.summarize_latency_by_model()
         token_by_model = {row["resolved_model"]: row for row in token_summary["rows"]}
         latency_by_model = {row["resolved_model"]: row for row in latency_summary}
+        probe_by_model = await self._probe_models()
 
         lines: list[str] = [
             "## 🤖 模型状态",
@@ -191,13 +201,14 @@ class SlashCommandHandler:
                 "",
                 "### 模型详情",
                 "",
-                "| 模型 | Provider | Fallback | Token (入/出/总) | 平均延迟 |",
-                "|------|----------|----------|-----------------|---------|",
+                "| 模型 | Provider | Fallback | 最近探测 | 历史延迟 | Token (入/出/总) |",
+                "|------|----------|----------|----------|----------|-------------------|",
             ]
         )
         for model_name, cfg in sorted(self.router.config.models.items()):
             provider = str(cfg.provider or "—")
             fallback = f"→ {cfg.fallback}" if cfg.fallback else "（无）"
+            probe_row = probe_by_model.get(model_name, {"status_text": "➖ 未探测"})
             token_row = token_by_model.get(model_name)
             latency_row = latency_by_model.get(model_name)
 
@@ -216,7 +227,8 @@ class SlashCommandHandler:
                 latency_cell = f"{int(round(float(latency_row['avg_latency_ms'])))}ms"
 
             lines.append(
-                f"| {model_name} | {provider} | {fallback} | {token_cell} | {latency_cell} |"
+                f"| {model_name} | {provider} | {fallback} | "
+                f"{probe_row['status_text']} | {latency_cell} | {token_cell} |"
             )
 
         return "\n".join(lines)
@@ -424,3 +436,91 @@ class SlashCommandHandler:
         if any("\u4e00" <= ch <= "\u9fff" for ch in text):
             return text[:10]
         return "技能能力"
+
+    async def _probe_models(self) -> dict[str, dict[str, Any]]:
+        results: dict[str, dict[str, Any]] = {}
+        for model_name, cfg in sorted(self.router.config.models.items()):
+            raw_result = await self._probe_single_model(model_name, cfg)
+            results[model_name] = self._normalize_probe_result(raw_result)
+        return results
+
+    async def _probe_single_model(self, model_name: str, cfg: Any) -> Any:
+        if self.model_probe_fn is not None:
+            try:
+                return await self.model_probe_fn(model_name, cfg)
+            except Exception as exc:
+                logger.warning(
+                    "slash.model_probe_failed",
+                    model_name=model_name,
+                    error=str(exc),
+                )
+                return {
+                    "ok": False,
+                    "latency_ms": 0.0,
+                    "status_text": f"❌ 失败: {self._short_probe_error(str(exc))}",
+                }
+
+        acompletion_fn = getattr(self.router, "_acompletion", None)
+        if not callable(acompletion_fn):
+            return {"ok": False, "latency_ms": 0.0, "status_text": "➖ 未配置"}
+
+        try:
+            result = await probe_model(
+                model_name,
+                cfg,
+                acompletion_fn=acompletion_fn,
+                timeout_seconds=5.0,
+            )
+        except Exception as exc:
+            logger.warning(
+                "slash.model_probe_failed",
+                model_name=model_name,
+                error=str(exc),
+            )
+            return {
+                "ok": False,
+                "latency_ms": 0.0,
+                "status_text": f"❌ 失败: {self._short_probe_error(str(exc))}",
+            }
+        return result
+
+    def _normalize_probe_result(self, raw_result: Any) -> dict[str, Any]:
+        if isinstance(raw_result, dict):
+            status_text = str(raw_result.get("status_text") or "").strip()
+            ok = bool(raw_result.get("ok"))
+            latency_ms = float(raw_result.get("latency_ms") or 0.0)
+            if status_text:
+                return {
+                    "ok": ok,
+                    "latency_ms": latency_ms,
+                    "status_text": status_text,
+                }
+
+        error = str(getattr(raw_result, "error", "") or "").strip()
+        connectivity_ok = bool(getattr(raw_result, "connectivity_ok", False))
+        if not getattr(raw_result, "litellm_model", None):
+            return {"ok": False, "latency_ms": 0.0, "status_text": "➖ 未配置"}
+        if connectivity_ok:
+            return {
+                "ok": True,
+                "latency_ms": float(getattr(raw_result, "latency_ms", 0.0) or 0.0),
+                "status_text": "✅ 成功",
+            }
+        return {
+            "ok": False,
+            "latency_ms": float(getattr(raw_result, "latency_ms", 0.0) or 0.0),
+            "status_text": f"❌ 失败: {self._short_probe_error(error)}",
+        }
+
+    def _short_probe_error(self, error: str) -> str:
+        text = " ".join(error.split())
+        if not text:
+            return "unknown"
+        lowered = text.lower()
+        if "timeout" in lowered:
+            return "timeout"
+        if "invalidsubscription" in lowered:
+            return "InvalidSubscription"
+        if len(text) <= 40:
+            return text
+        return text[:37] + "..."

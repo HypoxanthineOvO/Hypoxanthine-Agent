@@ -103,6 +103,7 @@ async def _build_handler(tmp_path: Path) -> tuple[
         structured_store=store,
         circuit_breaker=breaker,
         skill_manager=skill_manager,
+        model_probe_fn=None,
     )
     return handler, session_memory, store, breaker
 
@@ -149,6 +150,8 @@ def test_help_chinese(tmp_path: Path) -> None:
         assert "📋 可用斜杠指令" in text
         assert "显示所有可用斜杠指令" in text
         assert "查看模型路由、延迟、Token 消耗" in text
+        assert "别名" in text
+        assert "/h, /帮助" in text
 
     asyncio.run(_run())
 
@@ -377,6 +380,14 @@ def test_slash_commands_gc_runs_memory_gc(tmp_path: Path) -> None:
 def test_model_status_markdown_table(tmp_path: Path) -> None:
     async def _run() -> None:
         handler, _, store, _ = await _build_handler(tmp_path)
+        async def fake_probe(model_name, config):
+            del config
+            return {
+                "KimiK25": {"ok": True, "latency_ms": 120.0, "status_text": "✅ 成功"},
+                "DeepseekV3_2": {"ok": False, "latency_ms": 95.0, "status_text": "❌ 失败: timeout"},
+                "DisabledModel": {"ok": False, "latency_ms": 0.0, "status_text": "➖ 未配置"},
+            }[model_name]
+        handler.model_probe_fn = fake_probe
         await store.record_token_usage(
             session_id="s1",
             requested_model="KimiK25",
@@ -393,7 +404,9 @@ def test_model_status_markdown_table(tmp_path: Path) -> None:
         assert text is not None
         assert "## 🤖 模型状态" in text
         assert "| 任务类型 | 模型 |" in text
-        assert "| 模型 | Provider | Fallback | Token (入/出/总) | 平均延迟 |" in text
+        assert "| 模型 | Provider | Fallback | 最近探测 | 历史延迟 | Token (入/出/总) |" in text
+        assert "✅ 成功" in text
+        assert "❌ 失败: timeout" in text
         assert "|" in text and "---" in text
 
     asyncio.run(_run())
@@ -402,6 +415,10 @@ def test_model_status_markdown_table(tmp_path: Path) -> None:
 def test_model_status_token_format(tmp_path: Path) -> None:
     async def _run() -> None:
         handler, _, store, _ = await _build_handler(tmp_path)
+        async def fake_probe(model_name, config):
+            del model_name, config
+            return {"ok": True, "latency_ms": 120.0, "status_text": "✅ 成功"}
+        handler.model_probe_fn = fake_probe
         await store.record_token_usage(
             session_id="s1",
             requested_model="KimiK25",
@@ -416,6 +433,43 @@ def test_model_status_token_format(tmp_path: Path) -> None:
         )
         assert text is not None
         assert "1.2K/800/2.0K" in text
+
+    asyncio.run(_run())
+
+
+def test_model_alias_maps_to_model_status(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, _, _ = await _build_handler(tmp_path)
+
+        async def fake_probe(model_name, config):
+            del model_name, config
+            return {"ok": True, "latency_ms": 50.0, "status_text": "✅ 成功"}
+
+        handler.model_probe_fn = fake_probe
+        text = await handler.try_handle(Message(text="/model", sender="user", session_id="s1"))
+
+        assert text is not None
+        assert "## 🤖 模型状态" in text
+
+    asyncio.run(_run())
+
+
+def test_model_status_probe_failure_does_not_crash(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, _, _ = await _build_handler(tmp_path)
+
+        async def fake_probe(model_name, config):
+            del model_name, config
+            raise RuntimeError("InvalidSubscription from provider")
+
+        handler.model_probe_fn = fake_probe
+        text = await handler.try_handle(
+            Message(text="/model", sender="user", session_id="s1")
+        )
+
+        assert text is not None
+        assert "## 🤖 模型状态" in text
+        assert "❌ 失败: InvalidSubscription" in text
 
     asyncio.run(_run())
 
