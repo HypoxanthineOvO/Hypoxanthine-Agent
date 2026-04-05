@@ -648,7 +648,7 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
         skill_manager=deps.skill_manager,
         structured_store=deps.structured_store,
         max_react_rounds=15,
-        heartbeat_max_react_rounds=3,
+        heartbeat_max_react_rounds=4,
         heartbeat_model_timeout_seconds=25,
         heartbeat_allowed_tools=heartbeat_allowed_tools,
         slash_commands=slash_commands,
@@ -673,7 +673,9 @@ def _derive_heartbeat_service_timeout_seconds(
     per_round_timeout = getattr(pipeline_obj, "heartbeat_model_timeout_seconds", None)
     if max_rounds <= 0 or per_round_timeout is None:
         return default_timeout
-    per_round_budget = max(5, int(float(per_round_timeout)))
+    # Provider-side timeout hints are not enforced consistently, so leave room
+    # for a full heartbeat model turn even when the configured per-call timeout is lower.
+    per_round_budget = max(45, int(float(per_round_timeout)))
     # Leave room for tool execution and a final summarization pass.
     derived_timeout = (max_rounds * (per_round_budget + 10)) + 15
     return max(default_timeout, derived_timeout)

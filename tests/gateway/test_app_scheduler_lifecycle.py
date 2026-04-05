@@ -725,4 +725,4 @@ def test_heartbeat_service_timeout_budget_scales_with_rounds_and_per_round_timeo
         heartbeat_max_react_rounds = 4
         heartbeat_model_timeout_seconds = 25
 
-    assert _derive_heartbeat_service_timeout_seconds(PipelineStub()) == 155
+    assert _derive_heartbeat_service_timeout_seconds(PipelineStub()) == 235

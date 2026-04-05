@@ -384,8 +384,18 @@ class ChatPipeline:
                 return heartbeat_max_rounds
         return self.max_react_rounds
 
-    def _should_force_final_response(self, round_num: int, *, max_react_rounds: int) -> bool:
-        return max_react_rounds > 0 and round_num >= max(1, max_react_rounds - 1)
+    def _should_force_final_response(
+        self,
+        round_num: int,
+        *,
+        max_react_rounds: int,
+        inbound: Message | None = None,
+    ) -> bool:
+        if max_react_rounds <= 0:
+            return False
+        if self._is_heartbeat_request(inbound):
+            return round_num >= max_react_rounds
+        return round_num >= max(1, max_react_rounds - 1)
 
     def _heartbeat_timeout_for(self, inbound: Message | None) -> float | None:
         if not self._is_heartbeat_request(inbound):
@@ -489,7 +499,14 @@ class ChatPipeline:
         model_name: str,
         session_id: str,
         max_react_rounds: int,
+        heartbeat_mode: bool = False,
     ) -> str:
+        if heartbeat_mode:
+            return self._build_heartbeat_round_limit_summary(
+                react_messages,
+                max_react_rounds=max_react_rounds,
+            )
+
         final_messages = list(react_messages)
         final_messages.append(
             {
@@ -551,6 +568,49 @@ class ChatPipeline:
             )
 
         return "Based on the information gathered so far, here is the best-effort summary."
+
+    def _build_heartbeat_round_limit_summary(
+        self,
+        react_messages: list[dict[str, Any]],
+        *,
+        max_react_rounds: int,
+    ) -> str:
+        tool_names: dict[str, str] = {}
+        summaries: list[str] = []
+        last_assistant_text = ""
+
+        for message in react_messages:
+            role = str(message.get("role") or "").strip().lower()
+            if role == "assistant":
+                text = str(message.get("content") or "").strip()
+                if text:
+                    last_assistant_text = self._truncate_heartbeat_text(text, limit=240)
+                for tool_call in message.get("tool_calls") or []:
+                    tool_call_id = str(tool_call.get("id") or "").strip()
+                    tool_name = self._extract_tool_name(tool_call)
+                    if tool_call_id and tool_name:
+                        tool_names[tool_call_id] = tool_name
+                continue
+            if role != "tool":
+                continue
+            tool_call_id = str(message.get("tool_call_id") or "").strip()
+            tool_name = tool_names.get(tool_call_id) or "tool"
+            content = str(message.get("content") or "").strip()
+            if not content:
+                continue
+            compact = self._truncate_heartbeat_text(content, limit=220)
+            summaries.append(f"- {tool_name}: {compact}")
+
+        lines = [
+            f"Heartbeat 已达到工具轮次上限（{max_react_rounds} 轮），以下是基于已收集信息的当前总结：",
+        ]
+        if last_assistant_text:
+            lines.append(last_assistant_text)
+        if summaries:
+            lines.extend(summaries[-6:])
+        else:
+            lines.append("当前没有拿到足够的工具结果，请下一次心跳继续补充检查。")
+        return "\n".join(lines)
 
     def _append_session_message(self, message: Message) -> None:
         if self._session_persistence_suppressed():
@@ -939,6 +999,7 @@ class ChatPipeline:
                     if self._should_force_final_response(
                         round_num,
                         max_react_rounds=max_react_rounds,
+                        inbound=inbound,
                     ):
                         reached_round_limit = False
                         logger.info(
@@ -952,6 +1013,7 @@ class ChatPipeline:
                             model_name=model_name,
                             session_id=inbound.session_id,
                             max_react_rounds=max_react_rounds,
+                            heartbeat_mode=self._is_heartbeat_request(inbound),
                         )
                         yield await self._format_event(
                             event_type="assistant_chunk",

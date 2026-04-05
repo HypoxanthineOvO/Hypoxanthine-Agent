@@ -688,8 +688,6 @@ def test_pipeline_stream_reply_uses_heartbeat_specific_round_limit() -> None:
         async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
             del model_name, messages, session_id
             self.tools_history.append(tools)
-            if tools is None:
-                return {"text": "heartbeat summary", "tool_calls": []}
             return {
                 "text": "",
                 "tool_calls": [
@@ -733,11 +731,11 @@ def test_pipeline_stream_reply_uses_heartbeat_specific_round_limit() -> None:
     events = asyncio.run(_collect())
     combined = "".join(event.get("text", "") for event in events if event.get("type") == "assistant_chunk")
 
-    assert "heartbeat summary" in combined
+    assert "Heartbeat 已达到工具轮次上限" in combined
+    assert "exec_command" in combined
+    assert "hi" in combined
     assert len(router.tools_history) == 3
-    assert router.tools_history[0] is not None
-    assert router.tools_history[1] is not None
-    assert router.tools_history[2] is None
+    assert all(history is not None for history in router.tools_history)
 
 
 def test_pipeline_heartbeat_compacts_tool_output_for_followup_round() -> None:

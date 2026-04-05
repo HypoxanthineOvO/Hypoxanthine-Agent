@@ -12,7 +12,7 @@ heartbeat:
   mode: cron
   # Every hour except quiet hours 02:00-07:59
   cron: "0 0-3,8-23 * * *"
-  max_rounds: 3
+  max_rounds: 4
 email_store:
   enabled: true
   max_entries: 5000
