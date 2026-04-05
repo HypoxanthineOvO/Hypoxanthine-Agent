@@ -335,7 +335,7 @@ graph LR
 ```
 
 - 触发阈值：`len(output) > 2500` 字符。
-- 路由模型：`task_routing.lightweight`（当前为 `DeepseekV3_2`）。
+- 路由模型：`task_routing.lightweight`（当前为 `CodingPlanAuto`，底层使用 `ark-code-latest`）。
 - 压缩模式：
   - `<=128K`：单次压缩。
   - `>128K`：按约 `80K` 分段压缩并最多迭代 3 轮。

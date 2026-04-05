@@ -1,8 +1,8 @@
-default_model: KimiK25
+default_model: GPT
 
 task_routing:
   chat: GPT
-  lightweight: GLM47Coding
+  lightweight: CodingPlanAuto
   embedding: VolcanoEmbedding
   vision: GPT
 
@@ -12,21 +12,14 @@ models:
     provider: "TTAPI"
     supports_tool_calling: true
     description: "OpenAI ChatGPT"
-    fallback: KimiK25
+    fallback: null
 
-  KimiK25:
-    litellm_model: "openai/kimi-k2.5"
+  CodingPlanAuto:
+    litellm_model: "openai/ark-code-latest"
     provider: "volcengine_coding"
     supports_tool_calling: true
-    description: "Kimi K2.5 via 火山引擎 Coding Plan (OpenAI compat)"
-    fallback: DeepseekV3_2_Core
-
-  GLM47Coding:
-    litellm_model: "openai/glm-4.7"
-    provider: "volcengine_coding"
-    supports_tool_calling: true
-    description: "GLM-4.7 via 火山引擎 Coding Plan (OpenAI compat)"
-    fallback: KimiK25
+    description: "Ark Code Latest via 火山引擎 Coding Plan (Auto mode)"
+    fallback: GPT
 
   Gemini3Pro:
     provider: Hiapi
@@ -34,15 +27,7 @@ models:
     # on this provider endpoint. Keep config unchanged, but re-check provider
     # compatibility before relying on function calling in production.
     litellm_model: "openai/gemini-3-pro"
-    fallback: DeepseekV3_2
-
-
-  DeepseekV3_2_Core:
-    provider: "volcengine_coding"
-    litellm_model: "openai/deepseek-v3.2"
-    description: "DeepSeek V3.2 via 火山方舟 Coding Plan (fallback terminal)"
-    fallback: null
-
+    fallback: GPT
 
   VolcanoEmbedding:
     type: embedding
@@ -50,3 +35,23 @@ models:
     litellm_model: "openai/ep-20250904174839-hhslf"
     description: "Volcano / Ark embedding model for L3 semantic memory"
     fallback: null
+
+  LegacyKimiK25:
+    litellm_model: "openai/kimi-k2.5"
+    provider: "volcengine_coding"
+    supports_tool_calling: true
+    description: "Deprecated legacy alias for old Coding Plan topology"
+    fallback: GPT
+
+  LegacyGLM47Coding:
+    litellm_model: "openai/glm-4.7"
+    provider: "volcengine_coding"
+    supports_tool_calling: true
+    description: "Deprecated legacy alias for old Coding Plan topology"
+    fallback: GPT
+
+  LegacyDeepseekV3_2_Core:
+    provider: "volcengine_coding"
+    litellm_model: "openai/deepseek-v3.2"
+    description: "Deprecated legacy alias for old Coding Plan topology"
+    fallback: GPT

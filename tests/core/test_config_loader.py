@@ -213,6 +213,19 @@ providers:
         load_runtime_model_config(models_yaml, secrets_yaml)
 
 
+def test_repo_models_config_uses_single_coding_plan_auto_topology() -> None:
+    runtime = load_runtime_model_config(
+        Path(__file__).resolve().parents[2] / "config" / "models.yaml",
+        Path(__file__).resolve().parents[2] / "config" / "secrets.yaml",
+    )
+
+    assert runtime.default_model == "GPT"
+    assert runtime.task_routing["lightweight"] == "CodingPlanAuto"
+    assert runtime.models["CodingPlanAuto"].litellm_model == "openai/ark-code-latest"
+    assert runtime.models["CodingPlanAuto"].provider == "volcengine_coding"
+    assert runtime.models["CodingPlanAuto"].fallback == "GPT"
+
+
 def test_load_tasks_config_accepts_heartbeat_email_store_and_hypo_info_digest(tmp_path: Path) -> None:
     tasks_yaml = tmp_path / "tasks.yaml"
     tasks_yaml.write_text(
