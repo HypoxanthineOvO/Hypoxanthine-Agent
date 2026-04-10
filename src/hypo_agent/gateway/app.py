@@ -323,6 +323,7 @@ def _register_enabled_skills(
             email_skill=email_skill,
             reminder_skill=reminder_skill,
             notion_skill=notion_skill,
+            structured_store=structured_store,
         )
         _register(heartbeat_snapshot_skill)
         if heartbeat_service is not None and callable(
@@ -454,7 +455,6 @@ def _load_hypo_coder_runtime(
 
 def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
     heartbeat_allowed_tools = {
-        "get_system_snapshot",
         "get_mail_snapshot",
         "get_notion_todo_snapshot",
         "get_reminder_snapshot",

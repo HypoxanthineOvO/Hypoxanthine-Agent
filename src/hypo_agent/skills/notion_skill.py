@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 import json
 from pathlib import Path
@@ -10,6 +11,7 @@ import structlog
 
 from hypo_agent.channels.notion import NotionClient, NotionUnavailableError, blocks_to_markdown, markdown_to_blocks
 from hypo_agent.core.config_loader import load_secrets_config
+from hypo_agent.core.notion_todo_binding import discover_notion_todo_candidate, get_bound_notion_todo_database_id
 from hypo_agent.models import SkillOutput
 from hypo_agent.skills.base import BaseSkill
 from hypo_agent.skills.notion_heartbeat import NotionTodoHeartbeatSource
@@ -336,6 +338,42 @@ class NotionSkill(BaseSkill):
             )
         return "\n".join(lines).strip()
 
+    async def get_todo_snapshot(
+        self,
+        *,
+        structured_store: Any | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        database_id = await get_bound_notion_todo_database_id(
+            structured_store,
+            configured_database_id=self._todo_database_id,
+        )
+        if not database_id:
+            discovery = await discover_notion_todo_candidate(structured_store, self._client)
+            return {
+                "available": False,
+                "error": str(discovery.get("error") or "notion todo database is unavailable"),
+                "human_summary": str(discovery.get("human_summary") or "").strip(),
+                "binding_status": str(discovery.get("status") or "").strip(),
+                "candidate": discovery.get("candidate"),
+                "candidates": discovery.get("candidates"),
+            }
+        try:
+            rows = await self._client.query_database(database_id, filter=None, sorts=None, page_size=limit)
+        except NotionUnavailableError as exc:
+            error_text = str(exc).strip() or _SERVICE_UNAVAILABLE
+            return {
+                "available": False,
+                "database_id": database_id,
+                "error": error_text,
+                "human_summary": f"Notion 待办查询失败：{error_text}",
+            }
+        return {
+            "available": True,
+            "database_id": database_id,
+            "items": await self._normalize_todo_rows(rows),
+        }
+
     async def notion_get_schema(self, database_id: str) -> str:
         database = await self._client.get_database(database_id)
         properties = database.get("properties", {})
@@ -515,6 +553,17 @@ class NotionSkill(BaseSkill):
                 return self._extract_rich_text(value["title"])
         return ""
 
+    def _extract_first_property(self, properties: Any, *names: str) -> str:
+        if not isinstance(properties, dict):
+            return ""
+        for name in names:
+            value = properties.get(name)
+            if isinstance(value, dict):
+                parsed = self._extract_property_value(value)
+                if parsed:
+                    return parsed
+        return ""
+
     def _format_property_summary(self, properties: Any) -> str:
         if not isinstance(properties, dict):
             return ""
@@ -591,3 +640,152 @@ class NotionSkill(BaseSkill):
                 if parsed:
                     return parsed
         return ""
+
+    async def _normalize_todo_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        row_parent_ids: dict[str, list[str]] = {}
+        unique_parent_ids: list[str] = []
+        seen_parent_ids: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            parent_ids = self._extract_parent_relation_ids(row)
+            row_id = str(row.get("id") or "").strip()
+            if row_id and parent_ids:
+                row_parent_ids[row_id] = parent_ids
+            for parent_id in parent_ids:
+                if parent_id in seen_parent_ids:
+                    continue
+                seen_parent_ids.add(parent_id)
+                unique_parent_ids.append(parent_id)
+
+        parent_titles: dict[str, str] = {}
+        if unique_parent_ids:
+            titles = await asyncio.gather(
+                *(self._safe_get_page_title(parent_id) for parent_id in unique_parent_ids)
+            )
+            for parent_id, title in zip(unique_parent_ids, titles, strict=False):
+                if title:
+                    parent_titles[parent_id] = title
+
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            parent_ids = row_parent_ids.get(str(row.get("id") or "").strip(), [])
+            parent_page_id = parent_ids[0] if parent_ids else ""
+            items.append(
+                self._normalize_todo_row(
+                    row,
+                    parent_page_id=parent_page_id,
+                    parent_title=parent_titles.get(parent_page_id, ""),
+                )
+            )
+        return items
+
+    async def _safe_get_page_title(self, page_id: str) -> str:
+        try:
+            page = await self._client.get_page(page_id)
+        except NotionUnavailableError:
+            return ""
+        return self._extract_title(page) or page_id
+
+    def _normalize_todo_row(
+        self,
+        row: dict[str, Any],
+        *,
+        parent_page_id: str = "",
+        parent_title: str = "",
+    ) -> dict[str, Any]:
+        properties = row.get("properties", {})
+        status = str(row.get("status") or "").strip() or self._extract_first_property(properties, "Status", "状态")
+        priority = str(row.get("priority") or "").strip() or self._extract_first_property(
+            properties,
+            "Priority",
+            "优先级",
+            "优先程度",
+        )
+        due_date = str(row.get("due_date") or "").strip() or self._extract_first_property(
+            properties,
+            "日期",
+            "Due Date",
+            "Due",
+            "Deadline",
+            "截止日期",
+            "截至",
+        )
+        tags = str(row.get("tags") or "").strip() or self._extract_first_property(properties, "Tags", "标签")
+        recurrence = str(row.get("recurrence") or "").strip() or self._extract_first_property(
+            properties,
+            "Repeat",
+            "Repeating",
+            "Recurring",
+            "Recurrence",
+            "重复",
+            "重复规则",
+            "周期",
+            "频率",
+        )
+        done_value = str(row.get("done") or "").strip() or self._extract_first_property(
+            properties,
+            "已完成",
+            "Done",
+            "完成",
+        )
+        title = str(row.get("title") or "").strip() or self._extract_title(row)
+        normalized_status = status.casefold()
+        normalized_done = done_value.casefold()
+        return {
+            "id": str(row.get("id") or ""),
+            "title": title,
+            "status": status,
+            "priority": priority,
+            "due_date": due_date[:10] if due_date else "",
+            "tags": tags,
+            "done": normalized_done == "true" or normalized_status in {"done", "completed", "完成", "已完成"},
+            "recurrence": recurrence,
+            "parent_page_id": parent_page_id,
+            "parent_title": parent_title,
+        }
+
+    def _extract_parent_relation_ids(self, row: dict[str, Any]) -> list[str]:
+        properties = row.get("properties", {})
+        if not isinstance(properties, dict):
+            return []
+        explicit_names = (
+            "Parent item",
+            "Parent",
+            "Parent task",
+            "父任务",
+            "父级任务",
+            "上级任务",
+            "所属任务",
+        )
+        for name in explicit_names:
+            relation_ids = self._extract_relation_property_ids(properties.get(name))
+            if relation_ids:
+                return relation_ids
+        for name, value in properties.items():
+            label = str(name or "").casefold()
+            if "parent" not in label and "父" not in label and "上级" not in str(name or ""):
+                continue
+            relation_ids = self._extract_relation_property_ids(value)
+            if relation_ids:
+                return relation_ids
+        return []
+
+    def _extract_relation_property_ids(self, value: Any) -> list[str]:
+        if not isinstance(value, dict):
+            return []
+        if str(value.get("type") or "").strip() != "relation":
+            return []
+        relation = value.get("relation")
+        if not isinstance(relation, list):
+            return []
+        ids: list[str] = []
+        for item in relation:
+            if not isinstance(item, dict):
+                continue
+            page_id = str(item.get("id") or "").strip()
+            if page_id:
+                ids.append(page_id)
+        return ids

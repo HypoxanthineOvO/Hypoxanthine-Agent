@@ -349,13 +349,14 @@ class HeartbeatService:
             return ""
         sections: list[str] = []
         for key, title in (
-            ("system", "system"),
             ("mail", "mail"),
             ("notion_todo", "notion_todo"),
             ("reminders", "reminders"),
         ):
             section = payload.get(key)
             if not isinstance(section, dict):
+                continue
+            if not self._snapshot_section_has_signal(key, section):
                 continue
             human_summary = str(section.get("human_summary") or "").strip()
             if human_summary:
@@ -365,13 +366,14 @@ class HeartbeatService:
     def _render_snapshot_push_text(self, payload: dict[str, Any]) -> str:
         sections: list[str] = ["心跳检查完成。"]
         for key, title in (
-            ("system", "系统状态"),
             ("mail", "邮件"),
             ("notion_todo", "Notion 待办"),
             ("reminders", "提醒"),
         ):
             section = payload.get(key)
             if not isinstance(section, dict):
+                continue
+            if not self._snapshot_section_has_signal(key, section):
                 continue
             human_summary = str(section.get("human_summary") or "").strip()
             if not human_summary:
@@ -380,7 +382,26 @@ class HeartbeatService:
                     human_summary = error
             if human_summary:
                 sections.append(f"{title}\n{human_summary}")
+        if len(sections) == 1:
+            return ""
         return "\n\n".join(part.strip() for part in sections if part.strip()).strip()
+
+    def _snapshot_section_has_signal(self, key: str, section: dict[str, Any]) -> bool:
+        if str(section.get("error") or "").strip():
+            return True
+        if key == "mail":
+            return bool(section.get("important") or section.get("other") or int(section.get("new_emails") or 0) > 0)
+        if key == "notion_todo":
+            return bool(
+                section.get("pending_today")
+                or section.get("high_priority_due_soon")
+                or section.get("completed_today")
+                or section.get("candidate")
+                or section.get("candidates")
+            )
+        if key == "reminders":
+            return bool(section.get("overdue") or section.get("due_soon"))
+        return False
 
     async def _collect_event_source_context(self) -> tuple[str, dict[str, dict[str, str | None]]]:
         if not self._event_sources:

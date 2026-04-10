@@ -50,7 +50,6 @@ def test_build_default_pipeline_uses_snapshot_tools_for_heartbeat(tmp_path: Path
     pipeline = _build_default_pipeline(deps)
 
     assert pipeline.heartbeat_allowed_tools == {
-        "get_system_snapshot",
         "get_mail_snapshot",
         "get_notion_todo_snapshot",
         "get_reminder_snapshot",

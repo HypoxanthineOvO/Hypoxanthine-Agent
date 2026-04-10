@@ -10,6 +10,10 @@ import re
 from typing import Any, Awaitable, Callable
 
 from hypo_agent.core.config_loader import get_memory_dir
+from hypo_agent.core.notion_todo_binding import (
+    discover_notion_todo_candidate,
+    get_bound_notion_todo_database_id,
+)
 from hypo_agent.models import SkillOutput
 from hypo_agent.skills.base import BaseSkill
 
@@ -18,7 +22,7 @@ _LOAD_RE = re.compile(r"load average[s]?:\s*([0-9.]+),\s*([0-9.]+),\s*([0-9.]+)"
 
 class HeartbeatSnapshotSkill(BaseSkill):
     name = "heartbeat_snapshot"
-    description = "Provide structured heartbeat snapshots for system, mail, notion todo, and reminders."
+    description = "Provide structured heartbeat snapshots for mail, notion todo, and reminders."
     required_permissions: list[str] = []
 
     def __init__(
@@ -27,6 +31,7 @@ class HeartbeatSnapshotSkill(BaseSkill):
         email_skill: Any | None = None,
         reminder_skill: Any | None = None,
         notion_skill: Any | None = None,
+        structured_store: Any | None = None,
         people_index_path: Path | str | None = None,
         system_snapshot_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None,
         now_provider: Callable[[], datetime] | None = None,
@@ -35,6 +40,7 @@ class HeartbeatSnapshotSkill(BaseSkill):
         self.email_skill = email_skill
         self.reminder_skill = reminder_skill
         self.notion_skill = notion_skill
+        self.structured_store = structured_store
         self.people_index_path = Path(people_index_path or (get_memory_dir() / "people" / "index.md"))
         self.system_snapshot_provider = system_snapshot_provider
         self.now_provider = now_provider
@@ -43,10 +49,6 @@ class HeartbeatSnapshotSkill(BaseSkill):
     @property
     def tools(self) -> list[dict[str, Any]]:
         return [
-            self._tool_schema(
-                "get_system_snapshot",
-                "获取结构化系统快照，包括负载、内存、磁盘、GPU 和按人聚合的进程概览。返回 JSON。",
-            ),
             self._tool_schema(
                 "get_mail_snapshot",
                 "获取结构化邮件快照。内部以 heartbeat 模式扫描未读邮件，返回 JSON。",
@@ -61,14 +63,12 @@ class HeartbeatSnapshotSkill(BaseSkill):
             ),
             self._tool_schema(
                 "get_heartbeat_snapshot",
-                "一次性获取完整 heartbeat 结构化快照，聚合 system/mail/notion/reminders 四个 section。返回 JSON。",
+                "一次性获取完整 heartbeat 结构化快照，聚合 mail/notion/reminders 三个 section。返回 JSON。",
             ),
         ]
 
     async def execute(self, tool_name: str, params: dict[str, Any]) -> SkillOutput:
         del params
-        if tool_name == "get_system_snapshot":
-            return SkillOutput(status="success", result=await self._get_system_snapshot())
         if tool_name == "get_mail_snapshot":
             return SkillOutput(status="success", result=await self._get_mail_snapshot())
         if tool_name == "get_notion_todo_snapshot":
@@ -107,7 +107,6 @@ class HeartbeatSnapshotSkill(BaseSkill):
 
     async def _get_heartbeat_snapshot(self) -> dict[str, Any]:
         sections = await asyncio.gather(
-            self._safe_section("system", self._get_system_snapshot()),
             self._safe_section("mail", self._get_mail_snapshot()),
             self._safe_section("notion_todo", self._get_notion_todo_snapshot()),
             self._safe_section("reminders", self._get_reminder_snapshot()),
@@ -205,11 +204,44 @@ class HeartbeatSnapshotSkill(BaseSkill):
 
     async def _get_notion_todo_snapshot(self) -> dict[str, Any]:
         notion_skill = self.notion_skill
-        database_id = str(getattr(notion_skill, "_todo_database_id", "") or "").strip()
-        client = getattr(notion_skill, "_client", None)
-        if notion_skill is None or client is None or not database_id:
+        if notion_skill is None:
             return {"available": False, "error": "notion todo database is unavailable"}
-        rows = await client.query_database(database_id, filter=None, sorts=None, page_size=50)
+        todo_snapshot_getter = getattr(notion_skill, "get_todo_snapshot", None)
+        if callable(todo_snapshot_getter):
+            snapshot_payload = todo_snapshot_getter(
+                structured_store=self.structured_store,
+                limit=50,
+            )
+            if asyncio.iscoroutine(snapshot_payload):
+                snapshot_payload = await snapshot_payload
+            if isinstance(snapshot_payload, dict):
+                if not bool(snapshot_payload.get("available", False)):
+                    return snapshot_payload
+                database_id = str(snapshot_payload.get("database_id") or "").strip()
+                rows = snapshot_payload.get("items", [])
+            else:
+                database_id = ""
+                rows = []
+        else:
+            client = getattr(notion_skill, "_client", None)
+            configured_database_id = str(getattr(notion_skill, "_todo_database_id", "") or "").strip()
+            database_id = await get_bound_notion_todo_database_id(
+                self.structured_store,
+                configured_database_id=configured_database_id,
+            )
+            if client is None:
+                return {"available": False, "error": "notion todo database is unavailable"}
+            if not database_id:
+                discovery = await discover_notion_todo_candidate(self.structured_store, client)
+                return {
+                    "available": False,
+                    "error": str(discovery.get("error") or "notion todo database is unavailable"),
+                    "human_summary": str(discovery.get("human_summary") or "").strip(),
+                    "binding_status": str(discovery.get("status") or "").strip(),
+                    "candidate": discovery.get("candidate"),
+                    "candidates": discovery.get("candidates"),
+                }
+            rows = await client.query_database(database_id, filter=None, sorts=None, page_size=50)
         now = self._now().date()
         due_soon_limit = now + timedelta(days=3)
         pending_today: list[dict[str, Any]] = []
@@ -227,7 +259,12 @@ class HeartbeatSnapshotSkill(BaseSkill):
             is_high = self._is_high_priority(item)
             if due_date == now and not done:
                 pending_today.append(item)
-            if now <= due_date <= due_soon_limit and not done and is_high:
+            if (
+                now <= due_date <= due_soon_limit
+                and not done
+                and is_high
+                and not self._is_daily_recurring_task(item)
+            ):
                 high_priority_due_soon.append(item)
             if due_date == now and done:
                 completed_today.append(item)
@@ -725,19 +762,19 @@ class HeartbeatSnapshotSkill(BaseSkill):
         high_priority_due_soon: list[dict[str, Any]],
         completed_today: list[dict[str, Any]],
     ) -> str:
-        lines: list[str] = []
+        sections: list[str] = []
         if pending_today:
-            lines.append("今日到期未完成：")
-            lines.extend(f"- {item.get('title') or '未命名任务'}" for item in pending_today[:5])
+            items = "\n".join(f"- {self._display_notion_item(item)}" for item in pending_today[:5])
+            sections.append(f"今日到期未完成：\n\n{items}")
         if high_priority_due_soon:
-            lines.append("三天内高优未完成：")
-            lines.extend(f"- {item.get('title') or '未命名任务'}" for item in high_priority_due_soon[:5])
+            items = "\n".join(f"- {self._display_notion_item(item)}" for item in high_priority_due_soon[:5])
+            sections.append(f"三天内高优未完成：\n\n{items}")
         if completed_today:
-            lines.append("今日已完成：")
-            lines.extend(f"- {item.get('title') or '未命名任务'}" for item in completed_today[:5])
-        if not lines:
+            items = "\n".join(f"- {self._display_notion_item(item)}" for item in completed_today[:5])
+            sections.append(f"今日已完成：\n\n{items}")
+        if not sections:
             return "Notion 待办暂无需要汇报的事项。"
-        return "\n".join(lines).strip()
+        return "\n\n".join(sections).strip()
 
     def _render_reminder_human_summary(
         self,
@@ -791,19 +828,52 @@ class HeartbeatSnapshotSkill(BaseSkill):
 
     def _normalize_notion_row(self, row: dict[str, Any]) -> dict[str, Any]:
         properties = row.get("properties", {})
-        status = self._extract_first_property(properties, "Status", "状态")
-        priority = self._extract_first_property(properties, "Priority", "优先级", "优先程度")
-        due_date = self._extract_first_property(properties, "日期", "Due Date", "Due", "Deadline", "截止日期", "截至")
-        tags = self._extract_first_property(properties, "Tags", "标签")
-        done_value = self._extract_first_property(properties, "已完成", "Done", "完成")
+        status = str(row.get("status") or "").strip() or self._extract_first_property(properties, "Status", "状态")
+        priority = str(row.get("priority") or "").strip() or self._extract_first_property(
+            properties,
+            "Priority",
+            "优先级",
+            "优先程度",
+        )
+        due_date = str(row.get("due_date") or "").strip() or self._extract_first_property(
+            properties,
+            "日期",
+            "Due Date",
+            "Due",
+            "Deadline",
+            "截止日期",
+            "截至",
+        )
+        tags = str(row.get("tags") or "").strip() or self._extract_first_property(properties, "Tags", "标签")
+        done_value = str(row.get("done") or "").strip() or self._extract_first_property(
+            properties,
+            "已完成",
+            "Done",
+            "完成",
+        )
+        recurrence = str(row.get("recurrence") or "").strip() or self._extract_first_property(
+            properties,
+            "Repeat",
+            "Repeating",
+            "Recurring",
+            "Recurrence",
+            "重复",
+            "重复规则",
+            "周期",
+            "频率",
+        )
+        parent_title = str(row.get("parent_title") or "").strip()
         return {
             "id": str(row.get("id") or ""),
-            "title": self._extract_title(row),
+            "title": str(row.get("title") or "").strip() or self._extract_title(row),
             "status": status,
             "priority": priority,
             "due_date": due_date[:10] if due_date else "",
             "tags": tags,
             "done": str(done_value).lower() == "true",
+            "recurrence": recurrence,
+            "parent_page_id": str(row.get("parent_page_id") or "").strip(),
+            "parent_title": parent_title,
         }
 
     def _extract_title(self, payload: dict[str, Any]) -> str:
@@ -874,6 +944,25 @@ class HeartbeatSnapshotSkill(BaseSkill):
             marker in text
             for marker in ("high", "urgent", "important", "高", "紧急", "p0", "p1")
         )
+
+    def _is_daily_recurring_task(self, item: dict[str, Any]) -> bool:
+        text = " ".join(
+            [
+                str(item.get("recurrence") or ""),
+                str(item.get("tags") or ""),
+            ]
+        ).casefold()
+        return any(
+            marker in text
+            for marker in ("每天", "每日", "daily", "everyday", "every day", "habit", "日常", "例行")
+        )
+
+    def _display_notion_item(self, item: dict[str, Any]) -> str:
+        title = str(item.get("title") or "").strip() or "未命名任务"
+        parent_title = str(item.get("parent_title") or "").strip()
+        if parent_title:
+            return f"{parent_title} / {title}"
+        return title
 
     def _parse_datetime(self, value: Any) -> datetime | None:
         text = str(value or "").strip()

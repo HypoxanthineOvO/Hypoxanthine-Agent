@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from pathlib import Path
 
 from hypo_agent.channels.notion.notion_client import NotionUnavailableError
 from hypo_agent.skills.notion_skill import NotionSkill
@@ -61,6 +62,16 @@ class FakeNotionClient:
 
     async def get_page(self, page_id: str) -> dict:
         assert page_id
+        if page_id == "parent-1":
+            return {
+                "id": "parent-1",
+                "properties": {
+                    "Name": {
+                        "type": "title",
+                        "title": [{"type": "text", "plain_text": "论文返修", "annotations": {}}],
+                    }
+                },
+            }
         return dict(self.page_payload)
 
     async def get_page_content(self, page_id: str) -> list[dict]:
@@ -412,5 +423,115 @@ services:
         assert payload == {"items": [{"title": "完成测试（截止今天）"}]}
         assert client.query_calls[0]["database_id"] == "22222222-2222-2222-2222-222222222222"
         assert client.query_calls[0]["page_size"] == 50
+
+    asyncio.run(_run())
+
+
+def test_get_todo_snapshot_hydrates_parent_titles_and_preserves_daily_recurrence_metadata(tmp_path: Path) -> None:
+    class TodoClient(FakeNotionClient):
+        async def query_database(
+            self,
+            database_id: str,
+            filter: dict | None = None,
+            sorts: list | None = None,
+            page_size: int = 50,
+        ) -> list[dict]:
+            self.query_calls.append(
+                {
+                    "database_id": database_id,
+                    "filter": filter,
+                    "sorts": sorts,
+                    "page_size": page_size,
+                }
+            )
+            return [
+                {
+                    "id": "child-1",
+                    "properties": {
+                        "Name": {
+                            "type": "title",
+                            "title": [{"type": "text", "plain_text": "整理实验记录", "annotations": {}}],
+                        },
+                        "日期": {"type": "date", "date": {"start": "2026-04-05"}},
+                        "已完成": {"type": "checkbox", "checkbox": False},
+                        "优先级": {"type": "select", "select": {"name": "高"}},
+                        "Parent item": {"type": "relation", "relation": [{"id": "parent-1"}]},
+                    },
+                },
+                {
+                    "id": "daily-1",
+                    "properties": {
+                        "Name": {
+                            "type": "title",
+                            "title": [{"type": "text", "plain_text": "姜黄素", "annotations": {}}],
+                        },
+                        "日期": {"type": "date", "date": {"start": "2026-04-06"}},
+                        "已完成": {"type": "checkbox", "checkbox": False},
+                        "优先级": {"type": "select", "select": {"name": "高"}},
+                        "重复": {
+                            "type": "rich_text",
+                            "rich_text": [{"type": "text", "plain_text": "每天", "annotations": {}}],
+                        },
+                    },
+                },
+            ]
+
+    async def _run() -> None:
+        secrets_path = tmp_path / "secrets.yaml"
+        secrets_path.write_text(
+            """
+providers: {}
+services:
+  notion:
+    integration_secret: "secret_xxx"
+    todo_database_id: "22222222-2222-2222-2222-222222222222"
+""".strip(),
+            encoding="utf-8",
+        )
+        client = TodoClient()
+        skill = NotionSkill(secrets_path=secrets_path, notion_client=client)
+
+        result = await skill.get_todo_snapshot()
+
+        assert result["available"] is True
+        assert result["database_id"] == "22222222-2222-2222-2222-222222222222"
+        assert result["items"][0]["title"] == "整理实验记录"
+        assert result["items"][0]["parent_title"] == "论文返修"
+        assert result["items"][1]["recurrence"] == "每天"
+
+    asyncio.run(_run())
+
+
+def test_get_todo_snapshot_returns_unavailable_payload_when_query_fails(tmp_path: Path) -> None:
+    class FailingTodoClient(FakeNotionClient):
+        async def query_database(
+            self,
+            database_id: str,
+            filter: dict | None = None,
+            sorts: list | None = None,
+            page_size: int = 50,
+        ) -> list[dict]:
+            del database_id, filter, sorts, page_size
+            raise NotionUnavailableError("Notion query database 失败：boom")
+
+    async def _run() -> None:
+        secrets_path = tmp_path / "secrets.yaml"
+        secrets_path.write_text(
+            """
+providers: {}
+services:
+  notion:
+    integration_secret: "secret_xxx"
+    todo_database_id: "22222222-2222-2222-2222-222222222222"
+""".strip(),
+            encoding="utf-8",
+        )
+        skill = NotionSkill(secrets_path=secrets_path, notion_client=FailingTodoClient())
+
+        result = await skill.get_todo_snapshot()
+
+        assert result["available"] is False
+        assert "boom" in result["error"]
+        assert "查询失败" in result["human_summary"]
 
     asyncio.run(_run())

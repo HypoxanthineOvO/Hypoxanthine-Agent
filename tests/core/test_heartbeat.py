@@ -234,31 +234,30 @@ def test_heartbeat_replaces_generic_reply_with_snapshot_summary(tmp_path: Path) 
             default_session_id="main",
             prompt_path=prompt_path,
             snapshot_provider=lambda: {
-                "system": {
-                    "human_summary": (
-                        "主机：genesis\n"
-                        "按人运行情况：\n"
-                        "- heyx：2 个进程，CPU 80%，主要进程：python train.py\n"
-                        "- shenby：1 个进程，CPU 30%，主要进程：java metals"
-                    ),
-                    "project_activity_summary": [
-                        "heyx：2 个进程，CPU 80%，主要进程：python train.py",
-                        "shenby：1 个进程，CPU 30%，主要进程：java metals",
-                    ],
+                "mail": {
+                    "human_summary": "重要邮件：\n- boss@example.com / 紧急：需要尽快处理",
+                    "important": [{"from": "boss@example.com", "subject": "紧急"}],
                 },
-                "mail": {"human_summary": "没有新邮件。"},
-                "notion_todo": {"human_summary": "Notion 待办暂无需要汇报的事项。"},
-                "reminders": {"human_summary": "暂无过期或半天内提醒。"},
+                "notion_todo": {
+                    "human_summary": "今日到期未完成：\n\n- 论文返修 / 整理实验记录",
+                    "pending_today": [{"title": "整理实验记录", "parent_title": "论文返修"}],
+                },
+                "reminders": {
+                    "human_summary": "暂无过期或半天内提醒。",
+                    "overdue": [],
+                    "due_soon": [],
+                },
             },
         )
 
         result = await service.run()
 
         assert result["should_push"] is True
-        assert "按人运行情况" in result["summary"]
+        assert "重要邮件" in result["summary"]
+        assert "论文返修 / 整理实验记录" in result["summary"]
         proactive_event = queue.events[1]
-        assert "heyx" in proactive_event["summary"]
-        assert "shenby" in proactive_event["summary"]
+        assert "boss@example.com" in proactive_event["summary"]
+        assert "论文返修 / 整理实验记录" in proactive_event["summary"]
 
     asyncio.run(_run())
 

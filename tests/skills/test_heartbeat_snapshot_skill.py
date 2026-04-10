@@ -73,6 +73,68 @@ class StubNotionSkill:
         self._todo_database_id = "todo-db"
         self._client = self
 
+    async def get_todo_snapshot(
+        self,
+        *,
+        structured_store=None,
+        limit: int = 50,
+    ) -> dict:
+        del structured_store, limit
+        return {
+            "available": True,
+            "database_id": "todo-db",
+            "items": [
+                {
+                    "id": "p1",
+                    "title": "今天高优任务",
+                    "due_date": "2026-04-05",
+                    "done": False,
+                    "priority": "高",
+                    "tags": "",
+                    "status": "",
+                    "recurrence": "",
+                    "parent_page_id": "",
+                    "parent_title": "",
+                },
+                {
+                    "id": "p2",
+                    "title": "姜黄素",
+                    "due_date": "2026-04-06",
+                    "done": False,
+                    "priority": "高",
+                    "tags": "",
+                    "status": "",
+                    "recurrence": "每天",
+                    "parent_page_id": "",
+                    "parent_title": "",
+                },
+                {
+                    "id": "p3",
+                    "title": "姜黄素",
+                    "due_date": "2026-04-05",
+                    "done": True,
+                    "priority": "高",
+                    "tags": "",
+                    "status": "",
+                    "recurrence": "每天",
+                    "parent_page_id": "",
+                    "parent_title": "",
+                },
+                {
+                    "id": "p4",
+                    "title": "整理实验记录",
+                    "due_date": "2026-04-05",
+                    "done": False,
+                    "priority": "高",
+                    "tags": "",
+                    "status": "",
+                    "recurrence": "",
+                    "parent_page_id": "parent-1",
+                    "parent_title": "论文返修",
+                },
+            ],
+        }
+
     async def query_database(
         self,
         database_id: str,
@@ -102,11 +164,12 @@ class StubNotionSkill:
                 "properties": {
                     "Name": {
                         "type": "title",
-                        "title": [{"type": "text", "plain_text": "三天内任务"}],
+                        "title": [{"type": "text", "plain_text": "姜黄素"}],
                     },
-                    "日期": {"type": "date", "date": {"start": "2026-04-07"}},
+                    "日期": {"type": "date", "date": {"start": "2026-04-06"}},
                     "已完成": {"type": "checkbox", "checkbox": False},
-                    "优先级": {"type": "select", "select": {"name": "中"}},
+                    "优先级": {"type": "select", "select": {"name": "高"}},
+                    "重复": {"type": "rich_text", "rich_text": [{"type": "text", "plain_text": "每天"}]},
                 },
             },
             {
@@ -114,14 +177,124 @@ class StubNotionSkill:
                 "properties": {
                     "Name": {
                         "type": "title",
-                        "title": [{"type": "text", "plain_text": "今日已完成"}],
+                        "title": [{"type": "text", "plain_text": "姜黄素"}],
                     },
                     "日期": {"type": "date", "date": {"start": "2026-04-05"}},
                     "已完成": {"type": "checkbox", "checkbox": True},
                     "优先级": {"type": "select", "select": {"name": "高"}},
+                    "重复": {"type": "rich_text", "rich_text": [{"type": "text", "plain_text": "每天"}]},
+                },
+            },
+            {
+                "id": "p4",
+                "properties": {
+                    "Name": {
+                        "type": "title",
+                        "title": [{"type": "text", "plain_text": "整理实验记录"}],
+                    },
+                    "日期": {"type": "date", "date": {"start": "2026-04-05"}},
+                    "已完成": {"type": "checkbox", "checkbox": False},
+                    "优先级": {"type": "select", "select": {"name": "高"}},
+                    "Parent item": {
+                        "type": "relation",
+                        "relation": [{"id": "parent-1"}],
+                    },
                 },
             },
         ]
+
+    async def get_page(self, page_id: str) -> dict:
+        assert page_id == "parent-1"
+        return {
+            "id": "parent-1",
+            "properties": {
+                "Name": {
+                    "type": "title",
+                    "title": [{"type": "text", "plain_text": "论文返修"}],
+                }
+            },
+        }
+
+
+class DiscoverableNotionSkill:
+    def __init__(self) -> None:
+        self._todo_database_id = ""
+        self._client = self
+        self.search_calls: list[dict[str, object]] = []
+
+    async def query_database(
+        self,
+        database_id: str,
+        filter: dict | None = None,
+        sorts: list | None = None,
+        page_size: int = 50,
+    ) -> list[dict]:
+        assert database_id == "todo-db-discovered"
+        assert filter is None
+        assert sorts is None
+        assert page_size == 50
+        return []
+
+    async def search(
+        self,
+        query: str,
+        *,
+        object_type: str | None = None,
+        page_size: int = 10,
+    ) -> list[dict]:
+        self.search_calls.append(
+            {
+                "query": query,
+                "object_type": object_type,
+                "page_size": page_size,
+            }
+        )
+        return [
+            {
+                "id": "todo-db-discovered",
+                "object": "database",
+                "url": "https://www.notion.so/todo-db-discovered",
+                "last_edited_time": "2026-04-07T12:00:00.000Z",
+                "title": [{"type": "text", "plain_text": "HYX的计划通"}],
+            }
+        ]
+
+
+class DiscoverableNotionSkillWithSpacedTitle(DiscoverableNotionSkill):
+    async def search(
+        self,
+        query: str,
+        *,
+        object_type: str | None = None,
+        page_size: int = 10,
+    ) -> list[dict]:
+        self.search_calls.append(
+            {
+                "query": query,
+                "object_type": object_type,
+                "page_size": page_size,
+            }
+        )
+        return [
+            {
+                "id": "todo-db-spaced",
+                "object": "database",
+                "url": "https://www.notion.so/todo-db-spaced",
+                "last_edited_time": "2026-04-07T12:00:00.000Z",
+                "title": [{"type": "text", "plain_text": "HYX 的计划通"}],
+            }
+        ]
+
+
+class StubPreferenceStore:
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+
+    async def get_preference(self, key: str) -> str | None:
+        return self.values.get(key)
+
+    async def set_preference(self, key: str, value: str) -> None:
+        self.values[key] = value
 
 
 async def _fake_system_snapshot() -> dict:
@@ -170,7 +343,6 @@ def test_heartbeat_snapshot_skill_exposes_expected_tools() -> None:
     tool_names = [tool["function"]["name"] for tool in skill.tools]
 
     assert tool_names == [
-        "get_system_snapshot",
         "get_mail_snapshot",
         "get_notion_todo_snapshot",
         "get_reminder_snapshot",
@@ -203,12 +375,7 @@ def test_heartbeat_snapshot_skill_returns_structured_sections(tmp_path: Path) ->
     assert result.status == "success"
     payload = result.result
     assert payload["checked_at"] == "2026-04-05T12:00:00+08:00"
-    assert payload["system"]["host"] == "devbox"
-    assert payload["system"]["projects_by_user"][0]["process_count"] == 2
-    assert payload["system"]["projects_by_user"][0]["top_process_details"][0]["pid"] == 123
-    assert "贺云翔/heyx" in payload["system"]["project_activity_summary"][0]
-    assert payload["system"]["top_system_processes"][0]["gpu_memory_mb"] == 4096
-    assert "按人运行情况" in payload["system"]["human_summary"]
+    assert "system" not in payload
     assert payload["mail"]["counts"] == {
         "important": 1,
         "low_priority": 1,
@@ -220,8 +387,18 @@ def test_heartbeat_snapshot_skill_returns_structured_sections(tmp_path: Path) ->
     assert payload["mail"]["important"][0]["attachments"] == ["a.pdf"]
     assert payload["notion_todo"]["pending_today"][0]["title"] == "今天高优任务"
     assert payload["notion_todo"]["high_priority_due_soon"][0]["title"] == "今天高优任务"
-    assert payload["notion_todo"]["completed_today"][0]["title"] == "今日已完成"
+    assert [item["title"] for item in payload["notion_todo"]["high_priority_due_soon"]] == [
+        "今天高优任务",
+        "整理实验记录",
+    ]
+    assert payload["notion_todo"]["completed_today"][0]["title"] == "姜黄素"
+    assert payload["notion_todo"]["pending_today"][1]["title"] == "整理实验记录"
+    assert payload["notion_todo"]["pending_today"][1]["parent_title"] == "论文返修"
     assert "今日到期未完成" in payload["notion_todo"]["human_summary"]
+    assert "今日到期未完成：\n\n- 今天高优任务" in payload["notion_todo"]["human_summary"]
+    assert "- 论文返修 / 整理实验记录" in payload["notion_todo"]["human_summary"]
+    assert "\n\n三天内高优未完成：\n\n- 今天高优任务" in payload["notion_todo"]["human_summary"]
+    assert "\n- 论文返修 / 整理实验记录" in payload["notion_todo"]["human_summary"]
     assert payload["reminders"]["overdue"][0]["title"] == "过期提醒"
     assert payload["reminders"]["due_soon"][0]["title"] == "半天内提醒"
     assert "过期提醒" in payload["reminders"]["human_summary"]
@@ -240,3 +417,43 @@ def test_heartbeat_snapshot_skill_mail_snapshot_uses_heartbeat_scan_mode() -> No
     assert result.status == "success"
     assert email_skill.calls == [{"triggered_by": "heartbeat", "unread_only": True}]
     assert result.result["new_emails"] == 2
+
+
+def test_heartbeat_snapshot_skill_discovers_notion_todo_candidate_and_requests_confirmation() -> None:
+    store = StubPreferenceStore()
+    notion_skill = DiscoverableNotionSkill()
+    skill = HeartbeatSnapshotSkill(
+        notion_skill=notion_skill,
+        structured_store=store,
+        system_snapshot_provider=_fake_system_snapshot,
+        now_iso_provider=lambda: "2026-04-07T12:00:00+08:00",
+    )
+
+    result = asyncio.run(skill.execute("get_notion_todo_snapshot", {}))
+
+    assert result.status == "success"
+    assert result.result["available"] is False
+    assert "确认绑定" in result.result["human_summary"]
+    assert "HYX的计划通" in result.result["human_summary"]
+    assert notion_skill.search_calls == [
+        {"query": "HYX的计划通", "object_type": "database", "page_size": 10}
+    ]
+    assert store.values["notion.todo_database_candidate_pending"].startswith("{")
+
+
+def test_heartbeat_snapshot_skill_discovers_notion_todo_candidate_when_title_differs_only_by_spaces() -> None:
+    store = StubPreferenceStore()
+    notion_skill = DiscoverableNotionSkillWithSpacedTitle()
+    skill = HeartbeatSnapshotSkill(
+        notion_skill=notion_skill,
+        structured_store=store,
+        system_snapshot_provider=_fake_system_snapshot,
+        now_iso_provider=lambda: "2026-04-07T12:00:00+08:00",
+    )
+
+    result = asyncio.run(skill.execute("get_notion_todo_snapshot", {}))
+
+    assert result.status == "success"
+    assert result.result["binding_status"] == "pending_confirmation"
+    assert "HYX 的计划通" in result.result["human_summary"]
+    assert store.values["notion.todo_database_candidate_pending"].startswith("{")
