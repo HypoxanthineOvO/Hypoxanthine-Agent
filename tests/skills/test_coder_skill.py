@@ -28,7 +28,7 @@ class FakeCoderClient:
         self,
         prompt: str,
         working_directory: str,
-        model: str = "o4-mini",
+        model: str | None = None,
         approval_policy: str = "full-auto",
         webhook: str | None = None,
     ) -> dict:
@@ -80,7 +80,6 @@ def test_submit_task() -> None:
             {
                 "prompt": "修复 hello.py",
                 "working_directory": "/tmp/demo",
-                "model": "o4-mini",
             },
         )
 
@@ -90,7 +89,7 @@ def test_submit_task() -> None:
             {
                 "prompt": "修复 hello.py",
                 "working_directory": "/tmp/demo",
-                "model": "o4-mini",
+                "model": None,
                 "approval_policy": "full-auto",
                 "webhook": "http://localhost:8765/api/coder/webhook",
             }

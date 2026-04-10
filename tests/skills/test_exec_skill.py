@@ -10,6 +10,10 @@ def _write_exec_profiles(path: Path) -> Path:
     path.write_text(
         """
 profiles:
+  cli-json:
+    allow_prefixes:
+      - "*"
+    deny_prefixes: []
   git:
     allow_prefixes:
       - "git status"
@@ -213,3 +217,60 @@ def test_exec_script_uses_profile_validation(tmp_path: Path) -> None:
 
     assert output.status == "error"
     assert "not allowed by exec profile" in output.error_info.lower()
+
+
+def test_exec_command_cli_json_allows_whitelisted_direct_command(tmp_path: Path) -> None:
+    skill = ExecSkill(exec_profiles_path=_write_exec_profiles(tmp_path / "exec_profiles.yaml"))
+
+    output = asyncio.run(
+        skill.execute(
+            "exec_command",
+            {
+                "command": "echo hello",
+                "exec_profile": "cli-json",
+                "allowed_commands": ["echo"],
+                "io_format": "json-stdio",
+            },
+        )
+    )
+
+    assert output.status == "success"
+    assert output.metadata["exec_profile"] == "cli-json"
+
+
+def test_exec_command_cli_json_rejects_non_whitelisted_command(tmp_path: Path) -> None:
+    skill = ExecSkill(exec_profiles_path=_write_exec_profiles(tmp_path / "exec_profiles.yaml"))
+
+    output = asyncio.run(
+        skill.execute(
+            "exec_command",
+            {
+                "command": "pwd",
+                "exec_profile": "cli-json",
+                "allowed_commands": ["echo"],
+                "io_format": "json-stdio",
+            },
+        )
+    )
+
+    assert output.status == "error"
+    assert "not declared in cli_commands" in output.error_info.lower()
+
+
+def test_exec_command_cli_json_rejects_shell_control_operators(tmp_path: Path) -> None:
+    skill = ExecSkill(exec_profiles_path=_write_exec_profiles(tmp_path / "exec_profiles.yaml"))
+
+    output = asyncio.run(
+        skill.execute(
+            "exec_command",
+            {
+                "command": "echo hello && pwd",
+                "exec_profile": "cli-json",
+                "allowed_commands": ["echo"],
+                "io_format": "json-stdio",
+            },
+        )
+    )
+
+    assert output.status == "error"
+    assert "shell control operator" in output.error_info.lower()

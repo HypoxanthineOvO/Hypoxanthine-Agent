@@ -4,6 +4,8 @@ import asyncio
 from asyncio.subprocess import PIPE
 import os
 from pathlib import Path
+import re
+import shlex
 import shutil
 import sys
 import tempfile
@@ -135,6 +137,17 @@ class ExecSkill(BaseSkill):
                     f"{decision.reason} ({decision.normalized_command[:200]})"
                 ),
             )
+        cli_error = self._validate_cli_json_command(command, params, profile_name=decision.profile_name)
+        if cli_error is not None:
+            logger.warning(
+                "exec.command.cli_json_denied",
+                tool_name="exec_command",
+                exec_profile=decision.profile_name,
+                command=decision.normalized_command,
+                decision="denied",
+                deny_reason=cli_error,
+            )
+            return SkillOutput(status="error", error_info=cli_error)
         logger.info(
             "exec.command.allowed",
             tool_name="exec_command",
@@ -179,6 +192,11 @@ class ExecSkill(BaseSkill):
                 error_info=f"Unsupported language '{language}'",
             )
         profile_name = str(params.get("exec_profile") or "default").strip() or "default"
+        if profile_name == "cli-json":
+            return SkillOutput(
+                status="error",
+                error_info="Script execution is not allowed with exec profile 'cli-json'; use exec_command.",
+            )
         validation_command = f"{Path(interpreter).name} <tempfile{suffix}>"
         decision = self.profile_registry.evaluate(validation_command, profile_name=profile_name)
         if not decision.allowed:
@@ -261,6 +279,56 @@ class ExecSkill(BaseSkill):
             return max(1, int(value or self.default_timeout_seconds))
         except (TypeError, ValueError):
             return self.default_timeout_seconds
+
+    def _validate_cli_json_command(
+        self,
+        command: str,
+        params: dict[str, Any],
+        *,
+        profile_name: str,
+    ) -> str | None:
+        if profile_name != "cli-json":
+            return None
+
+        allowed_commands = [str(item).strip() for item in params.get("allowed_commands", []) if str(item).strip()]
+        if not allowed_commands:
+            return "Command not allowed by exec profile 'cli-json': missing allowed_commands metadata."
+
+        try:
+            tokens = shlex.split(command, posix=True)
+        except ValueError as exc:
+            return f"Command not allowed by exec profile 'cli-json': invalid shell quoting ({exc})."
+
+        if not tokens:
+            return "Command not allowed by exec profile 'cli-json': empty command."
+
+        if "`" in command or "$(" in command:
+            return "Command not allowed by exec profile 'cli-json': shell control operator is forbidden."
+
+        shell_control_pattern = re.compile(r"^(?:\|\|?|&&|;|<<?|>>?|[0-9]+>>?|[0-9]+>|\&)$")
+        if any(shell_control_pattern.match(token) for token in tokens):
+            return "Command not allowed by exec profile 'cli-json': shell control operator is forbidden."
+
+        command_index = 0
+        env_assignment_pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+        while command_index < len(tokens) and env_assignment_pattern.match(tokens[command_index]):
+            command_index += 1
+
+        if command_index >= len(tokens):
+            return "Command not allowed by exec profile 'cli-json': missing executable."
+
+        executable = tokens[command_index]
+        if "/" in executable:
+            return (
+                "Command not allowed by exec profile 'cli-json': executable must be a declared PATH command, "
+                "not a filesystem path."
+            )
+        if executable not in allowed_commands:
+            return (
+                "Command not allowed by exec profile 'cli-json': "
+                f"'{executable}' is not declared in cli_commands."
+            )
+        return None
 
     def _resolve_interpreter(self, language: str) -> tuple[str | None, str]:
         if language in {"bash", "shell", "sh"}:

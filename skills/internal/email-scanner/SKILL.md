@@ -1,6 +1,6 @@
 ---
 name: "email-scanner"
-description: "Multi-account email scanning, classification, summarization, caching, and proactive push. IMAP-based with rule engine."
+description: "多账号 IMAP 邮件扫描、分类、搜索与详情读取。适合 inbox refresh、mail search、detail inspect 与 proactive email workflows。"
 compatibility: "linux"
 allowed-tools: "scan_emails search_emails list_emails get_email_detail"
 metadata:
@@ -12,38 +12,36 @@ metadata:
   hypo.dependencies: "imap,structured_store,email_rules.yaml"
 ---
 
-# Email Scanner 使用说明
+# Email Scanner 使用指南
 
-这个 backend 负责一个或多个 IMAP account 的 inbox 扫描、缓存搜索、详情读取和基于规则的分类。
+## 定位 (Positioning)
 
-## 推荐流程
+`email-scanner` 负责 IMAP 邮箱的扫描、缓存、搜索、详情读取与基于 `rule engine` 的预分类。
 
-- 先用 `list_emails` 获取最近邮件 overview。
-- 当用户给出关键词、发件人线索或时间范围时，用 `search_emails`。
-- 当你已经锁定某封可能相关的邮件，并且需要完整内容时，用 `get_email_detail`。
-- 把 `scan_emails` 视为广义刷新操作，而不是每个邮件问题的第一选择。
+## 适用场景 (Use When)
 
-## 工具职责
+- 用户要查看最近邮件 overview。
+- 用户给出关键词、发件人或时间窗口，需要做定向 `mail search`。
+- 已锁定某封邮件，需要读取 detail。
+- 只有在缓存明显过旧或用户明确要求刷新时，才做 `inbox refresh`。
 
-- `scan_emails`：刷新 inbox 状态、分类新邮件并填充缓存。
-- `search_emails`：按关键词搜索缓存邮件，以及回退加载的邮件。
+## 工具与接口 (Tools)
+
 - `list_emails`：列出最近邮件摘要。
-- `get_email_detail`：读取指定邮件的完整详情。
+- `search_emails`：按关键词、发件人线索或时间范围搜索邮件。
+- `get_email_detail`：读取单封邮件的完整详情。
+- `scan_emails`：刷新 inbox 状态、补全缓存并触发分类。
 
-## 与 Scheduler 的边界
+## 标准流程 (Workflow)
 
-- `scan_emails` 经常由 scheduler 或 heartbeat 流程触发。
-- 如果 `list_emails` 或 `search_emails` 的缓存结果已经够用，模型不应滥用 `scan_emails`。
-- 优先做定向查询；只有当缓存明显过旧，或用户明确要求 fresh scan 时，再刷新。
+1. 默认先从 `list_emails` 或 `search_emails` 开始，而不是立刻全量刷新。
+2. 只有在缓存不足以回答问题，或用户明确要求 fresh scan 时，再调用 `scan_emails`。
+3. 锁定邮件后，用 `get_email_detail` 读取正文与关键 metadata。
+4. 输出时以摘要和判断为主，不要直接倾倒大量原文。
 
-## Rule Engine 说明
+## 边界与风险 (Guardrails)
 
-- Email rules 可以对已知模式预分类，或跳过某些 LLM 分类。
-- 这有助于优先处理重要邮件，并减少重复模型开销。
-- 要把 rule engine 当成信号来源，而不是对邮件已被完全理解的保证。
-
-## 安全规则
-
-- 当用户只问一个很窄的问题时，避免过度抓取邮件。
-- 应总结相关结果，而不是整段转储大量 inbox 内容。
-- 展示邮件详情时，要谨慎处理敏感内容和附件。
+- `scan_emails` 经常由 `scheduler` 或 `heartbeat` 主动触发，不要把它当成每个请求的默认第一步。
+- `rule engine` 只是预分类信号，不代表邮件已经被完整理解。
+- 邮件内容可能包含敏感信息与附件，展示 detail 时要控制暴露范围。
+- 当用户只问狭窄问题时，避免过度抓取不相关邮件。

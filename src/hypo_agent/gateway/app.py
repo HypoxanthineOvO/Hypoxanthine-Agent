@@ -1640,6 +1640,13 @@ def create_app(
         exclude_channels: set[str] | None = None,
         exclude_client_ids: set[str] | None = None,
     ) -> None:
+        if (
+            resolved_deps.session_memory is not None
+            and str(message.message_tag or "").strip().lower() == "tool_status"
+            and not bool(message.metadata.get("ephemeral"))
+            and str(message.sender or "").strip().lower() not in {"user", "assistant"}
+        ):
+            resolved_deps.session_memory.append(message)
         await app.state.channel_relay.relay_message(
             message,
             message_type=message_type,

@@ -60,16 +60,18 @@ class FakeCoderTaskService:
         self.status_calls: list[dict[str, object]] = []
         self.list_calls: list[str | None] = []
         self.abort_calls: list[dict[str, object]] = []
-        self.attach_calls: list[tuple[str, str]] = []
+        self.attach_calls: list[dict[str, object]] = []
         self.detach_calls: list[str] = []
         self.done_calls: list[str] = []
         self.send_calls: list[dict[str, object]] = []
+        self.output_calls: list[dict[str, object]] = []
         self.submit_result = {
             "task_id": "task-123",
             "status": "running",
             "working_directory": "/home/heyx/Hypo-Agent",
         }
         self.status_result = {"task_id": "task-123", "status": "running"}
+        self.output_result = {"cursor": "cursor-3", "lines": [], "done": False}
         self.list_result = [
             {"taskId": "task-123", "status": "running", "model": "o4-mini"},
             {"taskId": "task-456", "status": "completed", "model": "o4-mini"},
@@ -84,7 +86,7 @@ class FakeCoderTaskService:
         session_id: str,
         prompt: str,
         working_directory: str | None = None,
-        model: str = "o4-mini",
+        model: str | None = None,
     ) -> dict[str, object]:
         self.submit_calls.append(
             {
@@ -121,8 +123,16 @@ class FakeCoderTaskService:
         self.abort_calls.append({"task_id": task_id, "session_id": session_id})
         return dict(self.abort_result)
 
-    async def attach_task(self, *, session_id: str, task_id: str) -> None:
-        self.attach_calls.append((session_id, task_id))
+    async def attach_task(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        initial_cursor: str | None = None,
+    ) -> None:
+        self.attach_calls.append(
+            {"session_id": session_id, "task_id": task_id, "initial_cursor": initial_cursor}
+        )
 
     async def detach_task(self, session_id: str) -> None:
         self.detach_calls.append(session_id)
@@ -144,6 +154,15 @@ class FakeCoderTaskService:
 
     async def health(self) -> dict[str, object]:
         return dict(self.health_result)
+
+    async def get_task_output(
+        self,
+        *,
+        task_id: str,
+        after: str | None = None,
+    ) -> dict[str, object]:
+        self.output_calls.append({"task_id": task_id, "after": after})
+        return dict(self.output_result)
 
 
 async def _build_handler(tmp_path: Path) -> tuple[
@@ -493,7 +512,7 @@ def test_codex_submit_uses_service_and_parses_dir(tmp_path: Path) -> None:
                 "session_id": "s1",
                 "prompt": "修复登录页",
                 "working_directory": "/tmp/repo",
-                "model": "o4-mini",
+                "model": None,
             }
         ]
 
@@ -548,15 +567,96 @@ def test_codex_send_status_list_abort_attach_detach_done_and_health(tmp_path: Pa
             {"session_id": "s1", "instruction": "再补测试", "task_id": "last"}
         ]
         assert handler.coder_task_service.status_calls == [
-            {"task_id": "last", "session_id": "s1"}
+            {"task_id": "last", "session_id": "s1"},
+            {"task_id": "task-456", "session_id": "s1"},
         ]
         assert handler.coder_task_service.list_calls == ["running"]
         assert handler.coder_task_service.abort_calls == [
             {"task_id": "last", "session_id": "s1"}
         ]
-        assert handler.coder_task_service.attach_calls == [("s1", "task-456")]
+        assert handler.coder_task_service.attach_calls == [
+            {"session_id": "s1", "task_id": "task-456", "initial_cursor": "cursor-3"}
+        ]
         assert handler.coder_task_service.detach_calls == ["s1"]
         assert handler.coder_task_service.done_calls == ["s1"]
+        assert handler.coder_task_service.output_calls == [{"task_id": "task-456", "after": None}]
+
+    asyncio.run(_run())
+
+
+def test_codex_attach_replays_recent_lines_and_sets_initial_cursor(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, _, _ = await _build_handler(tmp_path)
+        handler.coder_task_service.status_result = {"task_id": "task-456", "status": "running"}
+        handler.coder_task_service.output_result = {
+            "cursor": "cursor-847",
+            "lines": [f"line {idx}" for idx in range(1, 41)],
+            "done": False,
+        }
+
+        text = await handler.try_handle(
+            Message(text="/codex attach task-456 -n 5", sender="user", session_id="s1")
+        )
+
+        assert text is not None
+        assert "📜 task-456 已产出 40 行输出，以下是最近 5 行：" in text
+        assert "[Codex | task-456]" in text
+        assert "line 36" in text
+        assert "line 40" in text
+        assert "line 35" not in text
+        assert "/codex logs task-456 查看完整历史" in text
+        assert handler.coder_task_service.attach_calls == [
+            {"session_id": "s1", "task_id": "task-456", "initial_cursor": "cursor-847"}
+        ]
+        assert handler.coder_task_service.output_calls == [{"task_id": "task-456", "after": None}]
+
+    asyncio.run(_run())
+
+
+def test_codex_attach_n_zero_only_reports_status_and_count(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, _, _ = await _build_handler(tmp_path)
+        handler.coder_task_service.status_result = {"task_id": "task-456", "status": "running"}
+        handler.coder_task_service.output_result = {
+            "cursor": "cursor-847",
+            "lines": [f"line {idx}" for idx in range(1, 41)],
+            "done": False,
+        }
+
+        text = await handler.try_handle(
+            Message(text="/codex attach task-456 -n 0", sender="user", session_id="s1")
+        )
+
+        assert text is not None
+        assert "📜 已挂载 task-456 | 状态: RUNNING | 已产出 40 行" in text
+        assert "/codex logs task-456 查看历史" in text
+        assert "[Codex | task-456]" not in text
+        assert handler.coder_task_service.attach_calls == [
+            {"session_id": "s1", "task_id": "task-456", "initial_cursor": "cursor-847"}
+        ]
+
+    asyncio.run(_run())
+
+
+def test_codex_logs_returns_full_history(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, _, _ = await _build_handler(tmp_path)
+        handler.coder_task_service.status_result = {"task_id": "task-456", "status": "running"}
+        handler.coder_task_service.output_result = {
+            "cursor": "cursor-3",
+            "lines": ["first", "second", "third"],
+            "done": False,
+        }
+
+        text = await handler.try_handle(
+            Message(text="/codex logs task-456", sender="user", session_id="s1")
+        )
+
+        assert text is not None
+        assert "📜 task-456 已产出 3 行输出：" in text
+        assert "[Codex | task-456]" in text
+        assert "first\nsecond\nthird" in text
+        assert handler.coder_task_service.output_calls == [{"task_id": "task-456", "after": None}]
 
     asyncio.run(_run())
 

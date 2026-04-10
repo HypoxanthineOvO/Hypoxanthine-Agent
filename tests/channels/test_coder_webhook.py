@@ -21,6 +21,14 @@ class DummyPipeline:
             yield {}
 
 
+class DummyWatcher:
+    def __init__(self, active_task_ids: set[str] | None = None) -> None:
+        self.active_task_ids = active_task_ids or set()
+
+    def is_watching(self, task_id: str) -> bool:
+        return task_id in self.active_task_ids
+
+
 def _build_client(tmp_path: Path) -> TestClient:
     deps = AppDeps(
         session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
@@ -174,6 +182,57 @@ def test_webhook_detached_task_updates_db_without_push(tmp_path: Path) -> None:
         )
         client.app.state.coder_webhook_secret = "coder-secret"
         client.app.state.pipeline.on_proactive_message = capture
+        response = client.post(
+            "/api/coder/webhook",
+            content=body,
+            headers={
+                "content-type": "application/json",
+                "X-HypoCoder-Event": "task.completed",
+                "X-HypoCoder-Signature": signature,
+            },
+        )
+
+    assert response.status_code == 200
+    assert pushed == []
+    task = asyncio.run(client.app.state.structured_store.get_coder_task("task-abc123"))
+    assert task is not None
+    assert task["status"] == "completed"
+
+
+def test_webhook_skips_terminal_push_when_watcher_active(tmp_path: Path) -> None:
+    client = _build_client(tmp_path)
+    pushed: list[Message] = []
+
+    async def capture(message: Message) -> None:
+        pushed.append(message)
+
+    payload = {
+        "event": "task.completed",
+        "taskId": "task-abc123",
+        "timestamp": "2026-03-27T11:00:00Z",
+        "result": {
+            "summary": "已修复 hello.py 并通过校验。",
+            "fileChanges": [{"path": "hello.py", "changeType": "modified"}],
+            "testsPassed": True,
+        },
+    }
+    body, signature = _sign("coder-secret", payload)
+
+    with client:
+        asyncio.run(
+            client.app.state.structured_store.create_coder_task(
+                task_id="task-abc123",
+                session_id="s-coder",
+                working_directory="/repo/demo",
+                prompt_summary="fix hello",
+                model="o4-mini",
+                status="running",
+                attached=True,
+            )
+        )
+        client.app.state.coder_webhook_secret = "coder-secret"
+        client.app.state.pipeline.on_proactive_message = capture
+        client.app.state.coder_stream_watcher = DummyWatcher({"task-abc123"})
         response = client.post(
             "/api/coder/webhook",
             content=body,

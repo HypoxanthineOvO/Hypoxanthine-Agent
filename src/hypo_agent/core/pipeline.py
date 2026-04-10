@@ -8,12 +8,20 @@ from datetime import datetime
 import inspect
 import json
 from pathlib import Path
+import re
 from time import perf_counter
 from typing import Any, Protocol
 
 import structlog
 
 from hypo_agent.core.channel_adapter import ChannelAdapter, WebUIAdapter
+from hypo_agent.core.notion_todo_binding import (
+    confirm_pending_notion_todo_candidate,
+    get_pending_notion_todo_candidate,
+    message_confirms_notion_todo_candidate,
+    message_rejects_notion_todo_candidate,
+    reject_pending_notion_todo_candidate,
+)
 from hypo_agent.core.rich_response import RichResponse
 from hypo_agent.core.skill_catalog import SkillManifest
 from hypo_agent.core.time_utils import utc_isoformat, utc_now
@@ -636,6 +644,24 @@ class ChatPipeline:
             )
             return outbound
 
+        pre_llm_text = await self._try_handle_pre_llm_shortcuts(inbound)
+        if pre_llm_text is not None:
+            self._append_session_message(inbound)
+            outbound = Message(
+                text=pre_llm_text,
+                sender="assistant",
+                session_id=inbound.session_id,
+                channel=inbound.channel,
+                sender_id=inbound.sender_id,
+            )
+            self._append_session_message(outbound)
+            await self._broadcast_message(
+                outbound,
+                origin_channel=inbound.channel,
+                origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
+            )
+            return outbound
+
         if self._kill_switch_active():
             self._append_session_message(inbound)
             outbound = Message(
@@ -684,6 +710,10 @@ class ChatPipeline:
             collected_attachments: list[Attachment] = []
             slash_result = await self._try_handle_slash(inbound)
             if slash_result is not None:
+                raw_slash_text = str(inbound.text or "").strip().lower()
+                persist_slash = raw_slash_text == "/codex" or raw_slash_text.startswith("/codex ")
+                if persist_slash:
+                    self._append_session_message(inbound)
                 yield await self._format_event(
                     event_type="assistant_chunk",
                     response=RichResponse(text=slash_result),
@@ -696,6 +726,36 @@ class ChatPipeline:
                     channel=inbound.channel,
                     sender_id=inbound.sender_id,
                 )
+                if persist_slash:
+                    self._append_session_message(outbound)
+                await self._broadcast_message(
+                    outbound,
+                    origin_channel=inbound.channel,
+                    origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
+                )
+                yield await self._format_event(
+                    event_type="assistant_done",
+                    response=RichResponse(),
+                    session_id=inbound.session_id,
+                )
+                return
+
+            pre_llm_text = await self._try_handle_pre_llm_shortcuts(inbound)
+            if pre_llm_text is not None:
+                self._append_session_message(inbound)
+                yield await self._format_event(
+                    event_type="assistant_chunk",
+                    response=RichResponse(text=pre_llm_text),
+                    session_id=inbound.session_id,
+                )
+                outbound = Message(
+                    text=pre_llm_text,
+                    sender="assistant",
+                    session_id=inbound.session_id,
+                    channel=inbound.channel,
+                    sender_id=inbound.sender_id,
+                )
+                self._append_session_message(outbound)
                 await self._broadcast_message(
                     outbound,
                     origin_channel=inbound.channel,
@@ -751,6 +811,7 @@ class ChatPipeline:
             killed = False
             session_fused = False
             last_compressed_meta: dict[str, Any] | None = None
+            last_tool_fallback_text: str | None = None
 
             if use_tools:
                 assert self.skill_manager is not None
@@ -920,6 +981,7 @@ class ChatPipeline:
                                 error=output.error_info,
                             )
                         serialized_output = json.dumps(output.model_dump(mode="json"), ensure_ascii=False)
+                        last_tool_fallback_text = self._tool_fallback_text(output) or last_tool_fallback_text
                         tool_content = self._tool_content_for_react(
                             output,
                             serialized_output=serialized_output,
@@ -1106,6 +1168,13 @@ class ChatPipeline:
                 text=full_text,
                 compressed_meta=last_compressed_meta,
             )
+            if not full_text.strip() and last_tool_fallback_text:
+                full_text = last_tool_fallback_text
+                yield await self._format_event(
+                    event_type="assistant_chunk",
+                    response=RichResponse(text=full_text),
+                    session_id=inbound.session_id,
+                )
             if extra_chunk is not None:
                 full_text += extra_chunk
                 yield await self._format_event(
@@ -1682,6 +1751,20 @@ class ChatPipeline:
             "Original saved to logs. Ask me for details.]"
         )
 
+    def _tool_fallback_text(self, output: SkillOutput) -> str:
+        result = output.result
+        if isinstance(result, dict):
+            human_summary = str(result.get("human_summary") or "").strip()
+            if human_summary:
+                return human_summary
+            summary = str(result.get("summary") or "").strip()
+            if summary:
+                return summary
+        error_text = str(output.error_info or "").strip()
+        if error_text:
+            return error_text
+        return ""
+
     def _kill_switch_active(self) -> bool:
         return bool(
             self.circuit_breaker is not None
@@ -1692,6 +1775,130 @@ class ChatPipeline:
         if self.slash_commands is None:
             return None
         return await self.slash_commands.try_handle(inbound)
+
+    async def _try_handle_pre_llm_shortcuts(self, inbound: Message) -> str | None:
+        if str(inbound.sender or "").strip().lower() != "user":
+            return None
+        confirmation = await self._try_handle_notion_todo_binding_confirmation(inbound)
+        if confirmation is not None:
+            return confirmation
+        return await self._try_handle_notion_todo_snapshot_request(inbound)
+
+    async def _try_handle_notion_todo_binding_confirmation(self, inbound: Message) -> str | None:
+        pending = await get_pending_notion_todo_candidate(self.structured_store)
+        if pending is None:
+            return None
+        text = str(inbound.text or "").strip()
+        if not text:
+            return None
+        if message_confirms_notion_todo_candidate(text, pending):
+            confirmed = await confirm_pending_notion_todo_candidate(self.structured_store)
+            if confirmed is None:
+                return None
+            title = str(confirmed.get("title") or "").strip() or "HYX的计划通"
+            database_id = str(confirmed.get("database_id") or "").strip()
+            return (
+                f"已绑定 Notion 待办数据库：{title}（ID: {database_id}）。"
+                "后续 heartbeat 将直接使用这个数据库。"
+            )
+        if message_rejects_notion_todo_candidate(text):
+            rejected = await reject_pending_notion_todo_candidate(self.structured_store)
+            if rejected is None:
+                return None
+            title = str(rejected.get("title") or "").strip() or "HYX的计划通"
+            return f"已取消绑定候选数据库：{title}。当前 heartbeat 仍不会读取 Notion 待办。"
+        return None
+
+    async def _try_handle_notion_todo_snapshot_request(self, inbound: Message) -> str | None:
+        if not self._is_notion_todo_snapshot_request(inbound):
+            return None
+        if self.skill_manager is None:
+            return None
+        if not self._tool_is_available("get_notion_todo_snapshot"):
+            return None
+        try:
+            output = await self.skill_manager.invoke(
+                "get_notion_todo_snapshot",
+                {},
+                session_id=inbound.session_id,
+                skill_name="direct",
+            )
+        except _PIPELINE_RECOVERABLE_ERRORS:
+            logger.warning("pipeline.notion_todo_shortcut_failed", exc_info=True)
+            return "Notion 待办查询失败，请稍后重试。"
+
+        text = self._tool_fallback_text(output)
+        if text:
+            return text
+        if output.status != "success":
+            return str(output.error_info or "").strip() or "Notion 待办查询失败，请稍后重试。"
+        return "Notion 待办查询已执行，但没有返回可展示的结果。"
+
+    def _is_notion_todo_snapshot_request(self, inbound: Message) -> bool:
+        text = self._message_text_for_llm(inbound)
+        normalized = str(text or "").strip()
+        if not normalized:
+            return False
+        if self._is_notion_todo_followup_request(inbound, normalized):
+            return True
+        if "绑定" in normalized:
+            return False
+        lowered = normalized.casefold()
+        has_plan_todo = "计划通" in normalized
+        has_notion = "notion" in lowered
+        has_todo_object = any(token in normalized for token in ("待办", "事项", "任务"))
+        has_query_action = any(
+            token in normalized
+            for token in ("看", "查看", "查", "列", "同步", "汇总", "总结", "刷新", "获取")
+        )
+        has_today = any(token in normalized for token in ("今日", "今天"))
+        if has_plan_todo and (has_todo_object or has_query_action or has_today):
+            return True
+        return has_notion and has_todo_object and (has_query_action or has_today)
+
+    def _is_notion_todo_followup_request(self, inbound: Message, normalized_text: str) -> bool:
+        compact = re.sub(r"[\s，。！？、,.!?:：;；~～]+", "", normalized_text)
+        if compact in {"好", "好的", "行", "可以", "继续", "开始吧", "继续吧", "看吧", "查看吧", "查吧"}:
+            return self._recent_history_mentions_notion_todo(inbound.session_id)
+        return compact in {"好看吧", "好查看吧", "好查吧", "好继续吧", "看一下吧", "查一下吧", "看看吧"} and (
+            self._recent_history_mentions_notion_todo(inbound.session_id)
+        )
+
+    def _recent_history_mentions_notion_todo(self, session_id: str) -> bool:
+        getter = getattr(self.session_memory, "get_recent_messages", None)
+        if not callable(getter):
+            return False
+        try:
+            history = getter(session_id, limit=6)
+        except Exception:
+            logger.warning("pipeline.get_recent_messages_failed", exc_info=True)
+            return False
+        for item in reversed(history or []):
+            if not isinstance(item, Message):
+                continue
+            text = str(item.text or "").strip()
+            if not text:
+                continue
+            if any(token in text for token in ("Notion 待办数据库", "计划通", "待办事项", "今日待办", "待办")):
+                return True
+        return False
+
+    def _tool_is_available(self, tool_name: str) -> bool:
+        if self.skill_manager is None:
+            return False
+        getter = getattr(self.skill_manager, "get_tools_schema", None)
+        if not callable(getter):
+            return False
+        try:
+            tools = getter()
+        except Exception:
+            logger.warning("pipeline.get_tools_schema_failed", exc_info=True)
+            return False
+        return any(
+            str(tool.get("function", {}).get("name") or "").strip() == tool_name
+            for tool in tools
+            if isinstance(tool, dict)
+        )
 
     async def _format_event(
         self,

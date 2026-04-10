@@ -1,6 +1,6 @@
 ---
 name: "hypo-agent-ops"
-description: "Hypo-Agent operational workflow focused on test-mode smoke and guarded service actions."
+description: "Hypo-Agent 运维 workflow：默认走 test-mode smoke，并对 service action 保持 guardrails。"
 compatibility: "linux"
 allowed-tools: "exec_command"
 metadata:
@@ -11,31 +11,30 @@ metadata:
   hypo.risk: "medium"
   hypo.dependencies: "uv,journalctl,systemctl"
 ---
-# Hypo-Agent Ops 使用说明
+# Hypo-Agent Ops 使用指南
 
-这个 skill 用于 Hypo-Agent 运维检查。
+## 定位 (Positioning)
 
-在这个工作流里，使用 `exec_command` 运行 smoke、status、log 和受控 service 命令。
+`hypo-agent-ops` 面向 Hypo-Agent 自身的运维检查，默认采用 `test mode` 和 guarded service action。
 
-默认流程：
+## 适用场景 (Use When)
 
-1. 先优先使用 test mode：
+- 用户要做 agent `smoke`、查看服务状态、检查日志或排查主动消息链路。
+- 需要验证本地/测试实例，而不是默认碰生产实例。
 
-```bash
-HYPO_TEST_MODE=1 uv run python scripts/agent_cli.py --port 8766 smoke
-```
+## 工具与接口 (Tools)
 
-2. 检查 service 状态和日志：
+- 通过 `exec_command` 运行 `smoke`、`systemctl`、`journalctl` 等命令，并受 `exec_profile=hypo-agent` 约束。
 
-```bash
-systemctl status hypo-agent
-journalctl -u hypo-agent --since "10 min ago"
-```
+## 标准流程 (Workflow)
 
-3. 只有在说明影响并确认确有必要后，才进行 restart。
+1. 默认先跑 test-mode smoke：
+   `HYPO_TEST_MODE=1 uv run python scripts/agent_cli.py --port 8766 smoke`
+2. 再检查 `systemctl status hypo-agent` 和近期 `journalctl`。
+3. 只有在解释影响并确认必要后，才考虑 `restart`。
 
-安全规则：
+## 边界与风险 (Guardrails)
 
-- 默认使用端口 `8766`，不要默认用生产端口 `8765`。
-- 除非用户明确要求，否则不要触碰生产验收。
-- 保持先诊断、后动作的顺序，并谨慎使用 restart。
+- 默认端口是 `8766`，不要默认用生产端口 `8765`。
+- 非经明确说明，不要把 test smoke 和生产验收混用。
+- 保持 read-first、diagnose-first，再考虑 service action。

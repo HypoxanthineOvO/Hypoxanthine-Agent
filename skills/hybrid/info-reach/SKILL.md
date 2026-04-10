@@ -1,6 +1,6 @@
 ---
 name: "info-reach"
-description: "TrendRadar proactive intelligence: query aggregated info, get summaries, and manage topic subscriptions for automatic push notifications."
+description: "TrendRadar 主动资讯 workflow：结构化 query、summary 与 subscription push。用户要订阅、推送、跨多日检索或管理主题关注时使用。"
 compatibility: "linux"
 allowed-tools: "info_query info_summary info_subscribe info_list_subscriptions info_delete_subscription"
 metadata:
@@ -12,84 +12,44 @@ metadata:
   hypo.dependencies: "hypo-info-api,aiosqlite"
 ---
 
-# Info Reach 使用说明
+# Info Reach 使用指南
 
-这个 skill 用于主动信息流工作流：结构化多日查询、聚合摘要，以及自动推送相关的订阅管理。
+## 定位 (Positioning)
 
-## 与 Info Portal 的边界
+`info-reach` 面向主动资讯 workflow，覆盖结构化多日查询、聚合摘要与 `subscription push` 管理。
 
-- `info-portal` 是普通用户查询新闻时的默认选择，例如今日 digest、section 浏览、keyword 搜索和 benchmark ranking。
-- 当你需要下面这些能力时，应该选 `info-reach`：
-  - subscription management
-  - proactive push workflows
-  - 更宽的时间窗口，例如 `3d` 或 `7d`
-  - `min_importance`、`source_name` 这类结构化过滤条件
+## 适用场景 (Use When)
 
-如果用户只是问“今天有什么新闻”或“AI 板块最近有什么”，优先用 `info-portal`。
+- 用户要创建、查看或删除订阅。
+- 需要更宽时间窗口，例如 `3d`、`7d`。
+- 需要 `min_importance`、`source_name` 这类结构化过滤。
+- 需求属于 proactive push，而不是单次被动查询。
 
-## 工具选择
+## 工具与接口 (Tools)
 
-### 主动查询工具
+- `info_query`：结构化文章查询。
+- `info_summary`：按时间范围生成聚合 digest。
+- `info_subscribe`：创建或更新订阅。
+- `info_list_subscriptions`：查看当前订阅。
+- `info_delete_subscription`：删除指定订阅。
 
-- 用 `info_query` 做结构化文章查询，可选带上 `category`、`keyword`、`time_range`、`min_importance` 和 `source_name`。
-- 用 `info_summary` 获取某个时间范围内的聚合 digest。
+## 标准流程 (Workflow)
 
-### 订阅工具
+1. 先判断需求是被动查询还是主动订阅；前者优先考虑 `info-portal`。
+2. 结构化检索时，用 `info_query` 指定时间窗口和过滤条件。
+3. 用户只想看压缩 overview 时，改用 `info_summary`。
+4. 订阅前先确认 `topic`、频率和 `category`，再调用 `info_subscribe`。
+5. 管理订阅时，先列出现有项，再做删除或调整。
 
-- 用 `info_subscribe` 创建或更新周期性订阅。
-- 用 `info_list_subscriptions` 查看当前订阅。
-- 用 `info_delete_subscription` 删除订阅。
+## 参数约定 (Parameters)
 
-## 参数说明
+- `info_query` 可选字段包括 `category`、`keyword`、`time_range`、`min_importance`、`source_name`。
+- `info_summary.time_range` 常见值为 `today`、`yesterday`、`3d`、`7d`。
+- `info_subscribe` 需要清晰的 `name`、`keywords`，可选 `categories` 与 `schedule`。
+- `info_delete_subscription.name` 必须精确匹配要删除的订阅。
 
-### `info_query`
+## 边界与风险 (Guardrails)
 
-- `category`：可选的高层 category 过滤。
-- `keyword`：可选的关键词过滤。
-- `time_range`：可选值为 `today`、`yesterday`、`3d` 或 `7d`。
-- `min_importance`：可选的重要性阈值过滤。
-- `source_name`：当用户只想看单一来源时，可选使用的 source 过滤。
-
-### `info_summary`
-
-- `time_range`：可选值为 `today`、`yesterday`、`3d` 或 `7d`。
-- 当用户想看压缩后的 overview，而不是逐篇文章细节时使用它。
-
-### `info_subscribe`
-
-- `name`：订阅名。
-- `keywords`：必填关键词列表。
-- `categories`：可选分类列表。
-- `schedule`：周期，如 `daily`。
-
-### `info_list_subscriptions`
-
-- 无参数。
-
-### `info_delete_subscription`
-
-- `name`：要删除的订阅名。
-
-## 常见流程
-
-### 结构化近期新闻查询
-
-1. 用更宽的 `time_range`，例如 `3d` 或 `7d`，调用 `info_query`。
-2. 当用户只关心重要事项时，加上 `min_importance`。
-3. 总结返回的文章。
-
-### 聚合 digest
-
-1. 调用 `info_summary`。
-2. 用精炼 overview 呈现 highlight、sections 和 counts。
-
-### 创建订阅
-
-1. 先确认 topic、频率和 category。
-2. 调用 `info_subscribe`。
-3. 确认已保存的订阅细节。
-
-### 管理订阅
-
-1. 用 `info_list_subscriptions` 展示当前订阅。
-2. 当用户要删除某项订阅时，用 `info_delete_subscription`。
+- 如果用户只是问“今天有什么新闻”，优先用 `info-portal`，不要过度升级到订阅 workflow。
+- 结构化过滤会缩小结果集，使用前应确认用户是否真需要这些限制。
+- 删除订阅前应尽量先展示当前订阅列表，降低误删风险。

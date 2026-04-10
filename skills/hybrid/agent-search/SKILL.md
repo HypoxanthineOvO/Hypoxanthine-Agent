@@ -1,6 +1,6 @@
 ---
 name: "agent-search"
-description: "Web search and page content extraction via Tavily. Use when user needs to find information online, verify facts, or read a specific webpage."
+description: "通过 Tavily 执行 Web search 与 page reading。用户需要在线检索、事实核验或读取公开网页时使用。"
 compatibility: "linux"
 allowed-tools: "web_search web_read"
 metadata:
@@ -12,61 +12,39 @@ metadata:
   hypo.dependencies: "tavily-python"
 ---
 
-# Agent Search 使用说明
+# Agent Search 使用指南
 
-当答案依赖当前仓库之外的信息，或用户要求你读取公开网页时，使用这个 skill。
+## 定位 (Positioning)
 
-## 工具选择
+`agent-search` 负责仓库外信息获取，提供 `Web search` 与页面正文提取能力，适合在线检索、事实核验和指定网页阅读。
 
-- 需要发现信息源、核验事实或寻找候选页面时，先用 `web_search`。
-- 已经有 URL、只需要读取页面正文时，用 `web_read`。
-- 不要盲目对很多 URL 直接调用 `web_read`。先搜索，再读真正相关的一两页。
+## 适用场景 (Use When)
 
-## 搜索策略
+- 答案依赖当前 workspace 之外的公开信息。
+- 用户要求核验事实、查资料或读取公开网页。
+- 已有 URL，或需要先搜索再锁定候选页面。
 
-1. 从 `web_search` 开始。
-2. 写具体的查询词，包含 topic、entity，以及 date、version、site、region 等相关限定词。
-3. 默认把 `max_results` 控制得较小。除非确实需要广泛调研，否则用 `3` 到 `5`。
-4. 先看标题、摘要和 URL，只读取最相关的结果页。
+## 工具与接口 (Tools)
 
-## 参数说明
+- `web_search`：发现信息源、筛选候选页面。
+- `web_read`：读取指定 URL 的正文内容。
 
-### `web_search`
+## 标准流程 (Workflow)
 
-- `query`：写具体搜索短语，不要写模糊问题。
-- 好例子：
-  - `OpenAI GPT-5.4 API docs`
-  - `site:docs.python.org asyncio subprocess timeout`
-  - `2026 AI benchmark leaderboard`
-- `max_results`：优先使用 `3` 到 `5`。只有在第一轮明显不够时再增大。
+1. 默认先从 `web_search` 开始，写具体 query。
+2. query 中尽量包含 `topic`、`entity`、`date`、`version`、`site`、`region` 等限定词。
+3. 首轮把 `max_results` 控制在 `3` 到 `5`，先看标题、snippet 和 URL。
+4. 只对真正相关的一两页调用 `web_read`。
+5. 输出时以总结和核验结论为主，不要整段转储原文。
 
-### `web_read`
+## 参数约定 (Parameters)
 
-- `url`：传入你要总结或引用的最终页面 URL。
-- 适用于文章正文、文档页面和其他可读性较好的公开网页。
+- `web_search.query` 应写成具体搜索短语，而不是模糊问题。
+- `web_search.max_results` 默认用 `3` 到 `5`，只有第一轮明显不够时再放大。
+- `web_read.url` 应传最终要总结或引用的公开页面地址。
 
-## 结果解读
+## 边界与风险 (Guardrails)
 
-- `web_search` 会返回排序后的结果，包含 `title`、`url`、`content`、`score`，以及可选的 `favicon`。
-- 用 snippet 内容判断结果是否值得继续阅读。
-- `web_read` 会返回适合 Markdown 阅读的提取正文。除非用户明确要求原文，否则应先整理总结，不要直接整段转储。
-
-## 常见流程
-
-### 快速事实核验
-
-1. 用精确 query 调用 `web_search`。
-2. 选择最可信的结果。
-3. 只有当 snippet 不够时，再调用 `web_read`。
-
-### 主题调研
-
-1. 用范围适中的 query 调用 `web_search`。
-2. 对比前几条结果。
-3. 用 `web_read` 读取一到两页权威来源。
-4. 综合整理结论。
-
-### 读取指定页面
-
-1. 如果用户已经给了 URL，直接用 `web_read`。
-2. 如果 URL 缺失或有歧义，先搜索。
+- 不要对大量 URL 盲读；先搜索再筛选。
+- `snippet` 只用于初筛，不应替代最终核验。
+- 公开网页提取结果可能有噪音，关键事实要结合来源可信度再总结。

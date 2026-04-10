@@ -45,3 +45,18 @@ def test_feishu_adapter_converts_pipe_table_to_table_component() -> None:
     assert elements[0]["columns"][1]["display_name"] == "b"
     assert elements[0]["rows"][0]["c0"] == "1"
     assert elements[0]["rows"][0]["c1"] == "2"
+
+
+def test_feishu_adapter_uses_lark_md_for_markdown_table_cells() -> None:
+    adapter = FeishuAdapter()
+    text = "| 标题 | 备注 |\n| --- | --- |\n| **重点** | 普通文本 |\n"
+
+    payloads = asyncio.run(adapter.format(RichResponse(text=text)))
+    card = json.loads(payloads[0]["content"])
+    table = card["body"]["elements"][0]
+
+    assert table["tag"] == "table"
+    assert table["columns"][0]["data_type"] == "lark_md"
+    assert table["columns"][1]["data_type"] == "text"
+    assert table["rows"][0]["c0"] == "**重点**"
+    assert table["rows"][0]["c1"] == "普通文本"

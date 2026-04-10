@@ -149,6 +149,151 @@ def test_pipeline_keeps_text_only_messages_on_default_chat_model() -> None:
     assert reply.text == "ok"
 
 
+def test_pipeline_confirms_pending_notion_todo_binding_without_llm(tmp_path: Path) -> None:
+    memory = StubSessionMemory()
+    store = StructuredStore(db_path=tmp_path / "agent.db")
+    asyncio.run(
+        store.set_preference(
+            "notion.todo_database_candidate_pending",
+            (
+                '{"database_id":"todo-db-discovered","title":"HYX的计划通",'
+                '"url":"https://www.notion.so/todo-db-discovered"}'
+            ),
+        )
+    )
+
+    class StubRouter:
+        async def call(self, model_name, messages, *, session_id=None, tools=None):
+            raise AssertionError("LLM should not be called for notion todo binding confirmation")
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        structured_store=store,
+        history_window=20,
+    )
+
+    reply = asyncio.run(
+        pipeline.run_once(
+            Message(text="确认绑定 HYX的计划通", sender="user", session_id="s1")
+        )
+    )
+
+    assert "已绑定 Notion 待办数据库" in str(reply.text)
+    assert asyncio.run(store.get_preference("notion.todo_database_id")) == "todo-db-discovered"
+    assert asyncio.run(store.get_preference("notion.todo_database_candidate_pending")) is None
+
+
+def test_pipeline_shortcuts_notion_todo_request_without_llm() -> None:
+    memory = StubSessionMemory()
+
+    class StubSkillManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict, str | None, str | None]] = []
+
+        def get_tools_schema(self) -> list[dict]:
+            return [{"type": "function", "function": {"name": "get_notion_todo_snapshot"}}]
+
+        async def invoke(
+            self,
+            tool_name: str,
+            params: dict,
+            *,
+            session_id: str | None = None,
+            skill_name: str | None = None,
+        ) -> SkillOutput:
+            self.calls.append((tool_name, params, session_id, skill_name))
+            return SkillOutput(
+                status="success",
+                result={
+                    "available": True,
+                    "human_summary": "今日到期未完成：\n- 提交周报",
+                },
+            )
+
+    class StubRouter:
+        async def call(self, model_name, messages, *, session_id=None, tools=None):
+            raise AssertionError("LLM should not be called for notion todo shortcut")
+
+    skill_manager = StubSkillManager()
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skill_manager,
+        history_window=20,
+    )
+
+    reply = asyncio.run(
+        pipeline.run_once(
+            Message(text="查看一下今天的计划通待办事项", sender="user", session_id="s1")
+        )
+    )
+
+    assert reply.text == "今日到期未完成：\n- 提交周报"
+    assert skill_manager.calls == [("get_notion_todo_snapshot", {}, "s1", "direct")]
+
+
+def test_pipeline_shortcuts_notion_todo_followup_after_binding_without_llm() -> None:
+    memory = StubSessionMemory(
+        history=[
+            Message(text="查看一下今天的计划通待办事项", sender="user", session_id="s1"),
+            Message(
+                text="已绑定 Notion 待办数据库：HYX 的计划通（ID: db-1）。后续 heartbeat 将直接使用这个数据库。",
+                sender="assistant",
+                session_id="s1",
+            ),
+        ]
+    )
+
+    class StubSkillManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict, str | None, str | None]] = []
+
+        def get_tools_schema(self) -> list[dict]:
+            return [{"type": "function", "function": {"name": "get_notion_todo_snapshot"}}]
+
+        async def invoke(
+            self,
+            tool_name: str,
+            params: dict,
+            *,
+            session_id: str | None = None,
+            skill_name: str | None = None,
+        ) -> SkillOutput:
+            self.calls.append((tool_name, params, session_id, skill_name))
+            return SkillOutput(
+                status="success",
+                result={
+                    "available": True,
+                    "human_summary": "今日到期未完成：\n- 提交周报",
+                },
+            )
+
+    class StubRouter:
+        async def call(self, model_name, messages, *, session_id=None, tools=None):
+            raise AssertionError("LLM should not be called for notion todo follow-up shortcut")
+
+    skill_manager = StubSkillManager()
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skill_manager,
+        history_window=20,
+    )
+
+    reply = asyncio.run(
+        pipeline.run_once(
+            Message(text="好，查看吧", sender="user", session_id="s1")
+        )
+    )
+
+    assert reply.text == "今日到期未完成：\n- 提交周报"
+    assert skill_manager.calls == [("get_notion_todo_snapshot", {}, "s1", "direct")]
+
+
 def test_pipeline_stream_reply_emits_chunk_and_done_events_and_persists() -> None:
     memory = StubSessionMemory()
 
@@ -824,6 +969,52 @@ def test_pipeline_broadcasts_reply_for_qq_channel() -> None:
     assert webui_received[0].channel == "qq"
     assert qq_received[0].channel == "qq"
     assert qq_received[0].raw_text == "Hi"
+
+
+def test_pipeline_persists_slash_command_conversation() -> None:
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            raise AssertionError("LLM should not be called for slash commands")
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            del model_name, messages, session_id, tools
+            raise AssertionError("stream should not be called for slash commands")
+            yield ""  # pragma: no cover
+
+    class StubSlashCommands:
+        async def try_handle(self, inbound: Message) -> str | None:
+            if (inbound.text or "").startswith("/codex"):
+                return "Codex 任务已提交\ntask_id=task-123\nstatus=running\n目录：/tmp/repo"
+            return None
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        slash_commands=StubSlashCommands(),
+    )
+
+    async def _collect() -> None:
+        inbound = Message(
+            text="/codex 检查仓库 --dir /tmp/repo",
+            sender="user",
+            session_id="main",
+            channel="qq",
+            sender_id="10001",
+        )
+        async for _ in pipeline.stream_reply(inbound):
+            pass
+
+    asyncio.run(_collect())
+
+    assert len(memory.appended) == 2
+    assert memory.appended[0].text == "/codex 检查仓库 --dir /tmp/repo"
+    assert memory.appended[0].sender == "user"
+    assert memory.appended[1].sender == "assistant"
+    assert "Codex 任务已提交" in str(memory.appended[1].text)
 
 
 def test_pipeline_broadcasts_reply_to_external_channels_for_webui_origin() -> None:

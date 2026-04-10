@@ -8,6 +8,7 @@ import {
   hasMarkdownPreview,
   hasMedia,
   isErrorCard,
+  isHiddenSystemToolEvent,
   isToolCall,
   mediaType,
   resolveAssetUrl,
@@ -38,6 +39,29 @@ describe("messageRouting", () => {
     expect(
       isErrorCard(baseMessage({ kind: "error", metadata: { error_card: true } })),
     ).toBe(true);
+  });
+
+  it("only hides ephemeral tool status messages", () => {
+    expect(
+      isHiddenSystemToolEvent(
+        baseMessage({
+          message_tag: "tool_status",
+          metadata: { ephemeral: true },
+          text: "⏳ 正在处理...",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isHiddenSystemToolEvent(
+        baseMessage({
+          sender: "hypo-coder",
+          channel: "system",
+          message_tag: "tool_status",
+          metadata: { source: "hypo_coder", task_id: "task-123" },
+          text: "[Codex | task-123]\nchecking files",
+        }),
+      ),
+    ).toBe(false);
   });
 
   it("resolves relative asset paths against api base", () => {

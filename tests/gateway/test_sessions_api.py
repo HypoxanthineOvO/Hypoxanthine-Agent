@@ -67,6 +67,31 @@ def test_get_session_messages_returns_history(tmp_path) -> None:
         assert payload[0]["attachments"][0]["filename"] == "demo.png"
 
 
+def test_codex_tool_status_proactive_message_is_persisted_in_session_history(tmp_path) -> None:
+    with _build_app(tmp_path) as client:
+        asyncio.run(
+            client.app.state.pipeline.on_proactive_message(
+                Message(
+                    text="编码任务完成！",
+                    sender="hypo-coder",
+                    session_id="main",
+                    channel="system",
+                    message_tag="tool_status",
+                    metadata={"source": "hypo_coder", "task_id": "task-123"},
+                ),
+                message_type="ai_reply",
+            )
+        )
+
+        response = client.get("/api/sessions/main/messages")
+        assert response.status_code == 200
+        payload = response.json()
+        assert len(payload) == 1
+        assert payload[0]["text"] == "编码任务完成！"
+        assert payload[0]["sender"] == "hypo-coder"
+        assert payload[0]["message_tag"] == "tool_status"
+
+
 def test_get_session_tool_invocations_requires_token(tmp_path) -> None:
     with _build_app(tmp_path) as client:
         response = client.get("/api/sessions/s1/tool-invocations")

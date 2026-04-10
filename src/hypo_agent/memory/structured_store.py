@@ -487,6 +487,15 @@ class StructuredStore:
     async def save_preference(self, key: str, value: str) -> None:
         await self.set_preference(key, value)
 
+    async def delete_preference(self, key: str) -> None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "DELETE FROM preferences WHERE pref_key = ?",
+                (key,),
+            )
+            await db.commit()
+
     async def get_preference(self, key: str) -> str | None:
         await self.init()
         async with aiosqlite.connect(self.db_path) as db:

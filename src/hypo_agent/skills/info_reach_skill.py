@@ -346,7 +346,7 @@ class InfoReachSkill(BaseSkill):
             if category:
                 lines.append(f"\n【{category}】")
             for item in items:
-                lines.append(f"  - {item}")
+                lines.extend(self._format_digest_item(item))
         stats = data.get("stats") or {}
         if stats.get("total_articles"):
             lines.append(f"\n共 {stats['total_articles']} 篇文章")
@@ -612,6 +612,55 @@ class InfoReachSkill(BaseSkill):
         if bool(payload.get("deleted")):
             return f"已删除资讯订阅「{name}」。"
         return f"未找到名为「{name}」的资讯订阅。"
+
+    def _format_digest_item(self, item: Any) -> list[str]:
+        if isinstance(item, str):
+            text = item.strip()
+            return [f"  - {text}"] if text else []
+        if not isinstance(item, dict):
+            text = str(item).strip()
+            return [f"  - {text}"] if text else []
+
+        title = self._first_non_empty(
+            item.get("title"),
+            item.get("headline"),
+            item.get("name"),
+        )
+        summary = self._first_non_empty(
+            item.get("summary"),
+            item.get("digest"),
+            item.get("description"),
+        )
+        source = self._first_non_empty(
+            item.get("source_name"),
+            item.get("source"),
+        )
+        url = self._first_non_empty(
+            item.get("url"),
+            item.get("link"),
+        )
+
+        lines: list[str] = []
+        if title:
+            lines.append(f"  - {title}")
+        if summary:
+            lines.append(f"    摘要：{summary}")
+        if source:
+            lines.append(f"    来源：{source}")
+        if url:
+            lines.append(f"    链接：{url}")
+        if lines:
+            return lines
+
+        fallback = json.dumps(item, ensure_ascii=False, sort_keys=True)
+        return [f"  - {fallback}"]
+
+    def _first_non_empty(self, *values: Any) -> str:
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
 
     def _resolve_base_url(self, explicit_base_url: str | None) -> str:
         if explicit_base_url and str(explicit_base_url).strip():

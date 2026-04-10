@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import re
+import shutil
 from typing import Any
 
 import yaml
@@ -21,11 +23,24 @@ class SkillManifest:
     risk: str
     dependencies: list[str]
     compatibility: str
+    cli_package: str | None = None
+    cli_commands: list[str] = field(default_factory=list)
+    io_format: str | None = None
+    available: bool = True
+    unavailable_reason: str | None = None
 
 
 class SkillCatalog:
-    def __init__(self, skills_dir: Path) -> None:
+    def __init__(
+        self,
+        skills_dir: Path,
+        *,
+        check_cli_availability: bool = False,
+        command_resolver: Callable[[str], str | None] | None = None,
+    ) -> None:
         self.skills_dir = Path(skills_dir)
+        self.check_cli_availability = bool(check_cli_availability)
+        self.command_resolver = command_resolver or shutil.which
         self._manifests: dict[str, SkillManifest] = {}
         self._skill_files: dict[str, Path] = {}
         self._body_cache: dict[str, str] = {}
@@ -40,7 +55,7 @@ class SkillCatalog:
             return
 
         for skill_file in sorted(self.skills_dir.glob("**/SKILL.md")):
-            manifest = self._load_manifest(skill_file)
+            manifest = self._apply_cli_availability(self._load_manifest(skill_file))
             self._manifests[manifest.name] = manifest
             self._skill_files[manifest.name] = skill_file
 
@@ -54,6 +69,8 @@ class SkillCatalog:
 
         matched: list[tuple[int, SkillManifest]] = []
         for manifest in self._manifests.values():
+            if not manifest.available:
+                continue
             hit_count = sum(1 for trigger in manifest.triggers if trigger and trigger.lower() in normalized)
             if hit_count > 0:
                 matched.append((hit_count, manifest))
@@ -112,6 +129,24 @@ class SkillCatalog:
             risk=str(metadata.get("hypo.risk") or "low").strip() or "low",
             dependencies=_split_field(metadata.get("hypo.dependencies"), separator=","),
             compatibility=str(frontmatter.get("compatibility") or "").strip(),
+            cli_package=_optional_text(metadata.get("hypo.cli_package")),
+            cli_commands=_split_field(metadata.get("hypo.cli_commands"), separator="comma_or_space"),
+            io_format=_optional_text(metadata.get("hypo.io_format")),
+        )
+
+    def _apply_cli_availability(self, manifest: SkillManifest) -> SkillManifest:
+        if not self.check_cli_availability or not manifest.cli_commands:
+            return manifest
+
+        missing_commands = [command for command in manifest.cli_commands if not self.command_resolver(command)]
+        if not missing_commands:
+            return manifest
+
+        reason = f"missing cli command(s): {', '.join(missing_commands)}"
+        return replace(
+            manifest,
+            available=False,
+            unavailable_reason=reason,
         )
 
 

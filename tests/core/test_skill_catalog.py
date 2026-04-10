@@ -5,9 +5,19 @@ from pathlib import Path
 from hypo_agent.core.skill_catalog import SkillCatalog
 
 
-def _write_skill(root: Path, name: str, trigger: str) -> None:
+def _write_skill(
+    root: Path,
+    name: str,
+    trigger: str,
+    *,
+    exec_profile: str = "git",
+    extra_metadata: str = "",
+) -> None:
     skill_dir = root / "pure" / name
     skill_dir.mkdir(parents=True, exist_ok=True)
+    metadata_block = extra_metadata.rstrip("\n")
+    if metadata_block:
+        metadata_block = f"{metadata_block}\n"
     (skill_dir / "SKILL.md").write_text(
         f"""---
 name: "{name}"
@@ -17,11 +27,11 @@ allowed-tools: "exec_command, read_file"
 metadata:
   hypo.category: "pure"
   hypo.backend: "exec"
-  hypo.exec_profile: "git"
+  hypo.exec_profile: "{exec_profile}"
   hypo.triggers: "{trigger}"
   hypo.risk: "low"
   hypo.dependencies: "git"
----
+{metadata_block}---
 
 Use this skill.
 """,
@@ -65,3 +75,53 @@ def test_skill_catalog_lazy_loads_body_and_references(tmp_path: Path) -> None:
 
     assert "Use this skill." in body
     assert refs == {"guide.txt": "hello"}
+
+
+def test_skill_catalog_parses_cli_metadata(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "external-cli",
+        "json,cli",
+        exec_profile="cli-json",
+        extra_metadata=(
+            '  hypo.cli_package: "@acme/json-cli"\n'
+            '  hypo.cli_commands: "json-cli"\n'
+            '  hypo.io_format: "json-stdio"\n'
+        ),
+    )
+    catalog = SkillCatalog(tmp_path)
+
+    catalog.scan()
+
+    manifest = catalog.list_manifests()[0]
+    assert manifest.cli_package == "@acme/json-cli"
+    assert manifest.cli_commands == ["json-cli"]
+    assert manifest.io_format == "json-stdio"
+    assert manifest.available is True
+    assert manifest.unavailable_reason is None
+
+
+def test_skill_catalog_skips_unavailable_cli_skills_when_check_enabled(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "external-cli",
+        "json,cli",
+        exec_profile="cli-json",
+        extra_metadata=(
+            '  hypo.cli_package: "@acme/json-cli"\n'
+            '  hypo.cli_commands: "json-cli"\n'
+            '  hypo.io_format: "json-stdio"\n'
+        ),
+    )
+    catalog = SkillCatalog(
+        tmp_path,
+        check_cli_availability=True,
+        command_resolver=lambda command: None,
+    )
+
+    catalog.scan()
+
+    manifest = catalog.list_manifests()[0]
+    assert manifest.available is False
+    assert "json-cli" in str(manifest.unavailable_reason)
+    assert catalog.match_candidates("please run the json cli") == []

@@ -399,6 +399,19 @@ wheels = [
 ]
 
 [[package]]
+name = "cr-mb-weather-cli"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cf/de/d728009aa453111cc8345c4d24d0ff9f4d01cfdde5f4dcb302227e0bf551/cr_mb_weather_cli-1.0.0.tar.gz", hash = "sha256:d35cacd01bc8220078946f5803863940d612188fccecff35fd73074022c249fc", size = 26489, upload-time = "2025-07-19T03:27:27.257Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/73/1f/f8761e783ec4876617ac17029d98dce78c53975bbc9391190b78ac04d071/cr_mb_weather_cli-1.0.0-py3-none-any.whl", hash = "sha256:26c1b72216bf14d9c8648c31273c304917955846781180cd5d8c6455a7ddc6ef", size = 31497, upload-time = "2025-07-19T03:27:25.024Z" },
+]
+
+[[package]]
 name = "cryptography"
 version = "45.0.7"
 source = { registry = "https://pypi.org/simple" }
@@ -774,6 +787,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "apscheduler" },
+    { name = "cr-mb-weather-cli" },
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -807,6 +821,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20.0,<1.0.0" },
     { name = "apscheduler", specifier = ">=3.10.0,<4.0.0" },
+    { name = "cr-mb-weather-cli", specifier = ">=1.0.0" },
     { name = "cryptography", specifier = ">=44.0.0,<46.0.0" },
     { name = "fastapi", specifier = ">=0.115.0,<1.0.0" },
     { name = "httpx", specifier = ">=0.28.0,<1.0.0" },

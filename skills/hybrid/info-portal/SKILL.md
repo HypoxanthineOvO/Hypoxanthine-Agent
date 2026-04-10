@@ -1,6 +1,6 @@
 ---
 name: "info-portal"
-description: "Query Hypo-Info for today's news digest, topic search, AI benchmark data, and section browsing. Use when user asks about news, trends, or model benchmarks."
+description: "查询 Hypo-Info 的今日资讯、topic search、AI benchmark 与 section browse。用户询问 news、trends 或 model leaderboard 时使用。"
 compatibility: "linux"
 allowed-tools: "info_today info_search info_benchmark info_sections"
 metadata:
@@ -12,73 +12,41 @@ metadata:
   hypo.dependencies: "hypo-info-api"
 ---
 
-# Info Portal 使用说明
+# Info Portal 使用指南
 
-这个 skill 用于 Hypo-Info 内的被动信息查询。当用户询问今天的新闻、最近趋势、AI 排行或有哪些 section 可看时，它是默认选择。
+## 定位 (Positioning)
 
-## 工具选择
+`info-portal` 是 Hypo-Info 的被动查询入口，覆盖今日 digest、topic search、`AI benchmark` 与 `section browse`。
 
-- 用 `info_today` 获取今天内容的简要 digest。可选传入 `section`，例如 `AI`、`开源`、`Cryo` 或其他已知 section。
-- 当用户给出 topic 或 keyword，希望查相关文章时，用 `info_search`。
-- 当用户询问 model ranking、benchmark score 或 leaderboard 对比时，用 `info_benchmark`。
-- 当你需要先知道有哪些 section，再决定查询范围时，用 `info_sections`。
+## 适用场景 (Use When)
 
-## 推荐调用顺序
+- 用户要看今天新闻、最近趋势、AI 榜单或可浏览的资讯板块。
+- 问题是“我现在想查什么”，而不是“以后持续订阅什么”。
 
-1. 如果用户只是泛泛地问有哪些领域，或你不确定该查哪个 section，先调用 `info_sections`。
-2. 日报类请求优先用 `info_today`。
-3. 定向主题查询用 `info_search`。
-4. `info_benchmark` 只用于 benchmark 和 ranking 问题。
+## 工具与接口 (Tools)
 
-## 参数说明
+- `info_today`：获取今日 digest，可选按 `section` 过滤。
+- `info_search`：按 topic 或 keyword 查询相关文章。
+- `info_benchmark`：查看 model ranking 与 benchmark 数据。
+- `info_sections`：列出可用资讯板块。
 
-### `info_today`
+## 标准流程 (Workflow)
 
-- `section` 为可选参数。
-- 留空时表示获取通用首页 digest。
-- 当用户明确想看某个 section 时再设置它。
+1. 不确定板块时，先用 `info_sections` 建立范围感。
+2. 每日资讯优先走 `info_today`。
+3. 定向主题查询走 `info_search`。
+4. 排行榜和 benchmark 相关问题只走 `info_benchmark`。
+5. 回复时把原始结果整理成 digest、summary 或 ranking insight，而不是机械转述字段。
 
-### `info_search`
+## 参数约定 (Parameters)
 
-- `query` 应该是核心 topic、person、model、company 或 event。
-- `limit` 通常保持在 `5` 到 `10`。只有用户明确要求更广泛搜索时再提高。
+- `info_today.section` 留空表示首页 digest；只有用户明确指定板块时再传。
+- `info_search.query` 应聚焦核心 `topic`、`person`、`company`、`model` 或 `event`。
+- `info_search.limit` 一般控制在 `5` 到 `10`。
+- `info_benchmark.top_n` 默认可用 `5` 或 `10`，除非用户要求更多。
 
-### `info_benchmark`
+## 边界与风险 (Guardrails)
 
-- `top_n` 控制返回多少个排名模型。
-- 默认用 `5` 或 `10`，除非用户要求更多。
-
-### `info_sections`
-
-- 无参数。
-- 用它先了解合法的 section 名称，再做过滤。
-
-## 回复方式
-
-- `info_today` 应该按 digest 形式呈现，把最相关的条目放前面。
-- `info_search` 应该先给出精炼的匹配列表；如果结果较多，再补充整体规律总结。
-- `info_benchmark` 应该按 ranking summary 呈现，并指出最值得注意的领先者或分差。
-- 使用 `info_sections` 后，不要只原样列出 section；要把这些结果转化为你接下来会怎么查，或用户可以选什么。
-
-## 常见流程
-
-### 每日新闻请求
-
-1. 调用 `info_today`。
-2. 总结最重要的条目。
-
-### 主题查询
-
-1. 用用户主题调用 `info_search`。
-2. 总结最强相关的结果。
-
-### 模型排行请求
-
-1. 调用 `info_benchmark`。
-2. 解释顶部结果和明显的分数差异。
-
-### Section 发现
-
-1. 调用 `info_sections`。
-2. 选出相关 section。
-3. 再调用 `info_today` 或 `info_search`。
+- `info-portal` 面向被动查询，不负责 subscription management。
+- 使用 `info_sections` 后，不要只原样列出板块；要转化成下一步查询建议。
+- benchmark 输出应突出领先者、差距和变化点，而不是只给表格。

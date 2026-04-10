@@ -18,6 +18,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
         ("python-project-dev", "跑一下 pytest 看看测试结果", "exec_command"),
         ("hypo-agent-ops", "用测试模式跑一下 smoke test", "exec_command"),
         ("host-inspection", "服务器磁盘和内存现在什么情况", "exec_command"),
+        ("weather", "帮我查一下北京天气", "exec_command"),
+        ("agent-browser", "打开这个网页并点一下页面里的按钮", "exec_command"),
+        ("github-ops", "帮我看看这个仓库有哪些 open PR", "exec_command"),
         ("log-inspector", "查看最近的错误日志", "read_file"),
         ("agent-search", "搜索一下 Claude 4 最新消息", "web_search"),
         ("info-portal", "今天有什么 AI 新闻", "info_today"),
@@ -53,6 +56,24 @@ def test_repo_skill_catalog_contains_notion_references() -> None:
     assert "property-types.md" in references
 
 
+def test_repo_skill_catalog_contains_agent_browser_references() -> None:
+    catalog = SkillCatalog(REPO_ROOT / "skills")
+    catalog.scan()
+
+    references = catalog.load_references("agent-browser")
+
+    assert "command-patterns.md" in references
+
+
+def test_repo_skill_catalog_contains_github_ops_references() -> None:
+    catalog = SkillCatalog(REPO_ROOT / "skills")
+    catalog.scan()
+
+    references = catalog.load_references("github-ops")
+
+    assert "command-patterns.md" in references
+
+
 def test_repo_skill_catalog_contains_all_phase1_phase2_skill_names() -> None:
     catalog = SkillCatalog(REPO_ROOT / "skills")
     catalog.scan()
@@ -66,6 +87,9 @@ def test_repo_skill_catalog_contains_all_phase1_phase2_skill_names() -> None:
         "python-project-dev",
         "hypo-agent-ops",
         "host-inspection",
+        "weather",
+        "agent-browser",
+        "github-ops",
         "agent-search",
         "info-portal",
         "notion",
@@ -73,3 +97,13 @@ def test_repo_skill_catalog_contains_all_phase1_phase2_skill_names() -> None:
         "probe",
         "info-reach",
     }.issubset(names)
+
+
+def test_repo_skill_catalog_prioritizes_notion_for_plan_todo_queries() -> None:
+    catalog = SkillCatalog(REPO_ROOT / "skills")
+    catalog.scan()
+
+    candidates = catalog.match_candidates("查看一下今天的计划通待办事项")
+
+    assert candidates
+    assert candidates[0].name == "notion"

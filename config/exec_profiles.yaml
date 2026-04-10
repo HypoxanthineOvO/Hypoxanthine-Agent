@@ -1,4 +1,13 @@
 profiles:
+  cli-json:
+    allow_prefixes:
+      - "*"
+    deny_prefixes:
+      - "rm -rf /"
+      - "shutdown"
+      - "reboot"
+      - "mkfs"
+      - "dd if="
   git:
     allow_prefixes:
       - "git status"
@@ -13,6 +22,11 @@ profiles:
       - "git add"
       - "git checkout"
       - "git merge"
+      - "gh pr"
+      - "gh issue"
+      - "gh run"
+      - "gh repo"
+      - "gh auth status"
     deny_prefixes:
       - "git push --force"
       - "git reset --hard"

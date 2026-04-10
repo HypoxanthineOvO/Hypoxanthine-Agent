@@ -113,7 +113,7 @@ export function isHiddenSystemToolEvent(message: Message): boolean {
   return (
     message.event_type === "tool_call_start" ||
     isEphemeralToolResult(message) ||
-    message.message_tag === "tool_status"
+    (message.message_tag === "tool_status" && message.metadata?.ephemeral === true)
   );
 }
 

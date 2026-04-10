@@ -48,7 +48,7 @@ class CoderSkill(BaseSkill):
                         "properties": {
                             "prompt": {"type": "string"},
                             "working_directory": {"type": "string"},
-                            "model": {"type": "string", "default": "o4-mini"},
+                            "model": {"type": "string"},
                         },
                         "required": ["prompt", "working_directory"],
                     },
@@ -104,7 +104,7 @@ class CoderSkill(BaseSkill):
             if tool_name == "coder_submit_task":
                 prompt = str(params.get("prompt") or "").strip()
                 working_directory = str(params.get("working_directory") or "").strip()
-                model = str(params.get("model") or "o4-mini").strip() or "o4-mini"
+                model = str(params.get("model") or "").strip() or None
                 if not prompt:
                     return SkillOutput(status="error", error_info="prompt is required")
                 if not working_directory:
@@ -143,7 +143,7 @@ class CoderSkill(BaseSkill):
         *,
         prompt: str,
         working_directory: str,
-        model: str = "o4-mini",
+        model: str | None = None,
     ) -> str:
         payload = await self._service.submit_task(
             session_id="skill-coder",

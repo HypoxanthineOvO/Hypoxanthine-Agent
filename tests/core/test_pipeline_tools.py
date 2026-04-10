@@ -1493,3 +1493,194 @@ def test_session_fuse_after_5_errors_returns_message() -> None:
     combined = "".join(event.get("text", "") for event in events if event.get("type") == "assistant_chunk")
 
     assert "累计错误过多" in combined
+
+
+def test_pipeline_falls_back_to_tool_human_summary_when_model_returns_empty_after_tool_call() -> None:
+    memory = StubSessionMemory()
+
+    class StubSkillManager:
+        def get_tools_schema(self) -> list[dict]:
+            return [{"type": "function", "function": {"name": "get_notion_todo_snapshot"}}]
+
+        async def invoke(
+            self,
+            tool_name: str,
+            params: dict,
+            *,
+            session_id: str | None = None,
+            skill_name: str | None = None,
+        ) -> SkillOutput:
+            del params, session_id, skill_name
+            assert tool_name == "get_notion_todo_snapshot"
+            return SkillOutput(
+                status="success",
+                result={
+                    "available": False,
+                    "human_summary": "我发现了一个候选 Notion 待办数据库：HYX的计划通。请回复“确认绑定 HYX的计划通”。",
+                },
+            )
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_notion_todo_snapshot",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                }
+            return {"text": "", "tool_calls": []}
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            del model_name, messages, session_id, tools
+            if False:
+                yield ""  # pragma: no cover
+            return
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=StubSkillManager(),
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="看看今日待办", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+    combined = "".join(event.get("text", "") for event in events if event.get("type") == "assistant_chunk")
+
+    assert "候选 Notion 待办数据库" in combined
+    assert memory.appended[-1].text
+
+
+def test_pipeline_stream_shortcuts_notion_todo_request_without_llm() -> None:
+    memory = StubSessionMemory()
+
+    class StubSkillManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict, str | None, str | None]] = []
+
+        def get_tools_schema(self) -> list[dict]:
+            return [{"type": "function", "function": {"name": "get_notion_todo_snapshot"}}]
+
+        async def invoke(
+            self,
+            tool_name: str,
+            params: dict,
+            *,
+            session_id: str | None = None,
+            skill_name: str | None = None,
+        ) -> SkillOutput:
+            self.calls.append((tool_name, params, session_id, skill_name))
+            return SkillOutput(
+                status="success",
+                result={
+                    "available": True,
+                    "human_summary": "今日到期未完成：\n- 提交周报",
+                },
+            )
+
+    class StubRouter:
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            raise AssertionError("LLM should not be called for notion todo shortcut")
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            raise AssertionError("stream() should not be called for notion todo shortcut")
+            yield ""  # pragma: no cover
+
+    skill_manager = StubSkillManager()
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skill_manager,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="查看一下今天的计划通待办事项", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+
+    assert [event["type"] for event in events] == ["assistant_chunk", "assistant_done"]
+    assert events[0]["text"] == "今日到期未完成：\n- 提交周报"
+    assert skill_manager.calls == [("get_notion_todo_snapshot", {}, "s1", "direct")]
+    assert memory.appended[-1].text == "今日到期未完成：\n- 提交周报"
+
+
+def test_pipeline_stream_shortcuts_notion_todo_followup_after_binding_without_llm() -> None:
+    memory = StubSessionMemory(
+        history=[
+            Message(text="查看一下今天的计划通待办事项", sender="user", session_id="s1"),
+            Message(
+                text="已绑定 Notion 待办数据库：HYX 的计划通（ID: db-1）。后续 heartbeat 将直接使用这个数据库。",
+                sender="assistant",
+                session_id="s1",
+            ),
+        ]
+    )
+
+    class StubSkillManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict, str | None, str | None]] = []
+
+        def get_tools_schema(self) -> list[dict]:
+            return [{"type": "function", "function": {"name": "get_notion_todo_snapshot"}}]
+
+        async def invoke(
+            self,
+            tool_name: str,
+            params: dict,
+            *,
+            session_id: str | None = None,
+            skill_name: str | None = None,
+        ) -> SkillOutput:
+            self.calls.append((tool_name, params, session_id, skill_name))
+            return SkillOutput(
+                status="success",
+                result={
+                    "available": True,
+                    "human_summary": "今日到期未完成：\n- 提交周报",
+                },
+            )
+
+    class StubRouter:
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            raise AssertionError("LLM should not be called for notion todo follow-up shortcut")
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            raise AssertionError("stream() should not be called for notion todo follow-up shortcut")
+            yield ""  # pragma: no cover
+
+    skill_manager = StubSkillManager()
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skill_manager,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="好，查看吧", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+
+    assert [event["type"] for event in events] == ["assistant_chunk", "assistant_done"]
+    assert events[0]["text"] == "今日到期未完成：\n- 提交周报"
+    assert skill_manager.calls == [("get_notion_todo_snapshot", {}, "s1", "direct")]
+    assert memory.appended[-1].text == "今日到期未完成：\n- 提交周报"

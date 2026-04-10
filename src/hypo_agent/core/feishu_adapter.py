@@ -3,12 +3,17 @@ from __future__ import annotations
 import json
 import re
 
+from hypo_agent.core.markdown_plaintext import markdown_to_plaintext
 from hypo_agent.core.rich_response import RichResponse
 
 FEISHU_CARD_CHAR_LIMIT = 30000
 
 
 class FeishuAdapter:
+    _INLINE_MARKDOWN_RE = re.compile(
+        r"(\*\*.+?\*\*|(?<!\*)\*(?!\s).+?(?<!\s)\*(?!\*)|~~.+?~~|`[^`\n]+`|\[[^\]]+\]\([^)]+\))"
+    )
+
     async def format(self, response: RichResponse) -> list[dict[str, str]]:
         text = str(response.text or "")
         elements = self._markdown_to_elements(text)
@@ -200,22 +205,51 @@ class FeishuAdapter:
         rows: list[list[str]] = [self._split_table_cells(line) for line in row_lines]
         if any(len(row) > len(headers) + 2 for row in rows):
             return None
-        normalized_headers = [h or f"col_{idx+1}" for idx, h in enumerate(headers)]
+        normalized_headers = [
+            self._sanitize_table_header(h) or f"col_{idx+1}" for idx, h in enumerate(headers)
+        ]
+        column_types = [
+            "lark_md" if self._column_contains_markdown(rows, idx) else "text"
+            for idx in range(len(headers))
+        ]
         columns = [
             {
                 "name": f"c{idx}",
                 "display_name": name,
-                "data_type": "text",
+                "data_type": column_types[idx],
             }
             for idx, name in enumerate(normalized_headers)
         ]
         row_objects: list[dict[str, str]] = []
         for row in rows:
             values = list(row) + [""] * max(0, len(headers) - len(row))
-            row_objects.append({f"c{idx}": values[idx] for idx in range(len(headers))})
+            row_objects.append(
+                {
+                    f"c{idx}": self._render_table_cell(values[idx], data_type=column_types[idx])
+                    for idx in range(len(headers))
+                }
+            )
         return {
             "tag": "table",
             "page_size": 10,
             "columns": columns,
             "rows": row_objects,
         }
+
+    def _column_contains_markdown(self, rows: list[list[str]], index: int) -> bool:
+        for row in rows:
+            if index < len(row) and self._contains_inline_markdown(row[index]):
+                return True
+        return False
+
+    def _contains_inline_markdown(self, value: str) -> bool:
+        return bool(self._INLINE_MARKDOWN_RE.search(str(value or "")))
+
+    def _sanitize_table_header(self, value: str) -> str:
+        return markdown_to_plaintext(str(value or "")).strip()
+
+    def _render_table_cell(self, value: str, *, data_type: str) -> str:
+        text = str(value or "")
+        if data_type == "lark_md":
+            return text
+        return markdown_to_plaintext(text).strip()

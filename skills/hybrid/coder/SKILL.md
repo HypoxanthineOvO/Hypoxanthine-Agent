@@ -1,6 +1,6 @@
 ---
 name: "coder"
-description: "Delegate coding tasks to Hypo-Coder. Use when user requests code changes, feature implementation, bug fixes, or code review in a project managed by Hypo-Coder."
+description: "将 coding task 委托给 Hypo-Coder。用户请求 code change、feature implementation、bug fix 或 code review，且任务适合异步委托时使用。"
 compatibility: "linux"
 allowed-tools: "coder_submit_task coder_task_status coder_list_tasks coder_abort_task coder_health"
 metadata:
@@ -12,85 +12,43 @@ metadata:
   hypo.dependencies: "hypo-coder-api"
 ---
 
-# Coder 使用说明
+# Coder 使用指南
 
-当用户希望把工作委托给 Hypo-Coder，而不是在当前 agent 会话里直接完成时，使用这个 skill。
+## 定位 (Positioning)
 
-## 工具选择
+`coder` 用于把 coding work 异步委托给 `Hypo-Coder`，适合 code change、feature implementation、bug fix 与 code review 这类不必在当前会话内同步完成的任务。
 
-- 用 `coder_submit_task` 创建新的 coding task。
-- 用 `coder_task_status` 查看某个 task 的进度或最终结果。
-- 用 `coder_list_tasks` 查看最近任务，也可以按状态过滤。
-- 当用户要求停止运行中或排队中的任务时，用 `coder_abort_task`。
-- 在委托前需要确认服务可用性时，用 `coder_health`。
+## 适用场景 (Use When)
 
-## 委托流程
+- 用户明确希望“提交任务”“委托给 coder”或适合后台执行的开发工作。
+- 任务需要较长执行时间、独立工作目录或异步跟踪。
 
-1. 把用户请求翻译成具体的 task 描述。
-2. 调用 `coder_submit_task`。
-3. 不要立刻轮询。第一次查状态通常放在约 30 秒后。
-4. 后续用 `coder_task_status` 跟进。第一次之后，大约每 60 秒查一次。
-5. 任务完成后，向用户总结结果、变更文件和测试状态。
+## 工具与接口 (Tools)
 
-## Task 描述最佳实践
+- `coder_submit_task`：提交新的 coding task。
+- `coder_task_status`：查询任务进度或最终结果。
+- `coder_list_tasks`：查看最近任务并按状态过滤。
+- `coder_abort_task`：停止运行中或排队中的任务。
+- `coder_health`：检查后端服务可用性。
 
-一个好的 `prompt` 应包含：
+## 标准流程 (Workflow)
 
-- 目标 repository 或 working directory
-- 要实现的目标或要修复的 bug
-- 修改后期望的行为
-- 关键 file path、module 或 component
-- 测试要求或要运行的命令
-- 例如保留无关 worktree 改动之类的约束
-
-避免使用像 “fix the project” 或 “make it better” 这样模糊的 prompt。
-
-## 参数说明
-
-### `coder_submit_task`
-
-- `prompt`：必填 task 描述，要写明确。
-- `working_directory`：必填 repository 路径。
-- `model`：可选 model override。除非有明确理由，否则保持默认。
-
-### `coder_task_status`
-
-- `task_id`：必填。
-- 既可用于进度查询，也可用于获取最终总结。
-
-### `coder_list_tasks`
-
-- `status`：可选过滤条件，例如 `queued`、`running`、`completed` 或 `failed`。
-
-### `coder_abort_task`
-
-- `task_id`：必填。
-- 只在用户明确要求停止，或任务显然已经过时时使用。
-
-### `coder_health`
-
-- 无参数。
-
-## 轮询建议
-
-- 第一次检查：提交后约 30 秒。
-- 后续检查：约每 60 秒一次。
-- 如果任务运行超过 10 分钟，要明确告诉用户它仍在运行，而不是无限静默等待。
-
-## 常见流程
-
-### 提交新的实现任务
-
-1. 确认这个请求适合委托。
-2. 组装详细的 `prompt`。
+1. 先判断任务是否适合委托，而不是当前 agent 直接完成。
+2. 把用户需求整理成具体 `prompt`，写清目标、范围、约束与测试要求。
 3. 调用 `coder_submit_task`。
+4. 不要立刻轮询；第一次查询通常放在约 `30s` 后，之后约每 `60s` 查询一次。
+5. 完成后向用户总结结果、变更文件和测试状态。
 
-### 查询任务进度
+## 参数约定 (Parameters)
 
-1. 用 `task_id` 调用 `coder_task_status`。
-2. 如果仍在运行，汇报已运行时长，并以合理频率继续轮询。
+- `coder_submit_task.prompt` 应包含 `working directory`、目标行为、关键文件、测试要求和重要约束。
+- `coder_submit_task.working_directory` 必填。
+- `coder_submit_task.model` 只有在有明确理由时才 override。
+- `coder_task_status.task_id`、`coder_abort_task.task_id` 都必须准确传入。
+- `coder_list_tasks.status` 可选，常见值包括 `queued`、`running`、`completed`、`failed`。
 
-### 终止过期任务
+## 边界与风险 (Guardrails)
 
-1. 确认用户确实要停止任务。
-2. 调用 `coder_abort_task`。
+- 避免提交像“fix the project”这类模糊 prompt。
+- 如果任务超过 `10 min` 仍在运行，要明确告诉用户当前状态，而不是静默等待。
+- `abort` 只在用户明确要求停止，或任务明显过时时使用。

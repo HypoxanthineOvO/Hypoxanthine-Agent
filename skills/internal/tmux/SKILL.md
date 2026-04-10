@@ -1,6 +1,6 @@
 ---
 name: "tmux"
-description: "Persistent terminal session management. Legacy primitive, prefer exec for one-shot commands."
+description: "持久 terminal session 管理。仅在需要跨多次调用保留 shell state 的场景使用，普通 one-shot command 优先 exec。"
 compatibility: "linux"
 allowed-tools: "tmux_send tmux_read"
 metadata:
@@ -12,30 +12,33 @@ metadata:
   hypo.dependencies: "tmux"
 ---
 
-# Tmux 使用说明
+# Tmux 使用指南
 
-这是 legacy 的持久终端 backend。它不是普通命令执行的默认路径，在常规运行里通常也是关闭的。
+## 定位 (Positioning)
 
-## 工具选择
+`tmux` 是 legacy 的持久 terminal backend，主要用于跨多次调用保留 shell state。普通 one-shot command 不应默认走它。
 
-- `tmux_send`：向持久 tmux window 发送命令。
-- `tmux_read`：读取该持久 window 的最近输出。
+## 适用场景 (Use When)
 
-## 什么时候适合 Tmux
+- 需要持续存活的后台服务或会话。
+- 需要长时间交互式监控，例如 `tail -f`。
+- 任务必须跨多个 tool call 保留 terminal context。
 
-- 像 `tail -f` 这样的长时间交互式监控。
-- 必须跨多个 tool call 存活的后台服务或会话。
-- 确实需要持久 shell 状态的场景。
+## 工具与接口 (Tools)
 
-## Tmux 与 Exec 的区别
+- `tmux_send`：向持久 `tmux window` 发送命令。
+- `tmux_read`：读取该 window 的最近输出。
 
-- 普通一次性命令用 `exec_command`。
-- 只有当命令必须在多次调用之间保持存活，或确实需要持久 terminal context 时，才用 `tmux`。
-- 不要只是为了跑一次普通 shell command 就使用 `tmux`。
+## 标准流程 (Workflow)
 
-## 安全规则
+1. 先判断任务是否真的需要持久 session，而不是普通 `exec`。
+2. 明确要操作的 `session/window` 名称，避免混入旧上下文。
+3. 用 `tmux_send` 发出命令，再用 `tmux_read` 拉取输出。
+4. 对读取结果做二次判断，因为旧输出可能仍残留在 buffer 中。
 
-- 这个 backend 会累积 terminal state，因此旧输出和旧会话上下文可能污染后续读取。
-- 当 workflow 需要隔离时，优先创建或指定明确的 session/window 名称。
-- 明确说明你正在读取哪个 session。
-- 把 `tmux` 视为比 `exec` 更重、更不确定的操作路径。
+## 边界与风险 (Guardrails)
+
+- `tmux` 会累积 terminal state，旧输出可能污染当前判断。
+- workflow 需要隔离时，应显式指定新的 `session/window`。
+- 回复中要说明当前读取的是哪个 session，避免上下文错位。
+- 如果任务只是普通 shell command，不要为了“像真人终端”而使用 `tmux`。

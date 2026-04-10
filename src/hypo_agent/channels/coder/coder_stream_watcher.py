@@ -35,7 +35,13 @@ class CoderStreamWatcher:
         task = self._tasks.get(normalized_task_id)
         return task is not None and not task.done()
 
-    async def start(self, *, task_id: str, session_id: str) -> bool:
+    async def start(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        initial_cursor: str | None = None,
+    ) -> bool:
         normalized_task_id = str(task_id or "").strip()
         if not normalized_task_id:
             return False
@@ -43,7 +49,11 @@ class CoderStreamWatcher:
         if existing is not None and not existing.done():
             return False
         self._tasks[normalized_task_id] = asyncio.create_task(
-            self._watch(task_id=normalized_task_id, session_id=session_id)
+            self._watch(
+                task_id=normalized_task_id,
+                session_id=session_id,
+                initial_cursor=str(initial_cursor or "").strip() or None,
+            )
         )
         return True
 
@@ -62,9 +72,15 @@ class CoderStreamWatcher:
         for task_id in list(self._tasks):
             await self.stop(task_id)
 
-    async def _watch(self, *, task_id: str, session_id: str) -> None:
+    async def _watch(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        initial_cursor: str | None = None,
+    ) -> None:
         last_status = ""
-        cursor: str | None = None
+        cursor: str | None = initial_cursor
         try:
             while True:
                 attached = await self.coder_task_service.get_attached_task(session_id)

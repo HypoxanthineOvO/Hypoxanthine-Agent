@@ -1,6 +1,6 @@
 ---
 name: "reminder"
-description: "Reminder CRUD with scheduler integration. Creates, lists, updates, deletes, and snoozes timed reminders."
+description: "Reminder CRUD 与 scheduler integration：创建、列出、更新、删除与 snooze 定时提醒。"
 compatibility: "linux"
 allowed-tools: "create_reminder list_reminders delete_reminder update_reminder snooze_reminder"
 metadata:
@@ -12,38 +12,41 @@ metadata:
   hypo.dependencies: "structured_store,scheduler"
 ---
 
-# Reminder 使用说明
+# Reminder 使用指南
 
-这个 backend 管理 reminder 及其 scheduler job，负责 create、inspect、update、delete 和 snooze 流程。
+## 定位 (Positioning)
 
-## 典型流程
+`reminder` 负责 reminder 的 CRUD 与 `scheduler integration`，覆盖创建、查看、更新、删除与 `snooze` 流程。
 
-- 用 `create_reminder` 添加一个带有效未来时间的 reminder。
-- 用 `list_reminders` 查看活动中或历史 reminder。
-- 当 title、schedule、channel 或 status 需要变化时，用 `update_reminder`。
-- 用 `delete_reminder` 删除 reminder，并取消对应 job。
-- 当 reminder 已存在、用户只想短暂延后时，用 `snooze_reminder`。
+## 适用场景 (Use When)
 
-## 时间构造规则
+- 用户要新增定时提醒或周期提醒。
+- 用户要查看、修改、删除已有 reminder。
+- 用户只想把已有 reminder 暂时顺延，而不是重写完整计划。
 
-- 在调用 `create_reminder` 前，把“明天下午三点”这类相对表达转成绝对 ISO 8601 timestamp。
-- 对 `once` reminder，要传绝对的未来 datetime string，而不是相对表达。
-- 对周期性 reminder，在合适时使用 cron expression。
-- backend 会校验一次性 reminder 不能落在过去。
+## 工具与接口 (Tools)
 
-## Timezone 处理
+- `create_reminder`：创建新的 reminder。
+- `list_reminders`：查看活动中或历史 reminder。
+- `update_reminder`：更新 title、schedule、channel 或 status。
+- `delete_reminder`：删除 reminder，并取消对应 scheduler job。
+- `snooze_reminder`：按短偏移量顺延已有 reminder。
 
-- 已知用户 timezone 时，优先使用它。
-- 如果拿不到用户 timezone，在调度有歧义的 reminder 前，要明确说明你假设使用的 timezone。
-- 不要静默混用用户本地意图和服务器本地 wall clock time。
+## 标准流程 (Workflow)
 
-## Snooze 说明
+1. 先把自然语言时间转换成明确的绝对时间或 `cron expression`。
+2. 已知用户 `timezone` 时优先使用它；未知时要显式说明假设。
+3. 新建提醒走 `create_reminder`，已有提醒的小幅顺延走 `snooze_reminder`。
+4. 当目标 reminder 不够明确时，先用 `list_reminders` 定位，再做更新或删除。
 
-- `snooze_reminder` 用于像 `10m`、`2h`、`1d` 这样的快速偏移。
-- 当 reminder 已存在，而且用户只想短暂延后、而不是完全改计划时，用它。
+## 参数约定 (Parameters)
 
-## 安全规则
+- 一次性 reminder 的时间应传未来的绝对 `ISO 8601 timestamp`。
+- 周期性 reminder 适合使用 `cron expression`。
+- `snooze_reminder` 适合 `10m`、`2h`、`1d` 这类短偏移字符串。
 
-- 当精度重要时，不要猜测有歧义的日期或时间。
-- 如果时间表述不清楚，先澄清再调度。
-- 当目标 reminder 不够明确时，优先先列出或预览 reminder，再做破坏性变更。
+## 边界与风险 (Guardrails)
+
+- 时间精度重要时，不要猜测含糊日期；必要时先澄清。
+- 不要静默混用用户本地意图与服务器本地 wall clock time。
+- 破坏性操作前优先先确认目标 reminder，避免误删或误改。

@@ -464,18 +464,70 @@ class SlashCommandHandler:
             return "已结束当前 Codex 会话绑定。"
 
         if lowered.startswith("attach "):
-            task_id = payload.split(maxsplit=1)[1].strip()
-            if not task_id:
-                return "用法：/codex attach <task_id>"
+            parsed = self._parse_codex_history_args(
+                payload[len("attach") :].strip(),
+                require_task_id=True,
+            )
+            if parsed is None:
+                return "用法：/codex attach <task_id> [-n N]"
+            task_id = str(parsed["task_id"])
+            line_count = int(parsed["line_count"])
+            status_result = await self.coder_task_service.get_task_status(
+                task_id=task_id,
+                session_id=inbound.session_id,
+            )
+            resolved_task_id = (
+                str(status_result.get("task_id") or task_id).strip() or task_id
+                if task_id == "last"
+                else task_id
+            )
+            status_text = str(status_result.get("status") or "unknown").strip().upper() or "UNKNOWN"
+            output = await self.coder_task_service.get_task_output(task_id=resolved_task_id, after=None)
+            lines = output.get("lines") if isinstance(output.get("lines"), list) else []
+            normalized_lines = [str(line) for line in lines if line is not None]
+            cursor = str(output.get("cursor") or "").strip() or None
             await self.coder_task_service.attach_task(
                 session_id=inbound.session_id,
-                task_id=task_id,
+                task_id=resolved_task_id,
+                initial_cursor=cursor,
             )
-            return f"已挂载 Codex 任务：{task_id}"
+            return self._format_codex_attach_reply(
+                task_id=resolved_task_id,
+                status=status_text,
+                lines=normalized_lines,
+                line_count=line_count,
+            )
 
         if lowered == "detach":
             await self.coder_task_service.detach_task(inbound.session_id)
             return "已解除当前 Codex 任务挂载。"
+
+        if lowered.startswith("logs"):
+            parsed = self._parse_codex_history_args(
+                payload[len("logs") :].strip(),
+                require_task_id=False,
+            )
+            if parsed is None:
+                return "用法：/codex logs [task_id|last] [-n N]"
+            task_id = str(parsed["task_id"])
+            line_count = int(parsed["line_count"])
+            status_result = await self.coder_task_service.get_task_status(
+                task_id=task_id,
+                session_id=inbound.session_id,
+            )
+            resolved_task_id = (
+                str(status_result.get("task_id") or task_id).strip() or task_id
+                if task_id == "last"
+                else task_id
+            )
+            output = await self.coder_task_service.get_task_output(task_id=resolved_task_id, after=None)
+            lines = output.get("lines") if isinstance(output.get("lines"), list) else []
+            normalized_lines = [str(line) for line in lines if line is not None]
+            return self._format_codex_logs_reply(
+                task_id=resolved_task_id,
+                lines=normalized_lines,
+                line_count=line_count,
+            )
 
         if lowered == "health":
             result = await self.coder_task_service.health()
@@ -489,7 +541,6 @@ class SlashCommandHandler:
             session_id=inbound.session_id,
             prompt=submit["prompt"],
             working_directory=submit["working_directory"],
-            model="o4-mini",
         )
         return "\n".join(
             [
@@ -536,10 +587,108 @@ class SlashCommandHandler:
                 "/codex status <task_id|last>",
                 "/codex list [status]",
                 "/codex abort <task_id|last>",
-                "/codex attach <task_id>",
+                "/codex attach <task_id> [-n N]",
+                "/codex logs [task_id|last] [-n N]",
                 "/codex detach",
                 "/codex done",
                 "/codex health",
+            ]
+        )
+
+    def _parse_codex_history_args(
+        self,
+        raw_args: str,
+        *,
+        require_task_id: bool,
+    ) -> dict[str, str | int] | None:
+        try:
+            tokens = shlex.split(raw_args)
+        except ValueError:
+            return None
+
+        task_id: str | None = None
+        line_count = 30
+        idx = 0
+        while idx < len(tokens):
+            token = tokens[idx].strip()
+            if not token:
+                idx += 1
+                continue
+            if token == "-n":
+                idx += 1
+                if idx >= len(tokens):
+                    return None
+                try:
+                    line_count = int(tokens[idx])
+                except ValueError:
+                    return None
+                if line_count < 0:
+                    return None
+            elif task_id is None:
+                task_id = token
+            else:
+                return None
+            idx += 1
+
+        if task_id is None:
+            if require_task_id:
+                return None
+            task_id = "last"
+
+        return {"task_id": task_id, "line_count": line_count}
+
+    def _format_codex_attach_reply(
+        self,
+        *,
+        task_id: str,
+        status: str,
+        lines: list[str],
+        line_count: int,
+    ) -> str:
+        total_lines = len(lines)
+        if line_count <= 0 or total_lines == 0:
+            return "\n".join(
+                [
+                    f"📜 已挂载 {task_id} | 状态: {status} | 已产出 {total_lines} 行",
+                    f"/codex logs {task_id} 查看历史",
+                ]
+            )
+
+        recent_lines = lines[-line_count:]
+        if total_lines <= line_count:
+            header = f"📜 {task_id} 已产出 {total_lines} 行输出："
+        else:
+            header = f"📜 {task_id} 已产出 {total_lines} 行输出，以下是最近 {line_count} 行："
+        return "\n".join(
+            [
+                header,
+                f"[Codex | {task_id}]",
+                "\n".join(recent_lines),
+                f"输入 /codex logs {task_id} 查看完整历史",
+            ]
+        )
+
+    def _format_codex_logs_reply(
+        self,
+        *,
+        task_id: str,
+        lines: list[str],
+        line_count: int,
+    ) -> str:
+        total_lines = len(lines)
+        if total_lines == 0:
+            return f"📜 {task_id} 暂无输出。"
+        if line_count <= 0 or total_lines <= line_count:
+            selected_lines = lines
+            header = f"📜 {task_id} 已产出 {total_lines} 行输出："
+        else:
+            selected_lines = lines[-line_count:]
+            header = f"📜 {task_id} 已产出 {total_lines} 行输出，以下是最近 {line_count} 行："
+        return "\n".join(
+            [
+                header,
+                f"[Codex | {task_id}]",
+                "\n".join(selected_lines),
             ]
         )
 

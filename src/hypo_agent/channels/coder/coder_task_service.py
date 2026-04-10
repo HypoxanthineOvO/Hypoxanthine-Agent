@@ -156,13 +156,24 @@ class CoderTaskService:
         merged.update(payload)
         return merged
 
-    async def attach_task(self, *, session_id: str, task_id: str) -> None:
+    async def attach_task(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        initial_cursor: str | None = None,
+    ) -> None:
         if self.structured_store is None:
             return
         await self.structured_store.attach_coder_task(session_id=session_id, task_id=task_id)
         task = await self.structured_store.get_coder_task(task_id)
         status = str(task.get("status") or "").strip() if task is not None else ""
-        await self._start_watcher_if_needed(task_id=task_id, session_id=session_id, status=status)
+        await self._start_watcher_if_needed(
+            task_id=task_id,
+            session_id=session_id,
+            status=status,
+            initial_cursor=initial_cursor,
+        )
 
     async def detach_task(self, session_id: str) -> None:
         if self.structured_store is None:
@@ -229,7 +240,14 @@ class CoderTaskService:
             raise ValueError(f"Session {session_id} has no coder task")
         return resolved_task_id
 
-    async def _start_watcher_if_needed(self, *, task_id: str, session_id: str, status: str) -> None:
+    async def _start_watcher_if_needed(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        status: str,
+        initial_cursor: str | None = None,
+    ) -> None:
         if self.watcher is None:
             return
         if str(status or "").strip().lower() in {"completed", "failed", "aborted"}:
@@ -237,6 +255,6 @@ class CoderTaskService:
         starter = getattr(self.watcher, "start", None)
         if not callable(starter):
             return
-        result = starter(task_id=task_id, session_id=session_id)
+        result = starter(task_id=task_id, session_id=session_id, initial_cursor=initial_cursor)
         if hasattr(result, "__await__"):
             await result

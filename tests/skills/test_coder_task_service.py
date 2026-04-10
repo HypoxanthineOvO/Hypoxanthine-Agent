@@ -32,7 +32,7 @@ class FakeCoderClient:
         self,
         prompt: str,
         working_directory: str,
-        model: str = "o4-mini",
+        model: str | None = None,
         approval_policy: str = "full-auto",
         webhook: str | None = None,
     ) -> dict:
@@ -98,7 +98,7 @@ def test_submit_task_persists_mapping_and_resolves_default_directory(tmp_path) -
             {
                 "prompt": "fix login flow",
                 "working_directory": "/repo/existing",
-                "model": "o4-mini",
+                "model": None,
                 "approval_policy": "full-auto",
                 "webhook": "http://localhost:8765/api/coder/webhook",
             }

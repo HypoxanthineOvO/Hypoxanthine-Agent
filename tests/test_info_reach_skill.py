@@ -108,6 +108,40 @@ def test_info_summary_formats_digest_sections(tmp_path: Path) -> None:
     assert "Agent 工具链" in text
 
 
+def test_info_summary_formats_object_items_without_dumping_json(tmp_path: Path) -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            json={
+                "highlight": "今天 AI 新闻偏多。",
+                "sections": [
+                    {
+                        "category": "AI",
+                        "items": [
+                            {
+                                "title": "推理模型发布",
+                                "summary": "重点在推理吞吐和成本下降。",
+                                "source_name": "OpenAI",
+                                "url": "https://example.com/query",
+                            }
+                        ],
+                    }
+                ],
+                "stats": {"total_articles": 1},
+            },
+        )
+    )
+    skill = _build_skill(tmp_path=tmp_path, transport=transport)
+
+    text = asyncio.run(skill.info_summary(time_range="today"))
+
+    assert "推理模型发布" in text
+    assert "重点在推理吞吐和成本下降。" in text
+    assert "OpenAI" in text
+    assert "https://example.com/query" in text
+    assert "{'title':" not in text
+
+
 @pytest.mark.parametrize("exc", [httpx.ConnectError("boom"), httpx.ReadTimeout("slow")])
 def test_info_query_returns_friendly_error_on_http_failures(tmp_path: Path, exc: Exception) -> None:
     transport = httpx.MockTransport(lambda request: (_ for _ in ()).throw(exc))

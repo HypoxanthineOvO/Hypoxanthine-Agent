@@ -474,6 +474,40 @@ describe("ChatView", () => {
     expect(wrapper.text()).not.toContain("⏳ 正在处理...");
   });
 
+  it("renders non-ephemeral codex tool status messages in the chat timeline", async () => {
+    const wrapper = mount(ChatView, {
+      props: {
+        wsUrl: "ws://localhost:8000/ws",
+        token: "test-token",
+      },
+    });
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+    ws.emitMessage(
+      JSON.stringify({
+        text: "[Codex | task-123]\nchecking files",
+        sender: "hypo-coder",
+        session_id: "main",
+        channel: "system",
+        message_tag: "tool_status",
+        metadata: { source: "hypo_coder", task_id: "task-123", status: "running" },
+      }),
+    );
+
+    await flushUi();
+    await flushUi();
+
+    expect(wrapper.text()).toContain("[Codex | task-123]");
+    expect(wrapper.text()).toContain("checking files");
+  });
+
   it("renders narration messages with a weaker dedicated style and keeps them after reply", async () => {
     const wrapper = mount(ChatView, {
       props: {

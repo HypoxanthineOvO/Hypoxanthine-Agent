@@ -1,6 +1,6 @@
 ---
 name: "exec"
-description: "Core shell command execution. The runtime primitive behind all CLI-based Skills."
+description: "核心 shell execution backend。所有 CLI-based skill 的底层一次性 subprocess primitive。"
 compatibility: "linux"
 allowed-tools: "exec_command exec_script"
 metadata:
@@ -12,38 +12,46 @@ metadata:
   hypo.dependencies: "bash,python"
 ---
 
-# Exec 使用说明
+# Exec 使用指南
 
-这是所有 CLI-based skill 背后的核心一次性命令执行器。当任务需要在新的 subprocess 中执行 shell，且不需要持久终端状态时，使用它。
+## 定位 (Positioning)
 
-## 工具选择
+`exec` 是最基础的 shell execution backend，负责在新的 subprocess 中运行 one-shot command 或临时脚本。凡是 CLI-based skill 需要落到命令执行层，通常都会经过它。
 
-- 普通 shell command 用 `exec_command`。
-- 当任务更适合写成临时多行脚本，而不是单条 shell command 时，用 `exec_script`。
-- 如果任务需要持久 shell session 或逐步交互的 terminal，不要强行走 `exec`；那是 `tmux_send` 和 `tmux_read` 的边界。
+## 适用场景 (Use When)
 
-## Execution Profiles 说明
+- 任务本质上是一次性 shell command、短 pipeline 或解释器调用。
+- 需要 `exec_profile` 对命令前缀做约束。
+- 不需要持久 terminal state，也不需要跨多次调用保留 session。
 
-- 很多 pure CLI skill 会带着 `exec_profile` 调用 `exec_command` 或 `exec_script`。
-- profile 决定哪些命令前缀被允许，哪些被拒绝。
-- 当 `git-workflow` 或 `system-service-ops` 这类 pure skill 激活时，runtime 应自动传入该 skill 的 profile。
-- 如果没有显式 profile，则使用 `default` profile。
+## 工具与接口 (Tools)
 
-## 安全规则
+- `exec_command`：执行单条 command，适合现成 CLI 调用。
+- `exec_script`：执行临时多行脚本，适合比 one-liner 更清晰的场景。
 
-- `default` profile 会保持向后兼容，但仍会拒绝已知的破坏性前缀，例如 `rm -rf /`、`shutdown`、`reboot`、`mkfs` 和 `dd if=`。
-- 除非当前 profile 明确允许，而且用户明确要求，否则绝不要用 `exec` 做破坏性或不可逆的系统变更。
-- `exec` 不是 sandbox。它会继承当前进程环境，并在当前机器上下文中运行。
-- 交互式命令可能一直挂到 timeout。除非确有必要，否则优先使用 `-y` 这类非交互参数或管道确认。
+## 标准流程 (Workflow)
 
-## Exec 与 Code Run 的区别
+1. 先判断任务是否真的是 one-shot execution，而不是 `tmux` 或 `code-run` 场景。
+2. 能用现成命令表达时，优先选择 `exec_command`。
+3. 当逻辑需要多行脚本，但仍适合一次性执行时，改用 `exec_script`。
+4. 根据当前 skill 或 runtime 配置带上合适的 `exec_profile`。
+5. 总结关键输出，不要把截断后的原始输出当成完整事实。
 
-- 对已存在为命令形式的一次性 shell command 或解释器调用，用 `exec`。
-- 当你需要临时脚本文件，并希望在可用时获得偏 sandbox 的 `bwrap` 行为时，用 `code_run`。
-- 简单说：单条命令或短 shell pipeline 走 `exec`；一次性脚本执行走 `code_run`。
+## 边界与风险 (Guardrails)
 
-## 输出与超时
+- `exec` 不是 `sandbox`，它会继承当前进程环境和宿主机上下文。
+- 除非 profile 明确允许且用户明确要求，否则不要执行 destructive action 或不可逆系统变更。
+- 对可能卡住的 interactive command，优先改成非交互模式，例如 `-y`、`--no-pager` 或明确输入参数。
+- `default` profile 仍会拦截明显危险的前缀，例如 `rm -rf /`、`shutdown`、`reboot`、`mkfs`、`dd if=`。
 
-- 每次调用都在新的 subprocess 中运行。
-- 输出会因安全原因被截断。
-- timeout 是硬性执行的：先发 SIGTERM，宽限后再发 SIGKILL。
+## 常见模式 (Playbooks)
+
+### `exec` vs `code-run`
+
+1. 单条命令、短 shell pipeline、现成 CLI 调用，走 `exec`。
+2. 需要临时脚本文件，或希望优先获得 `bwrap sandbox` 的场景，走 `code-run`。
+
+### `exec` vs `tmux`
+
+1. 如果任务需要跨多次调用保留 shell state，切到 `tmux`。
+2. 如果只是普通 one-shot command，不要为了“像终端”而使用 `tmux`。

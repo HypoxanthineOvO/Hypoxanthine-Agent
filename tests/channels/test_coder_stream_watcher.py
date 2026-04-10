@@ -292,3 +292,39 @@ def test_watcher_stops_when_incremental_output_marks_done() -> None:
         await watcher.close()
 
     asyncio.run(_run())
+
+
+def test_watcher_starts_from_initial_cursor_without_replaying_history() -> None:
+    async def _run() -> None:
+        pushed: list[Message] = []
+        service = FakeWatcherService()
+        service.incremental_output_supported = True
+        service.status_sequences["task-1"] = [
+            {"task_id": "task-1", "status": "running"},
+            {"task_id": "task-1", "status": "completed"},
+        ]
+        service.output_sequences["task-1"] = [
+            {"cursor": "cursor-3", "lines": ["new line"], "done": False},
+            {"cursor": "cursor-3", "lines": [], "done": False},
+        ]
+        service.attached_tasks["s1"] = "task-1"
+
+        async def capture(message: Message) -> None:
+            pushed.append(message)
+
+        watcher = CoderStreamWatcher(
+            coder_task_service=service,
+            push_callback=capture,
+            poll_interval_seconds=0.01,
+            message_char_limit=800,
+        )
+
+        await watcher.start(task_id="task-1", session_id="s1", initial_cursor="cursor-2")
+        await asyncio.sleep(0.05)
+
+        assert service.output_calls[0] == ("task-1", "cursor-2")
+        assert any("new line" in str(message.text) for message in pushed)
+
+        await watcher.close()
+
+    asyncio.run(_run())
