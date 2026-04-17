@@ -305,7 +305,7 @@ def test_screenshot_push_stored(tmp_path) -> None:
         lines = index_path.read_text(encoding="utf-8").splitlines()
         assert lines == [
             json.dumps(
-                {"timestamp": "2026-03-26T13:05:00Z", "idle": False, "path": "13-05-00.jpg"},
+                {"timestamp": "2026-03-26T21:05:00+08:00", "idle": False, "path": "13-05-00.jpg"},
                 ensure_ascii=False,
             )
         ]
@@ -357,7 +357,7 @@ def test_screenshot_push_idle(tmp_path) -> None:
         index_path = day_dir / "index.jsonl"
         assert index_path.read_text(encoding="utf-8").splitlines() == [
             json.dumps(
-                {"timestamp": "2026-03-26T13:10:00Z", "idle": True, "path": None},
+                {"timestamp": "2026-03-26T21:10:00+08:00", "idle": True, "path": None},
                 ensure_ascii=False,
             )
         ]

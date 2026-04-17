@@ -15,6 +15,7 @@ from typing_extensions import deprecated
 
 from hypo_agent.channels.onebot11 import parse_onebot_private_message
 from hypo_agent.channels.qq_adapter import QQAdapter
+from hypo_agent.core.channel_progress import summarize_channel_progress_event
 from hypo_agent.core.delivery import DeliveryResult, combine_delivery_results, ensure_delivery_result
 from hypo_agent.core.time_utils import unix_seconds_to_utc_datetime, utc_now
 from hypo_agent.core.uploads import build_upload_path, get_uploads_dir, guess_mime_type, sanitize_upload_filename
@@ -142,8 +143,26 @@ class QQChannelService:
         return online if isinstance(online, bool) else None
 
     async def _run_pipeline_for_user(self, *, user_id: str, inbound: Message, pipeline: Any) -> None:
+        prelude_sent = False
+
         async def emit(event: dict[str, Any]) -> None:
+            nonlocal prelude_sent
             event_type = str(event.get("type") or "")
+            text, prelude_sent = summarize_channel_progress_event(event, prelude_sent=prelude_sent)
+            if text:
+                await self.adapter.send_message(
+                    user_id=user_id,
+                    message=Message(
+                        text=text,
+                        sender="assistant",
+                        session_id=inbound.session_id,
+                        channel="qq",
+                        sender_id=user_id,
+                    ),
+                )
+                if callable(self._on_message_sent):
+                    self._on_message_sent()
+                return
             if event_type == "error":
                 error_message = str(event.get("message") or "处理失败，请稍后重试")
                 await self.adapter.send_message(
@@ -166,7 +185,15 @@ class QQChannelService:
                 await result
             return
 
-        async for event in pipeline.stream_reply(inbound):
+        stream_reply = getattr(pipeline, "stream_reply")
+        stream_kwargs: dict[str, Any] = {}
+        try:
+            signature = inspect.signature(stream_reply)
+        except (TypeError, ValueError):
+            signature = None
+        if signature is not None and "event_emitter" in signature.parameters:
+            stream_kwargs["event_emitter"] = emit
+        async for event in stream_reply(inbound, **stream_kwargs):
             await emit(event)
 
     def _resolve_inbound_timestamp(self, payload: dict[str, Any]) -> object:

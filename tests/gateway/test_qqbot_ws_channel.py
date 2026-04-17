@@ -32,6 +32,34 @@ class QueuePipelineStub:
             yield {}
 
 
+class ProgressQueuePipelineStub(QueuePipelineStub):
+    async def enqueue_user_message(self, inbound: Message, *, emit):
+        self.inbounds.append(inbound)
+        await emit(
+            {
+                "type": "pipeline_stage",
+                "stage": "preprocessing",
+                "detail": "正在分析你的消息...",
+                "session_id": inbound.session_id,
+            }
+        )
+        await emit(
+            {
+                "type": "tool_call_start",
+                "tool_name": "web_search",
+                "tool_call_id": "call-1",
+                "session_id": inbound.session_id,
+            }
+        )
+        await emit(
+            {
+                "type": "assistant_done",
+                "sender": "assistant",
+                "session_id": inbound.session_id,
+            }
+        )
+
+
 class FakeConnection:
     def __init__(self, messages: list[dict[str, Any]], *, pause_after: float = 0.0) -> None:
         self._messages = [json.dumps(item) for item in messages]
@@ -301,4 +329,65 @@ def test_qqbot_ws_client_invalid_session_clears_resume_state(monkeypatch) -> Non
 
     assert client.session_id is None
     assert client.seq is None
+
+
+
+
+def test_qqbot_ws_client_suppresses_mechanical_progress_events(monkeypatch) -> None:
+    clear_qqbot_token_cache()
+    service = _service()
+    pipeline = ProgressQueuePipelineStub()
+    pushed: list[Message] = []
+
+    async def fake_send_message(message: Message):
+        pushed.append(message)
+        return None
+
+    service.send_message = fake_send_message  # type: ignore[method-assign]
+    connection = FakeConnection(
+        [
+            {"op": 10, "d": {"heartbeat_interval": 60000}},
+            {"op": 0, "t": "READY", "s": 1, "d": {"session_id": "session-1"}},
+            {
+                "op": 0,
+                "t": "C2C_MESSAGE_CREATE",
+                "s": 2,
+                "d": {
+                    "id": "msg-001",
+                    "content": "<@!1029384756> 你好",
+                    "timestamp": "2026-03-26T10:00:00+08:00",
+                    "author": {"user_openid": "OPENID-C2C-001"},
+                },
+            },
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/getAppAccessToken"):
+            return httpx.Response(200, json={"access_token": "token-1", "expires_in": 7200})
+        if request.url.path.endswith("/gateway"):
+            return httpx.Response(200, json={"url": "wss://gateway.qq.test"})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    transport = httpx.MockTransport(handler)
+
+    class MockAsyncClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("hypo_agent.channels.qq_bot_channel.httpx.AsyncClient", MockAsyncClient)
+    monkeypatch.setattr(
+        "hypo_agent.gateway.qqbot_ws_client.websockets.connect",
+        lambda url, *args, **kwargs: connection,
+    )
+
+    client = QQBotWebSocketClient(
+        service_getter=lambda: service,
+        pipeline_getter=lambda: pipeline,
+    )
+
+    asyncio.run(client.run_once())
+
+    assert pushed == []
 

@@ -21,12 +21,17 @@ class ApiClientStub:
     def __init__(self) -> None:
         self.reply_calls: list[dict] = []
         self.create_calls: list[dict] = []
+        self.upload_image_calls: list[bytes] = []
 
     def reply(self, payload: dict) -> None:
         self.reply_calls.append(payload)
 
     def create(self, payload: dict) -> None:
         self.create_calls.append(payload)
+
+    def upload_image(self, payload: bytes) -> str:
+        self.upload_image_calls.append(payload)
+        return f"img_{len(self.upload_image_calls)}"
 
 
 def _message_event(
@@ -158,6 +163,42 @@ def test_feishu_channel_pushes_proactive_message_to_mapped_chat() -> None:
     asyncio.run(_run())
 
 
+def test_feishu_channel_pushes_image_attachments_for_proactive_message(tmp_path) -> None:
+    async def _run() -> None:
+        queue = QueueStub()
+        api_client = ApiClientStub()
+        image_path = tmp_path / "wewe.png"
+        image_path.write_bytes(b"fake-png")
+        channel = FeishuChannel(
+            app_id="app-id",
+            app_secret="app-secret",
+            message_queue=queue,
+            api_client=api_client,
+        )
+        channel.bind_chat_session(chat_id="oc_chat_123", session_id="main")
+
+        result = await channel.push_proactive(
+            Message(
+                text="请扫码登录 WeWe RSS。",
+                sender="assistant",
+                session_id="main",
+                channel="feishu",
+                attachments=[{"type": "image", "url": str(image_path), "filename": "wewe.png"}],
+                message_tag="tool_status",
+                metadata={"feishu": {"chat_id": "oc_chat_123"}},
+            )
+        )
+
+        assert result.success is True
+        assert api_client.upload_image_calls == [b"fake-png"]
+        assert len(api_client.create_calls) == 2
+        assert api_client.create_calls[0]["msg_type"] == "interactive"
+        assert api_client.create_calls[1]["msg_type"] == "image"
+        assert json.loads(api_client.create_calls[1]["content"]) == {"image_key": "img_1"}
+
+    asyncio.run(_run())
+
+
 def test_feishu_channel_skips_ephemeral_tool_status_pushes() -> None:
     async def _run() -> None:
         queue = QueueStub()
@@ -251,5 +292,26 @@ def test_feishu_channel_inbound_message_relays_through_channel_policy() -> None:
 
         assert qq_deliveries == ["[飞书] 同步一下"]
         assert weixin_deliveries == ["[飞书] 同步一下"]
+
+    asyncio.run(_run())
+
+
+
+def test_feishu_channel_emit_suppresses_mechanical_progress_for_heavy_tool() -> None:
+    async def _run() -> None:
+        queue = QueueStub()
+        api_client = ApiClientStub()
+        channel = FeishuChannel(
+            app_id="app-id",
+            app_secret="app-secret",
+            message_queue=queue,
+            api_client=api_client,
+        )
+
+        emit = channel._make_emit_callback("oc_chat_123")
+        await emit({"type": "pipeline_stage", "stage": "preprocessing", "detail": "正在分析你的消息..."})
+        await emit({"type": "tool_call_start", "tool_name": "web_search", "tool_call_id": "call-1"})
+
+        assert api_client.create_calls == []
 
     asyncio.run(_run())

@@ -22,6 +22,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import httpx
 import structlog
 
+from hypo_agent.core.channel_progress import summarize_channel_progress_event
 from hypo_agent.core.delivery import DeliveryResult
 from hypo_agent.core.qq_renderer import QQRenderer
 from hypo_agent.core.uploads import build_upload_path
@@ -466,7 +467,30 @@ class QQBotChannelService:
         inbound: Message,
         pipeline: Any,
     ) -> None:
+        prelude_sent = False
+
         async def emit(event: dict[str, Any]) -> None:
+            nonlocal prelude_sent
+            text, prelude_sent = summarize_channel_progress_event(event, prelude_sent=prelude_sent)
+            if text:
+                await self.send_message(
+                    Message(
+                        text=text,
+                        sender="assistant",
+                        session_id=inbound.session_id,
+                        channel="qq",
+                        sender_id=openid,
+                        metadata={
+                            "qq": {
+                                "backend": "qq_bot",
+                                "openid": openid,
+                                "guild_id": guild_id,
+                                "msg_id": inbound.metadata.get("qq", {}).get("msg_id"),
+                            }
+                        },
+                    )
+                )
+                return
             if str(event.get("type") or "") != "error":
                 return
             error_message = str(event.get("message") or "处理失败，请稍后重试")
@@ -495,7 +519,15 @@ class QQBotChannelService:
                 await result
             return
 
-        async for event in pipeline.stream_reply(inbound):
+        stream_reply = getattr(pipeline, "stream_reply")
+        stream_kwargs: dict[str, Any] = {}
+        try:
+            signature = inspect.signature(stream_reply)
+        except (TypeError, ValueError):
+            signature = None
+        if signature is not None and "event_emitter" in signature.parameters:
+            stream_kwargs["event_emitter"] = emit
+        async for event in stream_reply(inbound, **stream_kwargs):
             await emit(event)
 
     async def _resolve_openid(

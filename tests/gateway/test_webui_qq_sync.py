@@ -76,6 +76,8 @@ def test_webui_sender_syncs_full_messages_to_other_webui_clients(tmp_path: Path)
             sender.send_json({"text": "hello from web", "sender": "user", "session_id": "main"})
 
             first = sender.receive_json()
+            while first["type"] == "pipeline_stage":
+                first = sender.receive_json()
             second = sender.receive_json()
             peer_first = peer.receive_json()
             peer_second = peer.receive_json()

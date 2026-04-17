@@ -31,6 +31,7 @@ class FakeClient:
         self._updates = list(updates or [])
         self.closed = False
         self.send_typing_calls: list[tuple[str, int]] = []
+        self.send_message_calls: list[tuple[str, str, str]] = []
         self.download_media_error: Exception | None = None
 
     async def get_updates(self) -> list[dict]:
@@ -44,6 +45,11 @@ class FakeClient:
 
     async def send_typing(self, user_id: str, status: int = 1) -> None:
         self.send_typing_calls.append((user_id, status))
+
+    async def send_message(self, to_user_id: str, text: str, context_token: str = "", **kwargs) -> dict[str, object]:
+        del kwargs
+        self.send_message_calls.append((to_user_id, text, context_token))
+        return {"ret": 0}
 
     async def download_media(self, url: str) -> bytes:
         del url
@@ -328,5 +334,27 @@ def test_weixin_channel_falls_back_when_image_download_fails() -> None:
         assert inbound.text == "[用户发送了一张图片，但下载失败]"
         assert inbound.attachments == []
         assert client.user_id == "alice@im.wechat"
+
+    asyncio.run(_run())
+
+
+
+def test_weixin_emit_callback_suppresses_mechanical_progress_for_heavy_tool() -> None:
+    async def _run() -> None:
+        queue = QueueStub()
+        client = FakeClient()
+        channel = WeixinChannel(
+            config={"token_path": "memory/weixin_auth.json", "allowed_users": []},
+            message_queue=queue,
+            build_message=Message,
+            client_factory=lambda: client,
+        )
+        channel.client = client
+
+        emit = channel._make_emit_callback("alice@im.wechat", context_token="ctx-1")
+        await emit({"type": "pipeline_stage", "stage": "preprocessing", "detail": "正在分析你的消息..."})
+        await emit({"type": "tool_call_start", "tool_name": "web_search", "tool_call_id": "call-1"})
+
+        assert client.send_message_calls == []
 
     asyncio.run(_run())

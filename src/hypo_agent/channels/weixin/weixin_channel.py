@@ -13,6 +13,7 @@ import structlog
 
 from hypo_agent.channels.weixin.crypto import decrypt_media
 from hypo_agent.channels.weixin.ilink_client import ILinkAPIError, ILinkClient, SessionExpiredError
+from hypo_agent.core.channel_progress import summarize_channel_progress_event
 from hypo_agent.core.time_utils import utc_isoformat, utc_now
 from hypo_agent.core.uploads import build_upload_path, get_uploads_dir, guess_mime_type
 from hypo_agent.models import Attachment, Message, WeixinServiceConfig
@@ -246,13 +247,31 @@ class WeixinChannel:
 
     def _make_emit_callback(self, user_id: str, *, context_token: str):
         typing_started = False
+        prelude_sent = False
 
         async def emit(event: dict[str, Any]) -> None:
-            nonlocal typing_started
+            nonlocal typing_started, prelude_sent
             if self.client is None:
                 return
 
             event_type = str(event.get("type") or "").strip().lower()
+            if event_type in {"pipeline_stage", "thinking_delta", "tool_call_start", "react_iteration"} and not typing_started:
+                typing_started = True
+                try:
+                    await self.client.send_typing(user_id, status=1)
+                except _WEIXIN_CHANNEL_ERRORS:
+                    logger.warning("weixin.channel.typing_failed", user_id=user_id, exc_info=True)
+
+            text, prelude_sent = summarize_channel_progress_event(event, prelude_sent=prelude_sent)
+            if text:
+                await self.client.send_message(
+                    to_user_id=user_id,
+                    text=text,
+                    context_token=context_token or None,
+                )
+                self.record_message_sent()
+                return
+
             if event_type == "assistant_chunk" and not typing_started:
                 typing_started = True
                 try:

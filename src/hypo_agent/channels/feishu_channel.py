@@ -1,20 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import inspect
 import json
+from pathlib import Path
 import threading
 from typing import Any, Callable
+from urllib import request as urllib_request
+from urllib.parse import urlparse
 
 import structlog
 
+from hypo_agent.core.channel_progress import summarize_channel_progress_event
 from hypo_agent.core.delivery import DeliveryResult, combine_delivery_results
 from hypo_agent.core.feishu_adapter import FeishuAdapter
 from hypo_agent.core.rich_response import RichResponse
 from hypo_agent.core.time_utils import utc_isoformat, utc_now
 from hypo_agent.core.unified_message import UnifiedMessage, message_from_unified
 from hypo_agent.exceptions import ChannelError
-from hypo_agent.models import Message
+from hypo_agent.models import Attachment, Message
 
 logger = structlog.get_logger("hypo_agent.channels.feishu")
 _FEISHU_RUNTIME_ERRORS = (OSError, RuntimeError, TypeError, ValueError)
@@ -22,11 +28,15 @@ _FEISHU_RUNTIME_ERRORS = (OSError, RuntimeError, TypeError, ValueError)
 try:  # pragma: no cover - optional dependency during tests
     import lark_oapi as lark
     from lark_oapi.api.im.v1 import (
+        CreateImageRequest,
+        CreateImageRequestBody,
         CreateMessageRequest,
         CreateMessageRequestBody,
     )
 except ModuleNotFoundError:  # pragma: no cover - exercised via lazy startup path
     lark = None
+    CreateImageRequest = None
+    CreateImageRequestBody = None
     CreateMessageRequest = None
     CreateMessageRequestBody = None
 
@@ -39,7 +49,7 @@ class FeishuAPIError(ChannelError):
 
 class _LarkMessageClient:
     def __init__(self, *, app_id: str, app_secret: str) -> None:
-        if lark is None or CreateMessageRequest is None:
+        if lark is None or CreateMessageRequest is None or CreateImageRequest is None:
             raise RuntimeError("lark-oapi is required for Feishu channel support")
         self.client = (
             lark.Client.builder()
@@ -68,6 +78,33 @@ class _LarkMessageClient:
                 str(getattr(resp, "msg", "") or "feishu create failed"),
                 code=getattr(resp, "code", None),
             )
+
+    def upload_image(self, payload: bytes, filename: str = "image.png") -> str:
+        if CreateImageRequest is None or CreateImageRequestBody is None:
+            raise RuntimeError("lark-oapi image upload support is unavailable")
+
+        image_file = io.BytesIO(payload)
+        image_file.name = filename
+        req = (
+            CreateImageRequest.builder()
+            .request_body(
+                CreateImageRequestBody.builder()
+                .image_type("message")
+                .image(image_file)
+                .build()
+            )
+            .build()
+        )
+        resp = self.client.im.v1.image.create(req)
+        if not resp.success():
+            raise FeishuAPIError(
+                str(getattr(resp, "msg", "") or "feishu image upload failed"),
+                code=getattr(resp, "code", None),
+            )
+        image_key = str(getattr(getattr(resp, "data", None), "image_key", "") or "").strip()
+        if not image_key:
+            raise FeishuAPIError("feishu image upload missing image_key")
+        return image_key
 
 
 class FeishuChannel:
@@ -139,7 +176,10 @@ class FeishuChannel:
             return DeliveryResult.failed("feishu", error="missing_chat_id")
         if not str(rich_response.text or "").strip() and not rich_response.attachments:
             return DeliveryResult.ok("feishu", segment_count=0)
-        payloads = await self._adapter.format(rich_response)
+        payloads = await self._build_delivery_payloads(
+            text=str(rich_response.text or ""),
+            attachments=list(rich_response.attachments),
+        )
         results: list[DeliveryResult] = []
         for payload in payloads:
             delivery_payload = {
@@ -167,11 +207,9 @@ class FeishuChannel:
             )
             return DeliveryResult.failed("feishu", error="missing_chat_id")
 
-        payloads = await self._adapter.format(
-            RichResponse(
-                text=str(outbound.text or ""),
-                attachments=list(outbound.attachments),
-            )
+        payloads = await self._build_delivery_payloads(
+            text=str(outbound.text or ""),
+            attachments=list(outbound.attachments),
         )
         results: list[DeliveryResult] = []
         for payload in payloads:
@@ -278,8 +316,15 @@ class FeishuChannel:
         )
 
     def _make_emit_callback(self, chat_id: str):
+        prelude_sent = False
+
         async def emit(event: dict[str, Any]) -> None:
+            nonlocal prelude_sent
             event_type = str(event.get("type") or "").strip().lower()
+            text, prelude_sent = summarize_channel_progress_event(event, prelude_sent=prelude_sent)
+            if text:
+                await self.send(chat_id, RichResponse(text=text))
+                return
             if event_type == "error":
                 await self.send(
                     chat_id,
@@ -318,6 +363,104 @@ class FeishuChannel:
             if chat_id:
                 return chat_id
         return self.resolve_chat_id(message.session_id)
+
+    async def _build_delivery_payloads(
+        self,
+        *,
+        text: str,
+        attachments: list[Any],
+    ) -> list[dict[str, str]]:
+        payloads: list[dict[str, str]] = []
+        normalized_text = str(text or "").strip()
+        if normalized_text:
+            payloads.extend(await self._adapter.format(RichResponse(text=normalized_text)))
+
+        for raw_attachment in attachments:
+            attachment = self._normalize_attachment(raw_attachment)
+            if attachment is None:
+                continue
+            if attachment.type != "image":
+                label = attachment.filename or Path(str(attachment.url or "")).name or attachment.type
+                payloads.extend(await self._adapter.format(RichResponse(text=f"[文件] {label}")))
+                continue
+            payloads.append(await self._build_image_payload(attachment))
+
+        return payloads
+
+    def _normalize_attachment(self, raw_attachment: Any) -> Attachment | None:
+        if isinstance(raw_attachment, Attachment):
+            return raw_attachment
+        if isinstance(raw_attachment, dict):
+            try:
+                return Attachment.model_validate(raw_attachment)
+            except Exception:
+                logger.warning("feishu.attachment.invalid", exc_info=True)
+                return None
+        return None
+
+    async def _build_image_payload(self, attachment: Attachment) -> dict[str, str]:
+        try:
+            payload = self._load_attachment_bytes(str(getattr(attachment, "url", "") or "").strip())
+            image_key = await self._upload_image_bytes(
+                payload,
+                filename=self._attachment_filename(attachment),
+            )
+        except FeishuAPIError:
+            raise
+        except _FEISHU_RUNTIME_ERRORS as exc:
+            logger.warning(
+                "feishu.image.upload_failed",
+                attachment_url=str(getattr(attachment, "url", "") or ""),
+                error=str(exc),
+            )
+            fallback = self._attachment_fallback_text(attachment)
+            cards = await self._adapter.format(RichResponse(text=fallback))
+            return cards[0]
+
+        return {
+            "msg_type": "image",
+            "content": json.dumps({"image_key": image_key}, ensure_ascii=False, separators=(",", ":")),
+        }
+
+    async def _upload_image_bytes(self, payload: bytes, *, filename: str) -> str:
+        uploader = self._ensure_api_client().upload_image
+        try:
+            return await asyncio.to_thread(uploader, payload, filename)
+        except TypeError as exc:
+            message = str(exc)
+            if "positional argument" not in message and "keyword argument" not in message:
+                raise
+            return await asyncio.to_thread(uploader, payload)
+
+    def _attachment_filename(self, attachment: Attachment) -> str:
+        filename = str(attachment.filename or "").strip()
+        if filename:
+            return filename
+        raw_url = str(attachment.url or "").strip()
+        if raw_url.startswith("file://"):
+            return Path(urlparse(raw_url).path).name or "image.png"
+        if raw_url.startswith(("http://", "https://")):
+            return Path(urlparse(raw_url).path).name or "image.png"
+        return Path(raw_url).name or "image.png"
+
+    def _attachment_fallback_text(self, attachment: Attachment) -> str:
+        label = self._attachment_filename(attachment)
+        return f"[图片] {label}" if label else "[图片]"
+
+    def _load_attachment_bytes(self, image_ref: str) -> bytes:
+        raw_ref = str(image_ref or "").strip()
+        if not raw_ref:
+            raise ValueError("missing image attachment url")
+        if raw_ref.startswith("data:image/"):
+            _, _, payload = raw_ref.partition(",")
+            return base64.b64decode(payload.encode("utf-8"), validate=False)
+        if raw_ref.startswith(("http://", "https://")):
+            request = urllib_request.Request(url=raw_ref, method="GET")
+            with urllib_request.urlopen(request, timeout=10.0) as response:
+                return response.read()
+        if raw_ref.startswith("file://"):
+            return Path(urlparse(raw_ref).path).expanduser().resolve(strict=False).read_bytes()
+        return Path(raw_ref).expanduser().resolve(strict=False).read_bytes()
 
     async def _send_create_payload(self, payload: dict[str, str]) -> DeliveryResult:
         try:
