@@ -36,7 +36,9 @@ directory_whitelist:
     - ~/.python_history
     - /root
 circuit_breaker:
-  tool_level_max_failures: 10
-  session_level_max_failures: 20
+  tool_level_max_failures: 3
+  session_level_max_failures: 8
   cooldown_seconds: 120
   global_kill_switch: false
+  skill_level_enabled: true
+  skill_level_max_failures: 3

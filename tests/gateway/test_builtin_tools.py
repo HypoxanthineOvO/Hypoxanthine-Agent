@@ -27,7 +27,13 @@ def _runtime_config() -> RuntimeModelConfig:
     return RuntimeModelConfig.model_validate(
         {
             "default_model": "Gemini3Pro",
-            "task_routing": {"chat": "Gemini3Pro", "lightweight": "Gemini3Pro"},
+            "task_routing": {
+                "chat": "Gemini3Pro",
+                "lightweight": "Gemini3Pro",
+                "compression": "Gemini3Pro",
+                "heartbeat": "Gemini3Pro",
+                "reasoning": "Gemini3Pro",
+            },
             "models": {
                 "Gemini3Pro": {
                     "type": "chat",
@@ -131,7 +137,7 @@ def test_build_default_pipeline_exposes_all_builtin_tools_in_schema(
     ]
 
 
-def test_build_default_pipeline_does_not_enable_output_compressor_by_default(
+def test_build_default_pipeline_enables_output_compressor_by_default(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -147,5 +153,6 @@ def test_build_default_pipeline_does_not_enable_output_compressor_by_default(
 
     pipeline = app_module._build_default_pipeline(deps)
 
-    assert deps.output_compressor is None
-    assert pipeline.output_compressor is None
+    assert deps.output_compressor is not None
+    assert pipeline.output_compressor is deps.output_compressor
+    assert deps.output_compressor.router is pipeline.router

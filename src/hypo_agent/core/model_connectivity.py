@@ -7,6 +7,7 @@ from time import perf_counter
 from typing import Any
 
 from hypo_agent.core.config_loader import ResolvedModelConfig
+from hypo_agent.core.model_request_options import build_model_request_kwargs
 
 DEFAULT_PROBE_PROMPT = "Please call the echo tool with text 'hello'"
 DEFAULT_TOOL_CHOICE = "auto"
@@ -75,6 +76,13 @@ async def probe_model(
         kwargs["api_base"] = config.api_base
     if isinstance(config.api_key, str) and config.api_key.strip():
         kwargs["api_key"] = config.api_key
+    kwargs.update(
+        build_model_request_kwargs(
+            model_config=config,
+            litellm_model=config.litellm_model,
+            task_type="chat",
+        )
+    )
 
     start = perf_counter()
     try:

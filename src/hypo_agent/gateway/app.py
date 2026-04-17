@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import inspect
 import os
 from pathlib import Path
+import sqlite3
 from typing import Any
 
 from fastapi import FastAPI
@@ -25,6 +26,7 @@ from hypo_agent.channels.coder import CoderClient, CoderTaskService
 from hypo_agent.channels.coder.coder_stream_watcher import CoderStreamWatcher
 from hypo_agent.channels.coder.coder_webhook import router as coder_webhook_router
 from hypo_agent.channels.feishu_channel import FeishuChannel
+from hypo_agent.channels.info.wewe_rss_client import WeWeRSSClient
 from hypo_agent.channels.probe import ProbeServer, router as probe_ws_router
 from hypo_agent.channels.qq_bot_channel import QQBotChannelService
 from hypo_agent.channels.qq_channel import QQChannelService
@@ -50,11 +52,18 @@ from hypo_agent.core.output_compressor import OutputCompressor
 from hypo_agent.core.pipeline import ChatPipeline
 from hypo_agent.core.persona import PersonaManager
 from hypo_agent.core.scheduler import SchedulerService
+from hypo_agent.core.self_restart import (
+    DEFAULT_RESTART_LOCK_PATH,
+    clear_restart_lock,
+    graceful_restart,
+    read_restart_lock,
+)
 from hypo_agent.core.slash_commands import SlashCommandHandler
 from hypo_agent.core.sop_manager import SopManager
 from hypo_agent.core.skill_manager import SkillManager
 from hypo_agent.core.skill_catalog import SkillCatalog
 from hypo_agent.core.time_utils import utc_isoformat, utc_now
+from hypo_agent.core.wewe_rss_monitor import WeWeRSSMonitorService
 from hypo_agent.gateway.config_api import router as config_api_router
 from hypo_agent.gateway.compressed_api import router as compressed_api_router
 from hypo_agent.gateway.dashboard_api import router as dashboard_api_router
@@ -77,11 +86,13 @@ from hypo_agent.models import (
     QQServiceConfig,
     SecurityConfig,
     SkillOutput,
+    WeWeRSSServiceConfig,
     WeixinServiceConfig,
 )
 from hypo_agent.security import CircuitBreaker, PermissionManager
 from hypo_agent.skills import (
     AgentSearchSkill,
+    AuthSkill,
     CodeRunSkill,
     CoderSkill,
     EmailScannerSkill,
@@ -96,11 +107,32 @@ from hypo_agent.skills import (
     NotionSkill,
     ProbeSkill,
     ReminderSkill,
+    SubscriptionSkill,
     TmuxSkill,
 )
+from hypo_agent.skills.subscription.manager import SubscriptionManager
 
 logger = structlog.get_logger("hypo_agent.gateway.app")
 TEST_MODE_BANNER = "⚠️  HYPO_TEST_MODE enabled — data isolated to test/sandbox/"
+FEISHU_CHAT_BINDING_KEY_PREFIX = "feishu.last_chat_id."
+
+
+def _health_payload(app: FastAPI) -> dict[str, Any]:
+    pipeline = getattr(app.state, "pipeline", None)
+    scheduler = getattr(app.state, "scheduler", None)
+    probe_server = getattr(app.state, "probe_server", None)
+    return {
+        "status": "ok",
+        "runtime_mode": str(getattr(app.state, "runtime_mode", "unknown")),
+        "event_consumer_running": bool(
+            pipeline is not None
+            and getattr(pipeline, "_event_consumer_task", None) is not None
+            and not getattr(pipeline, "_event_consumer_task").done()
+        ),
+        "scheduler_available": scheduler is not None,
+        "probe_server_available": probe_server is not None,
+        "restart_lock_path": str(DEFAULT_RESTART_LOCK_PATH),
+    }
 
 
 def _parse_fixed_times(raw: str) -> list[tuple[int, int]]:
@@ -122,6 +154,11 @@ def _parse_fixed_times(raw: str) -> list[tuple[int, int]]:
     return parsed
 
 
+def _feishu_chat_binding_key(session_id: str) -> str:
+    normalized_session_id = str(session_id or "main").strip() or "main"
+    return f"{FEISHU_CHAT_BINDING_KEY_PREFIX}{normalized_session_id}"
+
+
 @dataclass(slots=True)
 class AppDeps:
     session_memory: SessionMemory
@@ -137,6 +174,7 @@ class AppDeps:
     circuit_breaker: CircuitBreaker | None = None
     permission_manager: PermissionManager | None = None
     heartbeat_service: HeartbeatService | Any | None = None
+    wewe_rss_monitor: WeWeRSSMonitorService | Any | None = None
     memory_gc: MemoryGC | Any | None = None
     coder_client: CoderClient | Any | None = None
     coder_task_service: CoderTaskService | Any | None = None
@@ -191,7 +229,6 @@ def _register_enabled_skills(
     code_run_cfg = per_skill.get("code_run", {}) if isinstance(per_skill, dict) else {}
     reminder_cfg = per_skill.get("reminder", {}) if isinstance(per_skill, dict) else {}
     email_scanner_cfg = per_skill.get("email_scanner", {}) if isinstance(per_skill, dict) else {}
-    coder_cfg = per_skill.get("coder", {}) if isinstance(per_skill, dict) else {}
     info_cfg = per_skill.get("info", {}) if isinstance(per_skill, dict) else {}
     log_inspector_cfg = per_skill.get("log_inspector", {}) if isinstance(per_skill, dict) else {}
     exec_timeout = int(exec_cfg.get("timeout_seconds", default_timeout))
@@ -205,6 +242,8 @@ def _register_enabled_skills(
     notion_skill: Any | None = None
     reminder_skill: Any | None = None
     email_skill: Any | None = None
+    subscription_skill: Any | None = None
+    subscription_manager: SubscriptionManager | None = None
 
     def _register(skill: Any, *, source: str = "config") -> None:
         skill_manager.register(skill, source=source)
@@ -318,6 +357,42 @@ def _register_enabled_skills(
         )
         _register(email_skill)
 
+    if (
+        ("subscription" in enabled_skills or "auth" in enabled_skills)
+        and structured_store is not None
+        and scheduler is not None
+    ):
+        subscription_manager = SubscriptionManager(
+            structured_store=structured_store,
+            scheduler=scheduler,
+            message_queue=message_queue,
+            heartbeat_service=heartbeat_service,
+            secrets_path=skills_config_path.parent / "secrets.yaml",
+        )
+
+    if "subscription" in enabled_skills and structured_store is not None and scheduler is not None:
+        subscription_skill = SubscriptionSkill(
+            manager=subscription_manager
+            if subscription_manager is not None
+            else SubscriptionManager(
+                structured_store=structured_store,
+                scheduler=scheduler,
+                message_queue=message_queue,
+                heartbeat_service=heartbeat_service,
+                secrets_path=skills_config_path.parent / "secrets.yaml",
+            )
+        )
+        _register(subscription_skill)
+
+    if "auth" in enabled_skills and structured_store is not None:
+        _register(
+            AuthSkill(
+                structured_store=structured_store,
+                secrets_path=skills_config_path.parent / "secrets.yaml",
+                subscription_manager=subscription_manager,
+            )
+        )
+
     if "heartbeat_snapshot" in enabled_skills:
         heartbeat_snapshot_skill = HeartbeatSnapshotSkill(
             email_skill=email_skill,
@@ -406,7 +481,7 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
     )
 
     return AppDeps(
-        session_memory=SessionMemory(buffer_limit=20, active_window_days=7),
+        session_memory=SessionMemory(buffer_limit=100, active_window_days=30),
         structured_store=structured_store,
         image_renderer=image_renderer,
         event_queue=event_queue,
@@ -563,6 +638,7 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
         skill_manager=deps.skill_manager,
         coder_task_service=deps.coder_task_service,
         memory_gc=deps.memory_gc,
+        repo_root=get_agent_root(),
     )
     async def _update_persona_memory_tool(
         params: dict[str, Any],
@@ -627,8 +703,13 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
                 _update_persona_memory_tool,
                 source="builtin_persona",
             )
-        except ValueError:
-            pass
+        except ValueError as exc:
+            logger.warning(
+                "app.builtin_tool_register_skipped",
+                tool_name="update_persona_memory",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
     if deps.skill_manager is not None and deps.sop_manager is not None:
         try:
             deps.skill_manager.register_builtin_tool(
@@ -657,8 +738,13 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
                 _save_sop_tool,
                 source="builtin_sop",
             )
-        except ValueError:
-            pass
+        except ValueError as exc:
+            logger.warning(
+                "app.builtin_tool_register_skipped",
+                tool_name="save_sop",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
         try:
             deps.skill_manager.register_builtin_tool(
                 {
@@ -683,19 +769,35 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
                 _search_sop_tool,
                 source="builtin_sop",
             )
-        except ValueError:
-            pass
+        except ValueError as exc:
+            logger.warning(
+                "app.builtin_tool_register_skipped",
+                tool_name="search_sop",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+    if deps.output_compressor is None:
+        deps.output_compressor = OutputCompressor(
+            router=router,
+            threshold_chars=20000,
+            target_chars=8000,
+            hard_threshold_chars=64000,
+            structured_passthrough_chars=20000,
+        )
     return ChatPipeline(
         router=router,
         chat_model=chat_model,
-        heartbeat_chat_model=router.get_model_for_task("lightweight"),
+        heartbeat_chat_model=router.get_model_for_task("heartbeat"),
         session_memory=deps.session_memory,
-        history_window=20,
+        history_window=100,
+        history_token_budget=7000,
         skill_manager=deps.skill_manager,
         structured_store=deps.structured_store,
-        max_react_rounds=15,
+        max_react_rounds=8,
+        max_react_timeout_seconds=120,
         heartbeat_max_react_rounds=4,
-        heartbeat_model_timeout_seconds=25,
+        heartbeat_react_timeout_seconds=180,
+        heartbeat_model_timeout_seconds=45,
         heartbeat_allowed_tools=heartbeat_allowed_tools,
         slash_commands=slash_commands,
         output_compressor=deps.output_compressor,
@@ -912,6 +1014,7 @@ def create_app(
         resolved_deps.probe_server = ProbeServer()
 
     pipeline_instance = pipeline or _build_default_pipeline(resolved_deps)
+    setattr(pipeline_instance, "wewe_rss_monitor", resolved_deps.wewe_rss_monitor)
     _ensure_pipeline_lifecycle_hooks(pipeline_instance)
     _configure_heartbeat_service_timeout(resolved_deps.heartbeat_service, pipeline_instance)
 
@@ -942,6 +1045,7 @@ def create_app(
         refresh_narration_observer()
         if getattr(app.state, "qq_config_dir_snapshot", None) != current_config_snapshot:
             refresh_qq_channel_service()
+        refresh_wewe_rss_monitor()
         refresh_probe_server_config()
         if resolved_deps.probe_server is not None:
             await resolved_deps.probe_server.start()
@@ -986,6 +1090,15 @@ def create_app(
                         resolved_deps.skill_manager is not None
                         and hasattr(resolved_deps.skill_manager, "_skills")
                     ):
+                        notion_skill = resolved_deps.skill_manager._skills.get("notion")
+                        if notion_skill is not None and hasattr(notion_skill, "configure_todo_heartbeat"):
+                            notion_skill.configure_todo_heartbeat(
+                                today_match_mode=getattr(
+                                    tasks_cfg.heartbeat,
+                                    "notion_today_match_mode",
+                                    "cover_today",
+                                )
+                            )
                         email_skill = resolved_deps.skill_manager._skills.get("email_scanner")
                         if email_skill is not None and hasattr(email_skill, "configure_email_store"):
                             email_skill.configure_email_store(
@@ -993,6 +1106,7 @@ def create_app(
                                 retention_days=tasks_cfg.email_store.retention_days,
                             )
                         info_reach_skill = resolved_deps.skill_manager._skills.get("info_reach")
+                        subscription_skill = resolved_deps.skill_manager._skills.get("subscription")
                         if (
                             getattr(tasks_cfg, "hypo_info_digest", None) is not None
                             and info_reach_skill is not None
@@ -1023,6 +1137,34 @@ def create_app(
                                         int(getattr(digest_cfg, "interval_minutes", 480) or 480),
                                         info_reach_skill.run_scheduled_summary,
                                     )
+                        if (
+                            getattr(tasks_cfg, "subscription", None) is not None
+                            and bool(getattr(tasks_cfg.subscription, "enabled", False))
+                            and subscription_skill is not None
+                            and hasattr(subscription_skill, "manager")
+                            and hasattr(subscription_skill.manager, "restore_enabled_subscriptions")
+                        ):
+                            await subscription_skill.manager.restore_enabled_subscriptions()
+                        if (
+                            getattr(tasks_cfg, "wewe_rss", None) is not None
+                            and bool(getattr(tasks_cfg.wewe_rss, "enabled", False))
+                            and getattr(app.state, "wewe_rss_monitor", None) is not None
+                        ):
+                            if (
+                                getattr(tasks_cfg.wewe_rss, "mode", "interval") == "cron"
+                                and hasattr(resolved_deps.scheduler, "register_cron_job")
+                            ):
+                                resolved_deps.scheduler.register_cron_job(
+                                    "wewe_rss",
+                                    str(getattr(tasks_cfg.wewe_rss, "cron", "") or "").strip(),
+                                    app.state.wewe_rss_monitor.check_accounts,
+                                )
+                            elif hasattr(resolved_deps.scheduler, "register_interval_job"):
+                                resolved_deps.scheduler.register_interval_job(
+                                    "wewe_rss",
+                                    int(getattr(tasks_cfg.wewe_rss, "interval_minutes", 10) or 10),
+                                    app.state.wewe_rss_monitor.check_accounts,
+                                )
                     if (
                         tasks_cfg.heartbeat.enabled
                         and resolved_deps.heartbeat_service is not None
@@ -1066,6 +1208,7 @@ def create_app(
         await app.state.agent_watchdog.start()
         app.state.directory_index_task = asyncio.create_task(run_directory_index_refresh())
         app.state.email_cache_warmup_task = asyncio.create_task(run_email_cache_warmup())
+        await run_post_restart_health_check()
         try:
             yield
         finally:
@@ -1092,6 +1235,9 @@ def create_app(
             await app.state.pipeline.stop_event_consumer()
             if resolved_deps.scheduler is not None:
                 await resolved_deps.scheduler.stop()
+            wewe_rss_monitor = getattr(app.state, "wewe_rss_monitor", None)
+            if wewe_rss_monitor is not None and hasattr(wewe_rss_monitor, "close"):
+                await wewe_rss_monitor.close()
             if resolved_deps.probe_server is not None:
                 await resolved_deps.probe_server.stop()
             if image_renderer is not None and callable(getattr(image_renderer, "shutdown", None)):
@@ -1142,6 +1288,7 @@ def create_app(
     app.state.event_queue = resolved_deps.event_queue
     app.state.scheduler = resolved_deps.scheduler
     app.state.heartbeat_service = resolved_deps.heartbeat_service
+    app.state.wewe_rss_monitor = resolved_deps.wewe_rss_monitor
     app.state.agent_watchdog = None
     app.state.memory_gc = resolved_deps.memory_gc
     app.state.coder_client = resolved_deps.coder_client
@@ -1214,6 +1361,10 @@ def create_app(
         is_external=False,
     )
 
+    @app.get("/api/health")
+    async def api_health() -> dict[str, Any]:
+        return _health_payload(app)
+
     def qq_runtime_connected() -> bool:
         service = getattr(app.state, "qq_channel_service", None)
         qq_bot_service = getattr(app.state, "qq_bot_channel_service", None)
@@ -1265,29 +1416,32 @@ def create_app(
         if not text:
             return
 
+        timestamp = str(payload.get("timestamp") or utc_isoformat(utc_now()))
         event_payload = {
             "type": "narration",
             "text": text,
             "session_id": session_id,
-            "timestamp": str(payload.get("timestamp") or utc_isoformat(utc_now())),
+            "timestamp": timestamp,
         }
         await push_ws_message(event_payload)
 
-        if str(origin_channel or "").strip().lower() != "qq":
+        target_channel = str(origin_channel or "").strip().lower()
+        if target_channel not in {"qq", "weixin", "feishu"}:
             return
-        service = getattr(app.state, "qq_channel_service", None)
-        if service is None or not qq_runtime_connected():
-            return
-        if not callable(getattr(service, "send_message", None)):
-            return
-        await service.send_message(
-            Message(
-                text=text,
-                sender="assistant",
-                session_id=session_id,
-                channel="qq",
-                sender_id=sender_id,
-            )
+
+        message = Message(
+            text=text,
+            sender="assistant",
+            session_id=session_id,
+            channel=target_channel,
+            sender_id=sender_id,
+            metadata={"target_channels": [target_channel], "ephemeral": True},
+        )
+        await app.state.channel_relay.relay_message(
+            message,
+            message_type="assistant_message",
+            origin_channel="system",
+            exclude_client_ids=set(),
         )
 
     def refresh_narration_observer() -> None:
@@ -1417,6 +1571,40 @@ def create_app(
             allowed_users=len(service.allowed_users),
         )
 
+    def load_persisted_feishu_chat_id(session_id: str = "main") -> str | None:
+        store = getattr(app.state, "structured_store", None)
+        db_path = Path(getattr(store, "db_path", "")).resolve(strict=False)
+        if not str(db_path).strip() or not db_path.exists():
+            return None
+        try:
+            with sqlite3.connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT pref_value FROM preferences WHERE pref_key = ?",
+                    (_feishu_chat_binding_key(session_id),),
+                ).fetchone()
+        except sqlite3.Error:
+            logger.warning(
+                "feishu.channel.binding_restore_failed",
+                session_id=session_id,
+                db_path=str(db_path),
+                exc_info=True,
+            )
+            return None
+        if row is None:
+            return None
+        chat_id = str(row[0] or "").strip()
+        return chat_id or None
+
+    async def persist_feishu_chat_id(chat_id: str, session_id: str = "main") -> None:
+        normalized_chat_id = str(chat_id or "").strip()
+        if not normalized_chat_id:
+            return
+        store = getattr(app.state, "structured_store", None)
+        setter = getattr(store, "set_preference", None)
+        if not callable(setter):
+            return
+        await setter(_feishu_chat_binding_key(session_id), normalized_chat_id)
+
     def refresh_feishu_channel() -> None:
         app.state.channel_dispatcher.unregister("feishu")
         config_dir = Path(getattr(app.state, "config_dir", Path("config")))
@@ -1447,6 +1635,14 @@ def create_app(
                 inbound_callback_getter=lambda: getattr(app.state.pipeline, "on_proactive_message", None),
             )
             resolved_deps.feishu_channel = channel
+        persisted_chat_id = load_persisted_feishu_chat_id("main")
+        if persisted_chat_id:
+            channel.bind_chat_session(chat_id=persisted_chat_id, session_id="main")
+            logger.info(
+                "feishu.channel.binding_restored",
+                session_id="main",
+                chat_id=persisted_chat_id,
+            )
         app.state.feishu_channel = channel
         app.state.channel_dispatcher.register(
             "feishu",
@@ -1475,6 +1671,55 @@ def create_app(
         if weixin_cfg is None or not weixin_cfg.enabled:
             return None
         return weixin_cfg
+
+    def _load_enabled_wewe_rss_service_config(config_dir: Path) -> WeWeRSSServiceConfig | None:
+        secrets_path = config_dir / "secrets.yaml"
+        try:
+            secrets = load_secrets_config(secrets_path)
+        except FileNotFoundError:
+            return None
+        except Exception:
+            logger.exception("wewe_rss.config.load_failed", path=str(secrets_path))
+            return None
+
+        services = secrets.services
+        wewe_cfg = services.wewe_rss if services is not None else None
+        if wewe_cfg is None or not wewe_cfg.enabled:
+            return None
+        if not str(wewe_cfg.base_url or "").strip():
+            return None
+        if not str(wewe_cfg.auth_code or "").strip():
+            return None
+        return wewe_cfg
+
+    def refresh_wewe_rss_monitor() -> None:
+        config_dir = Path(getattr(app.state, "config_dir", Path("config")))
+        if resolved_deps.wewe_rss_monitor is not None:
+            app.state.wewe_rss_monitor = resolved_deps.wewe_rss_monitor
+            setattr(app.state.pipeline, "wewe_rss_monitor", resolved_deps.wewe_rss_monitor)
+            return
+        wewe_cfg = _load_enabled_wewe_rss_service_config(config_dir)
+        if wewe_cfg is None:
+            app.state.wewe_rss_monitor = None
+            setattr(app.state.pipeline, "wewe_rss_monitor", None)
+            logger.info("wewe_rss.monitor.disabled", config_dir=str(config_dir))
+            return
+        client = WeWeRSSClient(
+            base_url=wewe_cfg.base_url,
+            auth_code=wewe_cfg.auth_code,
+        )
+        monitor = WeWeRSSMonitorService(
+            client=client,
+            structured_store=resolved_deps.structured_store,
+            event_queue=resolved_deps.event_queue,
+            qr_dir=get_memory_dir() / "wewe_rss_qr",
+            login_timeout_seconds=wewe_cfg.login_timeout_seconds,
+            poll_interval_seconds=wewe_cfg.poll_interval_seconds,
+        )
+        resolved_deps.wewe_rss_monitor = monitor
+        app.state.wewe_rss_monitor = monitor
+        setattr(app.state.pipeline, "wewe_rss_monitor", monitor)
+        logger.info("wewe_rss.monitor.enabled", base_url=wewe_cfg.base_url)
 
     def refresh_weixin_channel() -> None:
         app.state.channel_dispatcher.unregister("weixin")
@@ -1647,6 +1892,12 @@ def create_app(
             and str(message.sender or "").strip().lower() not in {"user", "assistant"}
         ):
             resolved_deps.session_memory.append(message)
+        normalized_message_type = str(message_type or "").strip().lower()
+        if normalized_message_type == "user_message" and str(message.channel or "").strip().lower() == "feishu":
+            feishu_meta = message.metadata.get("feishu") if isinstance(message.metadata, dict) else None
+            chat_id = str(feishu_meta.get("chat_id") or "").strip() if isinstance(feishu_meta, dict) else ""
+            if chat_id:
+                await persist_feishu_chat_id(chat_id, session_id=message.session_id)
         await app.state.channel_relay.relay_message(
             message,
             message_type=message_type,
@@ -1656,8 +1907,101 @@ def create_app(
             exclude_client_ids=exclude_client_ids,
         )
 
+    async def emit_restart_event(event: dict[str, Any]) -> None:
+        await push_ws_message(event)
+
+    async def restart_handler(*, reason: str, force: bool = False) -> str:
+        return await graceful_restart(
+            reason,
+            emit_restart_event,
+            force=force,
+        )
+
+    def register_restart_builtin_tool() -> None:
+        skill_manager = getattr(app.state, "skill_manager", None)
+        register_builtin = getattr(skill_manager, "register_builtin_tool", None)
+        if skill_manager is None or not callable(register_builtin):
+            return
+
+        async def _restart_service_tool(
+            params: dict[str, Any],
+            *,
+            session_id: str | None = None,
+        ) -> SkillOutput:
+            del session_id
+            if not bool(params.get("user_confirmed")):
+                return SkillOutput(status="success", result={"message": "请先确认"})
+            message = await restart_handler(
+                reason=str(params.get("reason") or "tool requested restart"),
+                force=bool(params.get("force", False)),
+            )
+            return SkillOutput(status="success", result={"message": message})
+
+        try:
+            register_builtin(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "restart_service",
+                        "description": "Restart the Hypo-Agent service after explicit user confirmation.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "reason": {"type": "string"},
+                                "user_confirmed": {"type": "boolean"},
+                                "force": {"type": "boolean"},
+                            },
+                            "required": ["reason", "user_confirmed"],
+                        },
+                    },
+                },
+                _restart_service_tool,
+                source="builtin_restart",
+            )
+        except ValueError as exc:
+            logger.warning(
+                "app.builtin_tool_register_skipped",
+                tool_name="restart_service",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+    async def run_post_restart_health_check() -> None:
+        lock_payload = read_restart_lock(DEFAULT_RESTART_LOCK_PATH)
+        if lock_payload is None:
+            return
+        payload = _health_payload(app)
+        ok = str(payload.get("status") or "").strip().lower() == "ok"
+        if ok:
+            clear_restart_lock(DEFAULT_RESTART_LOCK_PATH)
+            text = "✅ 重启成功"
+        else:
+            text = "❌ 重启后仍有问题"
+        await on_proactive_message(
+            Message(
+                text=text,
+                sender="system",
+                session_id="main",
+                channel="system",
+                message_tag="tool_status",
+                metadata={
+                    "ephemeral": False,
+                    "source": "restart_health_check",
+                    "restart_reason": lock_payload.get("reason"),
+                },
+            ),
+            message_type="assistant_done",
+            origin_channel="system",
+        )
+
     app.state.push_ws_message = push_ws_message
+    app.state.restart_handler = restart_handler
+    app.state.run_post_restart_health_check = run_post_restart_health_check
     setattr(app.state.pipeline, "on_proactive_message", on_proactive_message)
+    if getattr(app.state.pipeline, "slash_commands", None) is not None:
+        app.state.pipeline.slash_commands.restart_handler = restart_handler
+        app.state.pipeline.slash_commands.repo_root = get_agent_root()
+    register_restart_builtin_tool()
     if resolved_deps.coder_task_service is not None:
         resolved_deps.coder_stream_watcher = CoderStreamWatcher(
             coder_task_service=resolved_deps.coder_task_service,
@@ -1722,6 +2066,10 @@ def create_app(
         app.state.persona_manager = deps.persona_manager
         _ensure_pipeline_lifecycle_hooks(app.state.pipeline)
         setattr(app.state.pipeline, "on_proactive_message", on_proactive_message)
+        if getattr(app.state.pipeline, "slash_commands", None) is not None:
+            app.state.pipeline.slash_commands.restart_handler = restart_handler
+            app.state.pipeline.slash_commands.repo_root = get_agent_root()
+        register_restart_builtin_tool()
         if deps.coder_task_service is not None:
             deps.coder_stream_watcher = CoderStreamWatcher(
                 coder_task_service=deps.coder_task_service,

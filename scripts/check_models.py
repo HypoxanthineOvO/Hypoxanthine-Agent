@@ -51,6 +51,13 @@ PROBE_TOOLS: list[dict[str, Any]] = [
 ]
 
 
+def _build_request_kwargs(*, litellm_model: str | None) -> dict[str, Any]:
+    model_name = str(litellm_model or "").strip().lower()
+    if model_name.startswith("ollama_chat/"):
+        return {"think": False}
+    return {}
+
+
 @dataclass(slots=True)
 class ProviderSecrets:
     api_base: str | None
@@ -311,6 +318,7 @@ async def _probe_chat_model(
                     tools=PROBE_TOOLS,
                     tool_choice="auto",
                     max_tokens=64,
+                    **_build_request_kwargs(litellm_model=spec.litellm_model),
                 )
             else:
                 response = await acompletion(
@@ -319,6 +327,7 @@ async def _probe_chat_model(
                     api_key=spec.api_key,
                     messages=PING_MESSAGES,
                     max_tokens=16,
+                    **_build_request_kwargs(litellm_model=spec.litellm_model),
                 )
     except Exception as exc:
         latency_ms = (perf_counter() - start) * 1000

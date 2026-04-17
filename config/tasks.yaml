@@ -1,18 +1,13 @@
 scheduler:
   tick_interval_seconds: 60
   max_concurrent_tasks: 2
-retry_policy:
-  max_retries: 5
-  backoff_seconds: 10
-task_defaults:
-  timeout_seconds: 600
-  priority: normal
 heartbeat:
   enabled: true
   mode: cron
   # Every hour except quiet hours 02:00-07:59
   cron: "0 0-3,8-23 * * *"
   max_rounds: 4
+  notion_today_match_mode: cover_today
 email_store:
   enabled: true
   max_entries: 5000
@@ -22,3 +17,8 @@ hypo_info_digest:
   enabled: true
   interval_minutes: 480
   time: "09:00,21:00"
+subscription:
+  enabled: true
+wewe_rss:
+  enabled: true
+  interval_minutes: 10

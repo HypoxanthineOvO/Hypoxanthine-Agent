@@ -54,7 +54,7 @@ default-groups = ["dev"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-ra -q"
+addopts = "-ra -q -m 'not integration'"
 markers = [
   "unit: pure unit tests without external I/O or TestClient lifecycles",
   "integration: tests that exercise TestClient, in-process services, or multi-component flows",

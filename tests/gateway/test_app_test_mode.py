@@ -147,6 +147,8 @@ def test_test_mode_websocket_writes_session_and_db_to_sandbox(
         with client.websocket_connect("/ws?token=test-token") as ws:
             ws.send_json({"text": "你好", "sender": "user", "session_id": "main"})
             first = ws.receive_json()
+            while first["type"] == "pipeline_stage":
+                first = ws.receive_json()
             second = ws.receive_json()
 
     assert first["type"] == "assistant_chunk"

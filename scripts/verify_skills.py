@@ -99,6 +99,9 @@ MATCH_CASES: list[MatchCase] = [
     MatchCase("python-project-dev", "跑一下 pytest 看看测试结果", "exec_command"),
     MatchCase("hypo-agent-ops", "用测试模式跑一下 smoke test", "exec_command"),
     MatchCase("host-inspection", "服务器磁盘和内存现在什么情况", "exec_command"),
+    MatchCase("weather", "帮我查一下北京天气", "exec_command"),
+    MatchCase("agent-browser", "打开这个网页并点一下页面里的按钮", "exec_command"),
+    MatchCase("github-ops", "帮我看看这个仓库有哪些 open PR", "exec_command"),
     MatchCase("log-inspector", "查看最近的错误日志", "read_file"),
     MatchCase("agent-search", "搜索一下 Claude 4 最新消息", "web_search"),
     MatchCase("info-portal", "今天有什么 AI 新闻", "info_today"),
@@ -170,7 +173,7 @@ def build_pipeline(repo_root: Path, catalog: SkillCatalog) -> ChatPipeline:
 
 
 def verify_repo(repo_root: Path) -> VerificationReport:
-    catalog = SkillCatalog(repo_root / "skills")
+    catalog = SkillCatalog(repo_root / "skills", check_cli_availability=True)
     catalog.scan()
     manifests = catalog.list_manifests()
     runtime_manager = build_runtime_skill_manager(repo_root)
@@ -201,6 +204,20 @@ def verify_repo(repo_root: Path) -> VerificationReport:
         profile_ok = manifest.exec_profile is None or manifest.exec_profile in exec_profiles
         if not profile_ok:
             issues.append(f"missing exec profile: {manifest.exec_profile}")
+
+        if manifest.io_format and manifest.io_format not in {"json-stdio", "text"}:
+            issues.append(f"invalid io_format: {manifest.io_format}")
+
+        if manifest.exec_profile == "cli-json":
+            if not manifest.cli_package:
+                issues.append("missing cli_package for cli-json skill")
+            if not manifest.cli_commands:
+                issues.append("missing cli_commands for cli-json skill")
+            if not manifest.io_format:
+                issues.append("missing io_format for cli-json skill")
+
+        if not manifest.available:
+            issues.append(f"unavailable: {manifest.unavailable_reason}")
 
         body_ok = len(body.strip()) > 100
         if not body_ok:

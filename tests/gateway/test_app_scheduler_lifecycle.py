@@ -288,6 +288,50 @@ heartbeat:
         assert scheduler.cron_jobs == [("heartbeat", "*/10 * * * *")]
 
 
+def test_app_registers_wewe_rss_job_from_tasks_config(tmp_path) -> None:
+    scheduler = RecordingScheduler()
+    pipeline = RecordingPipeline()
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "tasks.yaml").write_text(
+        """
+heartbeat:
+  enabled: false
+wewe_rss:
+  enabled: true
+  interval_minutes: 7
+""".strip(),
+        encoding="utf-8",
+    )
+    (config_dir / "secrets.yaml").write_text(
+        """
+providers: {}
+services:
+  wewe_rss:
+    enabled: true
+    base_url: "http://10.15.88.94:4000"
+    auth_code: "test-auth-code"
+    login_timeout_seconds: 180
+    poll_interval_seconds: 3
+""".strip(),
+        encoding="utf-8",
+    )
+
+    deps = AppDeps(
+        session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+        structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        scheduler=scheduler,
+        event_queue=DummyEventQueue(),
+    )
+    app = create_app(auth_token="test-token", pipeline=pipeline, deps=deps)
+    app.state.config_dir = config_dir
+
+    with TestClient(app):
+        assert ("wewe_rss", 7) in scheduler.interval_jobs
+        assert getattr(app.state, "wewe_rss_monitor", None) is not None
+
+
 def test_app_registers_hypo_info_digest_jobs_from_tasks_config(tmp_path) -> None:
     scheduler = RecordingScheduler()
     pipeline = RecordingPipeline()

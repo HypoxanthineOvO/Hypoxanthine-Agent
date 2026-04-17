@@ -1,8 +1,20 @@
 [Unit]
 Description=Hypo-Agent FastAPI Gateway
 After=network.target
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Service]
+# 给旧进程更多时间优雅退出
+TimeoutStopSec=30
+
+# 如果 SIGTERM 没杀死，30 秒后发 SIGKILL
+KillMode=mixed
+KillSignal=SIGTERM
+
+# 启动前确保端口释放
+ExecStartPre=/bin/sh -c 'while ss -ltnp | grep -q :8765; do sleep 1; done'
+
 Type=simple
 User=heyx
 Group=heyx
@@ -13,6 +25,7 @@ Environment=HYPO_MEMORY_DIR=/home/heyx/Hypo-Agent/memory
 ExecStart=/usr/bin/env bash -lc 'uv run python -m hypo_agent --host 127.0.0.1 --port 8765'
 Restart=on-failure
 RestartSec=5
+RestartForceExitStatus=42
 StandardOutput=journal
 StandardError=journal
 

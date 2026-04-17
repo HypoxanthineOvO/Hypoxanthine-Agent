@@ -31,7 +31,7 @@ skills:
     enabled: true
   # Pure skill now owned by SkillCatalog at skills/pure/log-inspector/SKILL.md.
   log_inspector:
-    enabled: false
+    enabled: true
     service_name: hypo-agent
   # Hybrid skill: guidance lives in skills/hybrid/info-reach/SKILL.md.
   info_reach:
@@ -53,6 +53,14 @@ skills:
   email_scanner:
     enabled: true
     mark_as_read: true
+  # Python skill only for now; no SKILL.md yet.
+  subscription:
+    enabled: true
+    description: "多平台订阅推送"
+  # Python skill: 平台登录与 Cookie 状态管理。
+  auth:
+    enabled: true
+    description: "平台登录管理（扫码/验证码），Cookie 状态检查"
   # Internal heartbeat middle-layer skill. Exposes fixed structured snapshot tools.
   heartbeat_snapshot:
     enabled: true

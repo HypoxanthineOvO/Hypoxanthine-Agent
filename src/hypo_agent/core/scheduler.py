@@ -167,6 +167,42 @@ class SchedulerService:
             interval_minutes=safe_minutes,
         )
 
+    def register_subscription_job(
+        self,
+        job_id: str,
+        coro: Any,
+        *,
+        interval_seconds: int,
+        jitter_seconds: int = 0,
+        replace_existing: bool = True,
+    ) -> None:
+        if not callable(coro):
+            raise TypeError("coro must be callable")
+        safe_seconds = max(60, int(interval_seconds))
+        safe_jitter = max(0, int(jitter_seconds))
+        trigger = IntervalTrigger(
+            seconds=safe_seconds,
+            timezone=self.default_timezone,
+            jitter=safe_jitter or None,
+        )
+        self._scheduler.add_job(
+            coro,
+            trigger=trigger,
+            id=str(job_id),
+            replace_existing=replace_existing,
+            misfire_grace_time=self._misfire_grace_time_seconds,
+        )
+        self._interval_job_ids.add(str(job_id))
+        logger.info(
+            "scheduler.subscription_job_registered",
+            job_id=str(job_id),
+            interval_seconds=safe_seconds,
+            jitter_seconds=safe_jitter,
+        )
+
+    def remove_subscription_job(self, job_id: str) -> None:
+        self._remove_job_if_exists(str(job_id))
+
     def register_cron_job(
         self,
         job_id: str,

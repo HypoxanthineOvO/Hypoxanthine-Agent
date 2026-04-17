@@ -80,6 +80,32 @@ def test_probe_model_reports_no_tool_calls() -> None:
     assert result.tool_calls_count == 0
 
 
+def test_probe_model_disables_thinking_for_ollama_chat_probes() -> None:
+    captured: list[dict] = []
+
+    async def fake_acompletion(**kwargs):
+        captured.append(kwargs)
+        return {"choices": [{"message": {"content": "plain text", "tool_calls": None}}]}
+
+    config = ResolvedModelConfig(
+        provider="Eden",
+        litellm_model="ollama_chat/qwen3.5:27b",
+        api_base="http://10.19.138.13:11434",
+        api_key="dummy",
+    )
+    result = asyncio.run(
+        probe_model(
+            "EdenQwen",
+            config,
+            acompletion_fn=fake_acompletion,
+            timeout_seconds=5.0,
+        )
+    )
+
+    assert result.connectivity_ok is True
+    assert captured[0]["think"] is False
+
+
 def test_probe_model_supports_legacy_function_call_shape() -> None:
     async def fake_acompletion(**kwargs):
         del kwargs
