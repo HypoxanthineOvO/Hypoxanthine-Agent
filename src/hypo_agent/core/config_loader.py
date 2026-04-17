@@ -34,6 +34,7 @@ class ResolvedModelConfig(BaseModel):
     description: str | None = None
     api_base: str | None = None
     api_key: str | None = None
+    reasoning_config: dict[str, str] = Field(default_factory=dict)
 
 
 class RuntimeModelConfig(BaseModel):
@@ -185,6 +186,7 @@ def load_runtime_model_config(
             description=model.description,
             api_base=api_base,
             api_key=api_key,
+            reasoning_config=model.reasoning_config,
         )
 
     if model_config.default_model not in resolved_models:

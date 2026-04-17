@@ -27,7 +27,7 @@ class Message(BaseModel):
     audio: str | None = Field(default=None, json_schema_extra={"deprecated": True})
     attachments: list[Attachment] = Field(default_factory=list)
     sender: str
-    message_tag: Literal["reminder", "heartbeat", "email_scan", "tool_status"] | None = None
+    message_tag: Literal["reminder", "heartbeat", "email_scan", "tool_status", "subscription", "hypo_info"] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime | None = Field(default_factory=utc_now)
     session_id: str
@@ -64,6 +64,7 @@ class SingleModelConfig(BaseModel):
     supports_tool_calling: bool | None = None
     context_window: int | None = None
     description: str | None = None
+    reasoning_config: dict[str, str] = Field(default_factory=dict)
 
 
 class ModelConfig(BaseModel):
@@ -127,6 +128,40 @@ class WeixinServiceConfig(BaseModel):
     allowed_users: list[str] = Field(default_factory=list)
 
 
+class WeWeRSSServiceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    base_url: str = "http://10.15.88.94:4000"
+    auth_code: str = ""
+    login_timeout_seconds: int = Field(default=180, ge=10)
+    poll_interval_seconds: int = Field(default=3, ge=1)
+
+
+class BilibiliServiceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cookie: str = ""
+
+
+class WeiboServiceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cookie: str = ""
+
+
+class ZhihuServiceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cookie: str = ""
+
+
+class WeReadServiceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cookie: str = ""
+
+
 class FeishuServiceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -174,6 +209,7 @@ class NotionServiceConfig(BaseModel):
 class ServicesConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    bilibili: BilibiliServiceConfig | None = None
     email: EmailServiceConfig | None = None
     feishu: FeishuServiceConfig | None = None
     hypo_coder: HypoCoderConfig | None = None
@@ -182,8 +218,12 @@ class ServicesConfig(BaseModel):
     probe: ProbeConfig | None = None
     qq: QQServiceConfig | None = None
     qq_bot: QQBotServiceConfig | None = None
+    wewe_rss: WeWeRSSServiceConfig | None = None
     weixin: WeixinServiceConfig | None = None
     tavily: TavilyServiceConfig | None = None
+    weibo: WeiboServiceConfig | None = None
+    weread: WeReadServiceConfig | None = None
+    zhihu: ZhihuServiceConfig | None = None
 
 
 class SecretsConfig(BaseModel):
@@ -210,6 +250,12 @@ class TaskScheduleConfig(BaseModel):
         return self
 
 
+class HeartbeatTaskConfig(TaskScheduleConfig):
+    model_config = ConfigDict(extra="forbid")
+
+    notion_today_match_mode: Literal["cover_today", "due_only"] = "cover_today"
+
+
 class HypoInfoDigestTaskConfig(TaskScheduleConfig):
     model_config = ConfigDict(extra="forbid")
 
@@ -228,9 +274,11 @@ class EmailStoreTaskConfig(BaseModel):
 class TasksConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    heartbeat: TaskScheduleConfig = Field(default_factory=TaskScheduleConfig)
+    heartbeat: HeartbeatTaskConfig = Field(default_factory=HeartbeatTaskConfig)
     email_store: EmailStoreTaskConfig = Field(default_factory=EmailStoreTaskConfig)
     hypo_info_digest: HypoInfoDigestTaskConfig = Field(default_factory=HypoInfoDigestTaskConfig)
+    subscription: TaskScheduleConfig = Field(default_factory=TaskScheduleConfig)
+    wewe_rss: TaskScheduleConfig = Field(default_factory=TaskScheduleConfig)
 
 
 class WhitelistRule(BaseModel):

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import re
 
 from hypo_agent.core.output_compressor import OutputCompressor
 
@@ -35,119 +33,107 @@ class StubRouter:
         return self.response_fn(model_name=model_name, messages=messages, session_id=session_id)
 
 
-def _tool_output(stdout: str, *, stderr: str = "", exit_code: int = 0) -> str:
-    return json.dumps(
-        {
-            "status": "success" if exit_code == 0 else "error",
-            "result": {
-                "stdout": stdout,
-                "stderr": stderr,
-                "exit_code": exit_code,
-            },
-            "metadata": {},
-            "error_info": "" if exit_code == 0 else f"Command exited with status {exit_code}",
-        },
-        ensure_ascii=False,
-    )
-
-
-def test_output_compressor_passthrough_under_threshold() -> None:
+def test_short_output_not_compressed() -> None:
     router = StubRouter(lambda **_: "unused")
     compressor = OutputCompressor(router=router)
+    short_output = "a" * 15000
 
     async def _run() -> None:
-        output, compressed = await compressor.compress_if_needed("ok", metadata={})
-        assert output == "ok"
+        output, compressed = await compressor.compress_if_needed(short_output, metadata={})
         assert compressed is False
+        assert output == short_output
         assert router.calls == []
 
     asyncio.run(_run())
 
 
-def test_output_compressor_keeps_moderate_structured_tool_output() -> None:
-    router = StubRouter(lambda **_: "summary text")
+def test_long_output_compressed() -> None:
+    router = StubRouter(lambda **_: "summary line\nimportant details")
     compressor = OutputCompressor(router=router)
-    stdout = "\n".join(
-        f"user{i:03d} {('python worker ' * 20).strip()}"
-        for i in range(90)
-    )
-    large = _tool_output(stdout)
+    long_output = "b" * 30000
 
     async def _run() -> None:
         output, compressed = await compressor.compress_if_needed(
-            large,
+            long_output,
             metadata={"session_id": "s1"},
+            tool_name="run_command",
         )
-        assert len(large) > compressor.threshold_chars
-        assert compressed is False
-        assert output == large
+        assert compressed is True
+        assert len(output) <= 8000
+        assert "summary line" in output
+        assert router.calls
+
+    asyncio.run(_run())
+
+
+def test_very_long_truncated() -> None:
+    router = StubRouter(lambda **_: "should not be called")
+    compressor = OutputCompressor(router=router)
+    huge_output = "c" * 80000
+
+    async def _run() -> None:
+        output, compressed = await compressor.compress_if_needed(
+            huge_output,
+            metadata={"session_id": "s1"},
+            tool_name="run_command",
+        )
+        assert compressed is True
         assert router.calls == []
+        assert len(output) < len(huge_output)
+        assert len(output) <= 64000
+        assert "输出过长已截断" in output
+        assert output.startswith("c" * 60000)
 
     asyncio.run(_run())
 
 
-def test_output_compressor_single_pass_for_line_heavy_output() -> None:
-    router = StubRouter(lambda **_: "summary text")
+def test_strategy_selection_web_search() -> None:
+    router = StubRouter(lambda **_: "compressed")
     compressor = OutputCompressor(router=router)
-    stdout = "\n".join(
-        f"2026-03-17T00:{i % 60:02d}:00Z worker[{i:04d}] {'x' * 60}"
-        for i in range(420)
-    )
-    large = _tool_output(stdout)
+    long_output = "search result\n" * 3000
 
     async def _run() -> None:
-        output, compressed = await compressor.compress_if_needed(
-            large,
+        await compressor.compress_if_needed(
+            long_output,
             metadata={"session_id": "s1"},
+            tool_name="web_search",
         )
-        assert len(large) > compressor.threshold_chars
-        assert compressed is True
-        assert len(output) <= compressor.target_chars
-        assert "summary text" in output
-        assert len(router.calls) == 1
+        prompt = str(router.calls[-1]["messages"][0]["content"])
+        assert "保留每条搜索结果的标题、URL和关键摘要句" in prompt
 
     asyncio.run(_run())
 
 
-def test_output_compressor_chunked_compression_for_very_large_output() -> None:
-    router = StubRouter(lambda **_: "chunk summary")
+def test_strategy_selection_default() -> None:
+    router = StubRouter(lambda **_: "compressed")
     compressor = OutputCompressor(router=router)
-    huge = _tool_output("b" * 170000)
+    long_output = "generic output\n" * 3000
 
     async def _run() -> None:
-        output, compressed = await compressor.compress_if_needed(
-            huge,
+        await compressor.compress_if_needed(
+            long_output,
             metadata={"session_id": "s1"},
         )
-        assert compressed is True
-        assert len(output) <= compressor.target_chars
-        assert len(router.calls) >= 2
+        prompt = str(router.calls[-1]["messages"][0]["content"])
+        assert "保留关键数据点、具体数值、文件名、URL" in prompt
 
     asyncio.run(_run())
 
 
-def test_output_compressor_stops_after_max_iterations() -> None:
-    router = StubRouter(lambda **_: "z" * 4000)
-    compressor = OutputCompressor(
-        router=router,
-        threshold_chars=2500,
-        target_chars=2500,
-        hard_threshold_chars=2500,
-        structured_passthrough_chars=2500,
-        max_chunk_chars=80000,
-        chunk_model_limit_chars=10000,
-        max_iterations=3,
-    )
-    large = _tool_output("c" * 3000)
+def test_compression_preserves_reference() -> None:
+    router = StubRouter(lambda **_: "summary")
+    compressor = OutputCompressor(router=router)
+    long_output = "d" * 30000
 
     async def _run() -> None:
         output, compressed = await compressor.compress_if_needed(
-            large,
-            metadata={"session_id": "s1"},
+            long_output,
+            metadata={"session_id": "s1", "tool_name": "web_read"},
+            tool_name="web_read",
         )
         assert compressed is True
-        assert len(router.calls) == 3
-        assert len(output) <= compressor.target_chars
+        assert '[📦 原始输出 ' in output
+        assert output.endswith('如需查看原文请说"给我看原始输出"]')
 
     asyncio.run(_run())
 
@@ -159,32 +145,15 @@ def test_output_compressor_keeps_recent_original_cache_of_ten_entries() -> None:
     async def _run() -> None:
         for i in range(11):
             await compressor.compress_if_needed(
-                _tool_output("x" * 110000 + str(i)),
+                ("x" * 30000) + str(i),
                 metadata={"session_id": "s1", "index": i},
+                tool_name="run_command",
             )
 
         cache = compressor.get_recent_originals()
         assert len(cache) == 10
         originals = [item["output"] for item in cache.values()]
-        assert _tool_output("x" * 110000 + "0") not in originals
-
-    asyncio.run(_run())
-
-
-def test_compression_marker_appended() -> None:
-    router = StubRouter(lambda **_: "summary")
-    compressor = OutputCompressor(router=router)
-
-    async def _run() -> None:
-        output, compressed = await compressor.compress_if_needed(
-            _tool_output("y" * 110000),
-            metadata={"session_id": "s1"},
-        )
-        assert compressed is True
-        assert re.search(
-            r"\n\[📦 Output compressed from \d+ → \d+ chars\. Original saved to logs\. Ask me for details\.\]$",
-            output,
-        )
+        assert ("x" * 30000) + "0" not in originals
 
     asyncio.run(_run())
 
@@ -194,11 +163,12 @@ def test_output_compressor_writes_compressed_meta_to_input_metadata() -> None:
     compressor = OutputCompressor(router=router)
 
     async def _run() -> None:
-        metadata: dict[str, object] = {"session_id": "s1", "tool_name": "exec_command"}
-        original_output = _tool_output("z" * 110000)
+        metadata: dict[str, object] = {"session_id": "s1", "tool_name": "run_command"}
+        original_output = "z" * 30000
         output, compressed = await compressor.compress_if_needed(
             original_output,
             metadata=metadata,
+            tool_name="run_command",
         )
 
         assert compressed is True

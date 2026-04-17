@@ -213,17 +213,20 @@ providers:
         load_runtime_model_config(models_yaml, secrets_yaml)
 
 
-def test_repo_models_config_uses_single_coding_plan_auto_topology() -> None:
+def test_repo_models_config_routes_lightweight_and_heartbeat_to_non_coding_models() -> None:
     runtime = load_runtime_model_config(
         Path(__file__).resolve().parents[2] / "config" / "models.yaml",
         Path(__file__).resolve().parents[2] / "config" / "secrets.yaml",
     )
 
     assert runtime.default_model == "GPT"
-    assert runtime.task_routing["lightweight"] == "CodingPlanAuto"
-    assert runtime.models["CodingPlanAuto"].litellm_model == "openai/ark-code-latest"
-    assert runtime.models["CodingPlanAuto"].provider == "volcengine_coding"
-    assert runtime.models["CodingPlanAuto"].fallback == "GPT"
+    assert runtime.task_routing["lightweight"] == "EdenQwen"
+    assert runtime.task_routing["compression"] == "EdenQwen"
+    assert runtime.task_routing["heartbeat"] == "EdenQwen"
+    assert runtime.task_routing["reasoning"] == "GPT"
+    assert runtime.models["EdenQwen"].litellm_model == "ollama_chat/qwen3.5:27b"
+    assert runtime.models["EdenQwen"].provider == "Eden"
+    assert runtime.models["EdenQwen"].fallback == "CodingPlanAuto"
 
 
 def test_load_tasks_config_accepts_heartbeat_email_store_and_hypo_info_digest(tmp_path: Path) -> None:
@@ -234,6 +237,7 @@ heartbeat:
   enabled: true
   interval_minutes: 1
   max_rounds: 8
+  notion_today_match_mode: cover_today
 email_store:
   enabled: true
   max_entries: 4000
@@ -252,6 +256,7 @@ hypo_info_digest:
     assert tasks.heartbeat.enabled is True
     assert tasks.heartbeat.interval_minutes == 1
     assert tasks.heartbeat.max_rounds == 8
+    assert tasks.heartbeat.notion_today_match_mode == "cover_today"
     assert tasks.email_store.enabled is True
     assert tasks.email_store.max_entries == 4000
     assert tasks.email_store.retention_days == 60
@@ -259,6 +264,27 @@ hypo_info_digest:
     assert tasks.hypo_info_digest.enabled is True
     assert tasks.hypo_info_digest.interval_minutes == 480
     assert tasks.hypo_info_digest.time == "09:00,21:00"
+
+
+def test_load_tasks_config_accepts_wewe_rss_schedule(tmp_path: Path) -> None:
+    tasks_yaml = tmp_path / "tasks.yaml"
+    tasks_yaml.write_text(
+        """
+heartbeat:
+  enabled: false
+wewe_rss:
+  enabled: true
+  mode: interval
+  interval_minutes: 15
+""".strip(),
+        encoding="utf-8",
+    )
+
+    tasks = load_tasks_config(tasks_yaml)
+
+    assert tasks.wewe_rss.enabled is True
+    assert tasks.wewe_rss.mode == "interval"
+    assert tasks.wewe_rss.interval_minutes == 15
 
 
 def test_load_tasks_config_accepts_hypo_info_digest(tmp_path: Path) -> None:
@@ -352,6 +378,33 @@ services:
     assert secrets.services.notion.integration_secret == "secret_xxx"
     assert secrets.services.notion.default_workspace == "Hypo"
     assert secrets.services.notion.todo_database_id == "todo-db"
+
+
+def test_load_secrets_config_accepts_weibo_and_zhihu_services(tmp_path: Path) -> None:
+    secrets_yaml = tmp_path / "secrets.yaml"
+    secrets_yaml.write_text(
+        """
+providers: {}
+services:
+  weibo:
+    cookie: SUB=demo; SUBP=demo
+  weread:
+    cookie: wr_skey=demo
+  zhihu:
+    cookie: z_c0=demo
+""".strip(),
+        encoding="utf-8",
+    )
+
+    secrets = load_secrets_config(secrets_yaml)
+
+    assert secrets.services is not None
+    assert secrets.services.weibo is not None
+    assert secrets.services.weibo.cookie == "SUB=demo; SUBP=demo"
+    assert secrets.services.weread is not None
+    assert secrets.services.weread.cookie == "wr_skey=demo"
+    assert secrets.services.zhihu is not None
+    assert secrets.services.zhihu.cookie == "z_c0=demo"
 
 
 def test_memory_dir_default(monkeypatch: pytest.MonkeyPatch) -> None:

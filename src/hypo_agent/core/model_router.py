@@ -26,6 +26,11 @@ except ImportError:  # pragma: no cover - optional runtime dependency
     OpenAIClientError = None
 
 from hypo_agent.core.config_loader import RuntimeModelConfig
+from hypo_agent.core.model_runtime_context import (
+    RUNTIME_MODEL_CONTEXT_HEADING,
+    build_runtime_model_context,
+)
+from hypo_agent.core.model_request_options import build_model_request_kwargs
 
 _MODEL_ROUTER_BASE_ERRORS = (
     asyncio.TimeoutError,
@@ -74,6 +79,8 @@ class ModelRouter:
         session_id: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         timeout_seconds: float | None = None,
+        task_type: str | None = None,
+        event_emitter: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> str:
         payload = await self.call_with_tools(
             model_name,
@@ -81,6 +88,8 @@ class ModelRouter:
             tools=tools,
             session_id=session_id,
             timeout_seconds=timeout_seconds,
+            task_type=task_type,
+            event_emitter=event_emitter,
         )
         return payload["text"]
 
@@ -92,12 +101,15 @@ class ModelRouter:
         tools: list[dict[str, Any]] | None = None,
         session_id: str | None = None,
         timeout_seconds: float | None = None,
+        task_type: str | None = None,
+        event_emitter: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> dict[str, Any]:
         attempted: list[str] = []
         last_error: Exception | None = None
         started_at = perf_counter()
+        candidate_chain = self._candidate_chain(model_name)
 
-        for candidate in self._candidate_chain(model_name):
+        for index, candidate in enumerate(candidate_chain):
             cfg = self.config.models[candidate]
             if cfg.provider is None or cfg.litellm_model is None:
                 attempted.append(f"{candidate}(skipped)")
@@ -108,11 +120,28 @@ class ModelRouter:
                     reason="provider_or_litellm_model_missing",
                 )
                 continue
+            if tools and cfg.supports_tool_calling is False:
+                attempted.append(f"{candidate}(no-tools)")
+                self.logger.warning(
+                    "model_skipped",
+                    requested_model=model_name,
+                    resolved_model=candidate,
+                    reason="tool_calling_not_supported",
+                )
+                continue
 
             try:
-                prepared_messages, remapped_ids = self._prepare_messages_for_candidate(
+                runtime_messages = self._apply_runtime_model_context(
                     messages,
+                    requested_model=model_name,
+                    resolved_model=candidate,
+                    task_type=task_type,
+                )
+                prepared_messages, remapped_ids = self._prepare_messages_for_candidate(
+                    runtime_messages,
                     cfg.litellm_model,
+                    cfg.provider,
+                    cfg.api_base,
                 )
                 kwargs: dict[str, Any] = {
                     "model": cfg.litellm_model,
@@ -126,6 +155,13 @@ class ModelRouter:
                     kwargs["tools"] = tools
                 if timeout_seconds is not None:
                     kwargs["timeout"] = timeout_seconds
+                kwargs.update(
+                    build_model_request_kwargs(
+                        model_config=cfg,
+                        litellm_model=cfg.litellm_model,
+                        task_type=task_type,
+                    )
+                )
                 if remapped_ids:
                     self.logger.info(
                         "tool_call_ids_sanitized",
@@ -170,7 +206,12 @@ class ModelRouter:
                         "latency_ms": (perf_counter() - started_at) * 1000.0,
                     }
                 )
-                return {"text": text, "tool_calls": tool_calls}
+                return {
+                    "text": text,
+                    "tool_calls": tool_calls,
+                    "resolved_model": candidate,
+                    "model_id": cfg.litellm_model,
+                }
             except _MODEL_ROUTER_ERRORS as exc:  # pragma: no cover - exercised in tests
                 attempted.append(candidate)
                 last_error = exc
@@ -180,7 +221,22 @@ class ModelRouter:
                     resolved_model=candidate,
                     error=str(exc),
                 )
+                await self._emit_fallback_event(
+                    requested_model=model_name,
+                    candidate_chain=candidate_chain,
+                    failed_index=index,
+                    reason=str(exc),
+                    session_id=session_id,
+                    event_emitter=event_emitter,
+                )
 
+        await self._emit_fallback_exhausted_event(
+            requested_model=model_name,
+            candidate_chain=candidate_chain,
+            reason=str(last_error or "unknown model failure"),
+            session_id=session_id,
+            event_emitter=event_emitter,
+        )
         raise RuntimeError(
             f"All models failed for '{model_name}'. Attempted chain: {attempted}"
         ) from last_error
@@ -193,12 +249,15 @@ class ModelRouter:
         session_id: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         timeout_seconds: float | None = None,
+        task_type: str | None = None,
+        event_emitter: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> AsyncIterator[str]:
         attempted: list[str] = []
         last_error: Exception | None = None
         started_at = perf_counter()
+        candidate_chain = self._candidate_chain(model_name)
 
-        for candidate in self._candidate_chain(model_name):
+        for index, candidate in enumerate(candidate_chain):
             cfg = self.config.models[candidate]
             if cfg.provider is None or cfg.litellm_model is None:
                 attempted.append(f"{candidate}(skipped)")
@@ -209,14 +268,31 @@ class ModelRouter:
                     reason="provider_or_litellm_model_missing",
                 )
                 continue
+            if tools and cfg.supports_tool_calling is False:
+                attempted.append(f"{candidate}(no-tools)")
+                self.logger.warning(
+                    "model_skipped",
+                    requested_model=model_name,
+                    resolved_model=candidate,
+                    reason="tool_calling_not_supported",
+                )
+                continue
 
             started = False
             usage = {"input_tokens": None, "output_tokens": None, "total_tokens": None}
 
             try:
-                prepared_messages, remapped_ids = self._prepare_messages_for_candidate(
+                runtime_messages = self._apply_runtime_model_context(
                     messages,
+                    requested_model=model_name,
+                    resolved_model=candidate,
+                    task_type=task_type,
+                )
+                prepared_messages, remapped_ids = self._prepare_messages_for_candidate(
+                    runtime_messages,
                     cfg.litellm_model,
+                    cfg.provider,
+                    cfg.api_base,
                 )
                 kwargs: dict[str, Any] = {
                     "model": cfg.litellm_model,
@@ -231,6 +307,13 @@ class ModelRouter:
                     kwargs["tools"] = tools
                 if timeout_seconds is not None:
                     kwargs["timeout"] = timeout_seconds
+                kwargs.update(
+                    build_model_request_kwargs(
+                        model_config=cfg,
+                        litellm_model=cfg.litellm_model,
+                        task_type=task_type,
+                    )
+                )
                 if remapped_ids:
                     self.logger.info(
                         "tool_call_ids_sanitized",
@@ -289,7 +372,22 @@ class ModelRouter:
                     resolved_model=candidate,
                     error=str(exc),
                 )
+                await self._emit_fallback_event(
+                    requested_model=model_name,
+                    candidate_chain=candidate_chain,
+                    failed_index=index,
+                    reason=str(exc),
+                    session_id=session_id,
+                    event_emitter=event_emitter,
+                )
 
+        await self._emit_fallback_exhausted_event(
+            requested_model=model_name,
+            candidate_chain=candidate_chain,
+            reason=str(last_error or "unknown model failure"),
+            session_id=session_id,
+            event_emitter=event_emitter,
+        )
         raise RuntimeError(
             f"All stream models failed for '{model_name}'. Attempted chain: {attempted}"
         ) from last_error
@@ -377,6 +475,7 @@ class ModelRouter:
             model_name,
             [{"role": "user", "content": prompt}],
             session_id=session_id,
+            task_type="lightweight",
         )
         parsed = self._parse_json_object_from_text(text)
         return parsed if isinstance(parsed, dict) else {}
@@ -391,6 +490,113 @@ class ModelRouter:
         result = self._on_stream_success(payload)
         if inspect.isawaitable(result):
             await result
+
+    async def _emit_model_event(
+        self,
+        event_emitter: Callable[[dict[str, Any]], Awaitable[None] | None] | None,
+        payload: dict[str, Any],
+    ) -> None:
+        if event_emitter is None:
+            return
+        result = event_emitter(payload)
+        if inspect.isawaitable(result):
+            await result
+
+    async def _emit_fallback_event(
+        self,
+        *,
+        requested_model: str,
+        candidate_chain: list[str],
+        failed_index: int,
+        reason: str,
+        session_id: str | None,
+        event_emitter: Callable[[dict[str, Any]], Awaitable[None] | None] | None,
+    ) -> None:
+        next_index = failed_index + 1
+        if next_index >= len(candidate_chain):
+            return
+        failed_model = candidate_chain[failed_index]
+        fallback_model = candidate_chain[next_index]
+        self.logger.warning(
+            "model.fallback",
+            requested_model=requested_model,
+            triggered=failed_model,
+            reason=reason,
+            fallback=fallback_model,
+        )
+        await self._emit_model_event(
+            event_emitter,
+            {
+                "type": "model_fallback",
+                "failed_model": failed_model,
+                "reason": reason,
+                "fallback_model": fallback_model,
+                "requested_model": requested_model,
+                "session_id": session_id,
+            },
+        )
+
+    async def _emit_fallback_exhausted_event(
+        self,
+        *,
+        requested_model: str,
+        candidate_chain: list[str],
+        reason: str,
+        session_id: str | None,
+        event_emitter: Callable[[dict[str, Any]], Awaitable[None] | None] | None,
+    ) -> None:
+        failed_model = candidate_chain[-1] if candidate_chain else requested_model
+        self.logger.error(
+            "model.fallback_exhausted",
+            requested_model=requested_model,
+            triggered=failed_model,
+            reason=reason,
+        )
+        await self._emit_model_event(
+            event_emitter,
+            {
+                "type": "model_fallback_exhausted",
+                "failed_model": failed_model,
+                "reason": reason,
+                "requested_model": requested_model,
+                "session_id": session_id,
+            },
+        )
+
+    def _apply_runtime_model_context(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        requested_model: str,
+        resolved_model: str,
+        task_type: str | None,
+    ) -> list[dict[str, Any]]:
+        cfg = self.config.models.get(resolved_model)
+        model_id = cfg.litellm_model if cfg is not None else resolved_model
+        runtime_context = build_runtime_model_context(
+            model_display_name=resolved_model,
+            model_id=model_id,
+            task_type=task_type,
+            primary_model_display_name=requested_model,
+        )
+        updated_messages: list[dict[str, Any]] = []
+        replaced = False
+        for message in messages:
+            if (
+                not replaced
+                and isinstance(message, dict)
+                and message.get("role") == "system"
+                and str(message.get("content") or "").startswith(RUNTIME_MODEL_CONTEXT_HEADING)
+            ):
+                updated_message = dict(message)
+                updated_message["content"] = runtime_context
+                updated_messages.append(updated_message)
+                replaced = True
+                continue
+            updated_messages.append(message)
+        if replaced:
+            return updated_messages
+        return [{"role": "system", "content": runtime_context}, *messages]
 
     def _candidate_chain(self, start_model: str) -> list[str]:
         if start_model not in self.config.models:
@@ -494,7 +700,15 @@ class ModelRouter:
         self,
         messages: list[dict[str, Any]],
         litellm_model: str | None,
+        provider: str | None = None,
+        api_base: str | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+        messages = self._normalize_messages_for_candidate(
+            messages,
+            litellm_model=litellm_model,
+            provider=provider,
+            api_base=api_base,
+        )
         if not self._candidate_requires_fc_tool_call_ids(litellm_model):
             return messages, []
 
@@ -563,6 +777,43 @@ class ModelRouter:
         ]
         return prepared_messages, remapped_ids
 
+    def _normalize_messages_for_candidate(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        litellm_model: str | None,
+        provider: str | None,
+        api_base: str | None,
+    ) -> list[dict[str, Any]]:
+        if not self._candidate_requires_single_leading_system_message(
+            litellm_model=litellm_model,
+            provider=provider,
+            api_base=api_base,
+        ):
+            return messages
+
+        system_chunks: list[str] = []
+        non_system_messages: list[dict[str, Any]] = []
+        for message in messages:
+            if (
+                isinstance(message, dict)
+                and message.get("role") == "system"
+                and isinstance(message.get("content"), str)
+            ):
+                content = str(message.get("content") or "").strip()
+                if content:
+                    system_chunks.append(content)
+                continue
+            non_system_messages.append(message)
+
+        if not system_chunks:
+            return messages
+
+        return [
+            {"role": "system", "content": "\n\n".join(system_chunks)},
+            *non_system_messages,
+        ]
+
     def _build_tool_call_id_mapping(
         self,
         messages: list[dict[str, Any]],
@@ -612,6 +863,22 @@ class ModelRouter:
         # rejects historical function-call IDs unless they use the `fc_` prefix.
         model_name = str(litellm_model or "").split("/")[-1].strip().lower()
         return model_name.startswith("gpt-5")
+
+    def _candidate_requires_single_leading_system_message(
+        self,
+        *,
+        litellm_model: str | None,
+        provider: str | None,
+        api_base: str | None,
+    ) -> bool:
+        model_name = str(litellm_model or "").strip().lower()
+        provider_name = str(provider or "").strip().lower()
+        base_url = str(api_base or "").strip().lower()
+        return (
+            provider_name == "genesis"
+            or ":8100" in base_url
+            or model_name == "openai/qwen3.5-122b"
+        )
 
     def _build_fc_compatible_tool_call_id(
         self,

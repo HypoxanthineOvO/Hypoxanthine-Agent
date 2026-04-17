@@ -2,7 +2,10 @@ default_model: GPT
 
 task_routing:
   chat: GPT
-  lightweight: CodingPlanAuto
+  reasoning: GPT
+  heartbeat: EdenQwen
+  lightweight: EdenQwen
+  compression: EdenQwen
   embedding: VolcanoEmbedding
   vision: GPT
 
@@ -12,22 +15,27 @@ models:
     provider: "TTAPI"
     supports_tool_calling: true
     description: "OpenAI ChatGPT"
-    fallback: null
+    fallback: CodingPlanAuto
+    reasoning_config:
+      chat: low
+      reasoning: high
+
+  GenesisQwen122B:
+    litellm_model: "openai/qwen3.5-122b"
+    provider: "Genesis"
+    supports_tool_calling: true
+    description: "Genesis local Qwen3.5 122B"
+    fallback: CodingPlanAuto
+    reasoning_config:
+      chat: low
+      reasoning: high
 
   CodingPlanAuto:
     litellm_model: "openai/ark-code-latest"
     provider: "volcengine_coding"
     supports_tool_calling: true
     description: "Ark Code Latest via 火山引擎 Coding Plan (Auto mode)"
-    fallback: GPT
-
-  Gemini3Pro:
-    provider: Hiapi
-    # NOTE(M4 diagnose): 2026-03-04 tool-calling probe returned tool_calls=null
-    # on this provider endpoint. Keep config unchanged, but re-check provider
-    # compatibility before relying on function calling in production.
-    litellm_model: "openai/gemini-3-pro"
-    fallback: GPT
+    fallback: null
 
   VolcanoEmbedding:
     type: embedding
@@ -36,22 +44,16 @@ models:
     description: "Volcano / Ark embedding model for L3 semantic memory"
     fallback: null
 
-  LegacyKimiK25:
-    litellm_model: "openai/kimi-k2.5"
-    provider: "volcengine_coding"
+  EdenQwen:
+    provider: "Eden"
+    litellm_model: "ollama_chat/qwen3.5:27b"
     supports_tool_calling: true
-    description: "Deprecated legacy alias for old Coding Plan topology"
-    fallback: GPT
+    description: "Eden Ollama - Qwen3.5 27B"
+    fallback: CodingPlanAuto
 
-  LegacyGLM47Coding:
-    litellm_model: "openai/glm-4.7"
-    provider: "volcengine_coding"
+  EdenGemma:
+    provider: "Eden"
+    litellm_model: "ollama_chat/gemma4:31b"   # 用 ollama_chat/ 前缀
     supports_tool_calling: true
-    description: "Deprecated legacy alias for old Coding Plan topology"
-    fallback: GPT
-
-  LegacyDeepseekV3_2_Core:
-    provider: "volcengine_coding"
-    litellm_model: "openai/deepseek-v3.2"
-    description: "Deprecated legacy alias for old Coding Plan topology"
-    fallback: GPT
+    description: "Eden Ollama - Gemma 4 31B"
+    fallback: CodingPlanAuto

@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 from pydantic import ValidationError
 import yaml
@@ -40,6 +41,19 @@ def test_message_round_trip_serialization(fixed_timestamp):
     assert restored.sender == "user"
     assert restored.timestamp == fixed_timestamp
     assert restored.session_id == "session-1"
+
+
+def test_message_json_timestamp_uses_shanghai_offset(fixed_timestamp) -> None:
+    message = Message(
+        text="hello",
+        sender="user",
+        timestamp=fixed_timestamp,
+        session_id="session-1",
+    )
+
+    payload = json.loads(message.model_dump_json())
+
+    assert payload["timestamp"] == "2026-03-03T18:00:00+08:00"
 
 
 def test_attachment_round_trip_serialization() -> None:
@@ -136,6 +150,20 @@ def test_message_accepts_email_scan_tag(fixed_timestamp):
     payload = message.model_dump_json()
     restored = Message.model_validate_json(payload)
     assert restored.message_tag == "email_scan"
+
+
+def test_message_accepts_hypo_info_tag(fixed_timestamp):
+    message = Message(
+        text="Hypo-Info 摘要",
+        sender="assistant",
+        timestamp=fixed_timestamp,
+        session_id="main",
+        message_tag="hypo_info",
+    )
+
+    payload = message.model_dump_json()
+    restored = Message.model_validate_json(payload)
+    assert restored.message_tag == "hypo_info"
 
 
 def test_skill_output_serializes_attachments() -> None:
@@ -360,6 +388,48 @@ def test_secrets_config_accepts_services_weixin() -> None:
     assert config.services.weixin.allowed_users == ["alice@im.wechat"]
 
 
+def test_secrets_config_accepts_services_wewe_rss() -> None:
+    config = SecretsConfig.model_validate(
+        {
+            "providers": {},
+            "services": {
+                "wewe_rss": {
+                    "enabled": True,
+                    "base_url": "http://10.15.88.94:4000",
+                    "auth_code": "test-auth-code",
+                    "login_timeout_seconds": 180,
+                    "poll_interval_seconds": 3,
+                }
+            },
+        }
+    )
+
+    assert config.services is not None
+    assert config.services.wewe_rss is not None
+    assert config.services.wewe_rss.enabled is True
+    assert config.services.wewe_rss.base_url == "http://10.15.88.94:4000"
+    assert config.services.wewe_rss.auth_code == "test-auth-code"
+    assert config.services.wewe_rss.login_timeout_seconds == 180
+    assert config.services.wewe_rss.poll_interval_seconds == 3
+
+
+def test_secrets_config_accepts_services_weread() -> None:
+    config = SecretsConfig.model_validate(
+        {
+            "providers": {},
+            "services": {
+                "weread": {
+                    "cookie": "wr_skey=demo",
+                }
+            },
+        }
+    )
+
+    assert config.services is not None
+    assert config.services.weread is not None
+    assert config.services.weread.cookie == "wr_skey=demo"
+
+
 def test_secrets_config_accepts_services_feishu() -> None:
     config = SecretsConfig.model_validate(
         {
@@ -455,6 +525,10 @@ def test_secrets_yaml_example_includes_qq_template() -> None:
     assert config.services.weixin.enabled is False
     assert config.services.weixin.token_path == "memory/weixin_auth.json"
     assert config.services.weixin.allowed_users == []
+    assert config.services.wewe_rss is not None
+    assert config.services.wewe_rss.enabled is False
+    assert config.services.wewe_rss.base_url == "http://10.15.88.94:4000"
+    assert config.services.wewe_rss.auth_code == "PLACEHOLDER_WEWE_RSS_AUTH_CODE"
     assert config.services.tavily is not None
     assert config.services.tavily.api_key == "PLACEHOLDER_TAVILY_API_KEY"
     assert config.services.hypo_info is not None
@@ -532,3 +606,21 @@ def test_configure_logging_idempotent_and_usable():
 
     logger = structlog.get_logger("hypo_agent.test").bind(component="unit")
     assert hasattr(logger, "info")
+
+
+def test_configure_logging_uses_local_timestamp(monkeypatch):
+    captured: dict[str, object] = {}
+
+    import hypo_agent.core.logging as logging_module
+
+    def fake_timestamper(*, fmt, utc):
+        captured["fmt"] = fmt
+        captured["utc"] = utc
+        return lambda logger, method_name, event_dict: event_dict
+
+    monkeypatch.setattr(logging_module.structlog.processors, "TimeStamper", fake_timestamper)
+
+    configure_logging()
+
+    assert captured == {"fmt": "iso", "utc": False}
+    configure_logging()
