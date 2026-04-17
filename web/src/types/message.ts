@@ -3,6 +3,7 @@ export type MessageTag =
   | "heartbeat"
   | "email_scan"
   | "tool_status"
+  | "hypo_info"
   | "narration";
 
 export type MessageKind =
@@ -10,6 +11,7 @@ export type MessageKind =
   | "tool_call"
   | "error"
   | "narration"
+  | "pipeline_event"
   | "system";
 
 export type MessageEventType = "tool_call_start" | "tool_call_result";
@@ -20,6 +22,26 @@ export interface Attachment {
   filename?: string | null;
   mime_type?: string | null;
   size_bytes?: number | null;
+}
+
+export interface PipelineProgressItem {
+  event_type:
+    | "pipeline_stage"
+    | "thinking_delta"
+    | "react_iteration"
+    | "react_complete"
+    | "compression"
+    | "model_fallback"
+    | "model_fallback_exhausted"
+    | "tool_call_start"
+    | "tool_call_result"
+    | "tool_call_error";
+  text: string;
+  timestamp?: string;
+  stage?: string;
+  status?: string;
+  tool?: string;
+  key?: string;
 }
 
 export interface Message {
@@ -76,12 +98,86 @@ export interface CompressedMeta {
   compressed_chars: number;
 }
 
+export interface PipelineStageEvent {
+  type: "pipeline_stage";
+  stage: string;
+  detail?: string;
+  model?: string;
+  session_id: string;
+  timestamp?: string;
+}
+
+export interface ThinkingDeltaEvent {
+  type: "thinking_delta";
+  content: string;
+  session_id: string;
+  timestamp?: string;
+}
+
+export interface ReactIterationEvent {
+  type: "react_iteration";
+  iteration: number;
+  max_iterations: number;
+  status?: string;
+  session_id: string;
+  timestamp?: string;
+}
+
+export interface ReactCompleteEvent {
+  type: "react_complete";
+  total_iterations: number;
+  total_tool_calls: number;
+  session_id: string;
+  timestamp?: string;
+}
+
+export interface CompressionEvent {
+  type: "compression";
+  original_chars: number;
+  compressed_chars: number;
+  tool?: string;
+  tool_call_id?: string;
+  session_id: string;
+  timestamp?: string;
+}
+
+export interface ModelFallbackEvent {
+  type: "model_fallback";
+  failed_model: string;
+  reason: string;
+  fallback_model: string;
+  requested_model?: string;
+  session_id: string;
+  timestamp?: string;
+}
+
+export interface ModelFallbackExhaustedEvent {
+  type: "model_fallback_exhausted";
+  failed_model?: string;
+  reason?: string;
+  requested_model?: string;
+  session_id: string;
+  timestamp?: string;
+}
+
+export interface ToolCallErrorEvent {
+  type: "tool_call_error";
+  tool: string;
+  error: string;
+  will_retry: boolean;
+  iteration?: number;
+  session_id: string;
+  timestamp?: string;
+}
+
 export interface ToolCallStartEvent {
   type: "tool_call_start";
   tool_name: string;
   tool_call_id: string;
   arguments: Record<string, unknown>;
   session_id: string;
+  iteration?: number;
+  timestamp?: string;
 }
 
 export interface ToolCallResultEvent {
@@ -95,6 +191,10 @@ export interface ToolCallResultEvent {
   session_id: string;
   compressed_meta?: CompressedMeta;
   attachments?: Attachment[];
+  summary?: string;
+  duration_ms?: number;
+  iteration?: number;
+  timestamp?: string;
 }
 
 export interface WsErrorEvent {
@@ -116,8 +216,16 @@ export type IncomingWsEvent =
   | Message
   | AssistantChunkEvent
   | AssistantDoneEvent
+  | PipelineStageEvent
+  | ThinkingDeltaEvent
+  | ReactIterationEvent
+  | ReactCompleteEvent
+  | CompressionEvent
+  | ModelFallbackEvent
+  | ModelFallbackExhaustedEvent
   | ToolCallStartEvent
   | ToolCallResultEvent
+  | ToolCallErrorEvent
   | NarrationEvent
   | WsErrorEvent;
 

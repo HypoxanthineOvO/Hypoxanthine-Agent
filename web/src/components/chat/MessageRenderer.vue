@@ -3,6 +3,7 @@ import CompressedMessage from "./CompressedMessage.vue";
 import ErrorStateCard from "./ErrorStateCard.vue";
 import FileAttachment from "./FileAttachment.vue";
 import MarkdownPreview from "./MarkdownPreview.vue";
+import PipelineProgress from "./PipelineProgress.vue";
 import MediaMessage from "./MediaMessage.vue";
 import TextMessage from "./TextMessage.vue";
 import ToolCallMessage from "./ToolCallMessage.vue";
@@ -43,8 +44,12 @@ const mediaSource = (): string =>
 </script>
 
 <template>
+  <PipelineProgress
+    v-if="message.kind === 'pipeline_event'"
+    :message="message"
+  />
   <CompressedMessage
-    v-if="isCompressedToolResult(message)"
+    v-else-if="isCompressedToolResult(message)"
     :summary="String(message.result ?? '')"
     :compressed-meta="message.compressed_meta"
     :api-base="apiBase"

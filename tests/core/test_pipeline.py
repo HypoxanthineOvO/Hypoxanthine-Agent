@@ -5,6 +5,9 @@ import asyncio
 
 import pytest
 
+from hypo_agent.core.channel_progress import summarize_channel_progress_event
+from hypo_agent.core.config_loader import RuntimeModelConfig
+from hypo_agent.core.model_router import ModelRouter
 from hypo_agent.core.pipeline import ChatPipeline
 from hypo_agent.core.skill_catalog import SkillManifest
 from hypo_agent.memory.semantic_memory import ChunkResult
@@ -44,11 +47,13 @@ def test_pipeline_injects_recent_history_before_inbound() -> None:
             assert messages[0]["role"] == "system"
             assert "当前时间:" in messages[0]["content"]
             assert messages[1]["role"] == "system"
-            assert "[Current Message Context]" in messages[1]["content"]
-            assert "当前消息渠道: WebUI (webui)" in messages[1]["content"]
+            assert "## 当前运行环境" in messages[1]["content"]
             assert messages[2]["role"] == "system"
-            assert "answer the user's direct request and then stop" in messages[2]["content"]
-            assert messages[3:] == [
+            assert "[Current Message Context]" in messages[2]["content"]
+            assert "当前消息渠道: WebUI (webui)" in messages[2]["content"]
+            assert messages[3]["role"] == "system"
+            assert "answer the user's direct request and then stop" in messages[3]["content"]
+            assert messages[4:] == [
                 {"role": "user", "content": "旧问题"},
                 {"role": "assistant", "content": "旧回答"},
                 {"role": "user", "content": "新问题"},
@@ -71,6 +76,57 @@ def test_pipeline_injects_recent_history_before_inbound() -> None:
     assert [m.sender for m in memory.appended] == ["user", "assistant"]
     assert memory.appended[0].text == "新问题"
     assert memory.appended[1].text == "新回答"
+
+
+def test_pipeline_history_budget_skips_system_messages_and_keeps_recent_dialogue() -> None:
+    memory = StubSessionMemory(
+        history=[
+            Message(
+                text="🔔 reminder should be skipped " + ("r" * 800),
+                sender="assistant",
+                session_id="s1",
+                channel="system",
+                message_tag="reminder",
+            ),
+            Message(text="第一轮用户 " + ("a" * 700), sender="user", session_id="s1"),
+            Message(text="第一轮助手 " + ("b" * 700), sender="assistant", session_id="s1"),
+            Message(
+                text="💓 heartbeat should be skipped " + ("h" * 800),
+                sender="assistant",
+                session_id="s1",
+                channel="system",
+                message_tag="heartbeat",
+            ),
+            Message(text="第二轮用户 " + ("c" * 700), sender="user", session_id="s1"),
+            Message(text="第二轮助手 " + ("d" * 700), sender="assistant", session_id="s1"),
+            Message(text="第三轮用户 " + ("e" * 700), sender="user", session_id="s1"),
+            Message(text="第三轮助手 " + ("f" * 700), sender="assistant", session_id="s1"),
+        ]
+    )
+
+    class StubRouter:
+        async def call(self, model_name, messages):
+            del model_name, messages
+            return "unused"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=100,
+        history_token_budget=900,
+    )
+
+    messages = asyncio.run(
+        pipeline._build_llm_messages(Message(text="新的问题", sender="user", session_id="s1"))
+    )
+    history_messages = [item for item in messages if item["role"] in {"user", "assistant"}]
+    history_text = "\n".join(str(item["content"]) for item in history_messages)
+
+    assert "should be skipped" not in history_text
+    assert "第三轮用户" in history_text
+    assert "第三轮助手" in history_text
+    assert "第一轮用户" not in history_text
 
 
 def test_pipeline_routes_image_attachments_to_vision_model(tmp_path: Path) -> None:
@@ -294,6 +350,62 @@ def test_pipeline_shortcuts_notion_todo_followup_after_binding_without_llm() -> 
     assert skill_manager.calls == [("get_notion_todo_snapshot", {}, "s1", "direct")]
 
 
+def test_pipeline_shortcuts_wewe_login_request_without_llm(tmp_path: Path) -> None:
+    memory = StubSessionMemory()
+    pushed: list[Message] = []
+
+    class StubWeWeMonitor:
+        def is_login_request(self, text: str | None) -> bool:
+            return str(text or "").strip() == "我扫码登录一下"
+
+        async def start_login_flow(self, *, session_id: str, channel: str, sender_id: str | None = None) -> Message:
+            return Message(
+                text="请扫码登录 WeWe RSS。",
+                sender="assistant",
+                session_id=session_id,
+                channel=channel,
+                sender_id=sender_id,
+                attachments=[
+                    Attachment(
+                        type="image",
+                        url=str(tmp_path / "wewe.png"),
+                        filename="wewe.png",
+                        mime_type="image/png",
+                    )
+                ],
+                message_tag="tool_status",
+                metadata={"target_channels": [channel]},
+            )
+
+    class StubRouter:
+        async def call(self, model_name, messages, *, session_id=None, tools=None):
+            raise AssertionError("LLM should not be called for WeWe QR shortcut")
+
+    async def on_proactive_message(message: Message, **_: object) -> None:
+        pushed.append(message)
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        on_proactive_message=on_proactive_message,
+        wewe_rss_monitor=StubWeWeMonitor(),
+    )
+
+    reply = asyncio.run(
+        pipeline.run_once(
+            Message(text="我扫码登录一下", sender="user", session_id="s1", channel="qq", sender_id="u1")
+        )
+    )
+
+    assert reply.text == "请扫码登录 WeWe RSS。"
+    assert reply.attachments[0].filename == "wewe.png"
+    assert reply.metadata["target_channels"] == ["qq"]
+    assert [m.sender for m in memory.appended] == ["user", "assistant"]
+    assert pushed[-1].metadata["target_channels"] == ["qq"]
+
+
 def test_pipeline_stream_reply_emits_chunk_and_done_events_and_persists() -> None:
     memory = StubSessionMemory()
 
@@ -303,11 +415,13 @@ def test_pipeline_stream_reply_emits_chunk_and_done_events_and_persists() -> Non
             assert messages[0]["role"] == "system"
             assert "当前时间:" in messages[0]["content"]
             assert messages[1]["role"] == "system"
-            assert "[Current Message Context]" in messages[1]["content"]
-            assert "当前消息渠道: WebUI (webui)" in messages[1]["content"]
+            assert "## 当前运行环境" in messages[1]["content"]
             assert messages[2]["role"] == "system"
-            assert "answer the user's direct request and then stop" in messages[2]["content"]
-            assert messages[3:] == [{"role": "user", "content": "hello"}]
+            assert "[Current Message Context]" in messages[2]["content"]
+            assert "当前消息渠道: WebUI (webui)" in messages[2]["content"]
+            assert messages[3]["role"] == "system"
+            assert "answer the user's direct request and then stop" in messages[3]["content"]
+            assert messages[4:] == [{"role": "user", "content": "hello"}]
             assert session_id == "s1"
             yield "He"
             yield "llo"
@@ -332,7 +446,7 @@ def test_pipeline_stream_reply_emits_chunk_and_done_events_and_persists() -> Non
     assert [event.get("text") for event in events[:2]] == ["He", "llo"]
     assert all(event["sender"] == "assistant" for event in events)
     assert all(event["session_id"] == "s1" for event in events)
-    assert all(str(event["timestamp"]).endswith("Z") for event in events)
+    assert all(str(event["timestamp"]).endswith("+08:00") for event in events)
     assert [m.sender for m in memory.appended] == ["user", "assistant"]
     assert memory.appended[1].text == "Hello"
 
@@ -538,6 +652,155 @@ def test_pipeline_injects_skill_instructions_and_exec_profile() -> None:
             "git-workflow",
         )
     ]
+
+
+def test_pipeline_routes_matched_skill_turns_to_reasoning_model() -> None:
+    memory = StubSessionMemory()
+    captured: dict[str, object] = {}
+
+    class StubCatalog:
+        def match_candidates(self, user_message: str):
+            assert "git" in user_message
+            return [
+                SkillManifest(
+                    name="git-workflow",
+                    description="Git workflow",
+                    category="pure",
+                    path=Path("/tmp/git-workflow"),
+                    allowed_tools=["exec_command"],
+                    backend="exec",
+                    exec_profile="git",
+                    triggers=["git"],
+                    risk="low",
+                    dependencies=["git"],
+                    compatibility="linux",
+                )
+            ]
+
+        def load_body(self, skill_name: str) -> str:
+            assert skill_name == "git-workflow"
+            return "Run git status first."
+
+    class StubRouter:
+        def get_model_for_task(self, task_type: str) -> str:
+            if task_type == "reasoning":
+                return "Reasoner"
+            return "Gemini3Pro"
+
+        async def call_with_tools(
+            self,
+            model_name,
+            messages,
+            *,
+            tools=None,
+            session_id=None,
+            task_type=None,
+        ):
+            del messages, tools, session_id
+            captured["model_name"] = model_name
+            captured["task_type"] = task_type
+            return {"text": "done", "tool_calls": []}
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None, task_type=None):
+            del model_name, messages, session_id, tools, task_type
+            if False:  # pragma: no cover
+                yield ""
+
+    class StubSkillManager:
+        def get_tools_schema(self):
+            return [{"type": "function", "function": {"name": "exec_command"}}]
+
+        async def invoke(self, tool_name, params, *, session_id=None, skill_name=None):
+            del tool_name, params, session_id, skill_name
+            return SkillOutput(status="success", result="unused")
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+        skill_manager=StubSkillManager(),
+        skill_catalog=StubCatalog(),
+    )
+
+    async def _collect() -> None:
+        inbound = Message(text="please inspect git changes", sender="user", session_id="s1")
+        async for _ in pipeline.stream_reply(inbound):
+            pass
+
+    asyncio.run(_collect())
+
+    assert captured == {"model_name": "Reasoner", "task_type": "reasoning"}
+
+
+def test_pipeline_filters_tools_to_core_and_matched_skill_candidates() -> None:
+    memory = StubSessionMemory()
+    captured: dict[str, list[str]] = {}
+
+    class StubCatalog:
+        def match_candidates(self, user_message: str):
+            assert "git" in user_message
+            return [
+                SkillManifest(
+                    name="git-workflow",
+                    description="Git workflow",
+                    category="pure",
+                    path=Path("/tmp/git-workflow"),
+                    allowed_tools=["exec_command"],
+                    backend="exec",
+                    exec_profile="git",
+                    triggers=["git"],
+                    risk="low",
+                    dependencies=["git"],
+                    compatibility="linux",
+                )
+            ]
+
+        def load_body(self, skill_name: str) -> str:
+            assert skill_name == "git-workflow"
+            return "Run git status first."
+
+    class StubRouter:
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, session_id
+            captured["tool_names"] = [tool["function"]["name"] for tool in tools or []]
+            return {"text": "done", "tool_calls": []}
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            del model_name, messages, session_id, tools
+            if False:  # pragma: no cover
+                yield ""
+
+    class StubSkillManager:
+        def get_tools_schema(self):
+            return [
+                {"type": "function", "function": {"name": "exec_command"}},
+                {"type": "function", "function": {"name": "read_file"}},
+                {"type": "function", "function": {"name": "create_reminder"}},
+                {"type": "function", "function": {"name": "notion_query_db"}},
+            ]
+
+        async def invoke(self, tool_name, params, *, session_id=None, skill_name=None):
+            del tool_name, params, session_id, skill_name
+            return SkillOutput(status="success", result="unused")
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=100,
+        skill_manager=StubSkillManager(),
+        skill_catalog=StubCatalog(),
+    )
+
+    async def _collect() -> None:
+        inbound = Message(text="please inspect git changes", sender="user", session_id="s1")
+        async for _ in pipeline.stream_reply(inbound):
+            pass
+
+    asyncio.run(_collect())
+
+    assert captured["tool_names"] == ["exec_command", "read_file", "create_reminder"]
 
 
 def test_pipeline_injects_cli_json_metadata_into_exec_command() -> None:
@@ -881,15 +1144,7 @@ def test_system_prompt_contains_time(monkeypatch: pytest.MonkeyPatch) -> None:
     from zoneinfo import ZoneInfo
 
     fixed = datetime(2026, 3, 10, 0, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
-
-    class FixedDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            if tz is None:
-                return fixed
-            return fixed.astimezone(tz)
-
-    monkeypatch.setattr(pipeline_module, "datetime", FixedDatetime)
+    monkeypatch.setattr(pipeline_module, "now_local", lambda: fixed)
 
     memory = StubSessionMemory()
 
@@ -908,16 +1163,122 @@ def test_system_prompt_contains_time(monkeypatch: pytest.MonkeyPatch) -> None:
         pipeline._build_llm_messages(Message(text="hi", sender="user", session_id="s1"))
     )
     system_messages = [item for item in messages if item["role"] == "system"]
-    assert len(system_messages) == 3
+    assert len(system_messages) == 4
     content = system_messages[0]["content"]
     assert "当前时间:" in content
-    assert "2026-03-10T00:15:00+08:00" in content
-    assert "(" in content and ")" in content
-    tz_name = content.split("(")[-1].split(")")[0].strip()
-    assert tz_name
-    assert "[Current Message Context]" in system_messages[1]["content"]
-    assert "当前消息渠道: WebUI (webui)" in system_messages[1]["content"]
-    assert "answer the user's direct request and then stop" in system_messages[2]["content"]
+    assert "2026年03月10日 00:15 (Tuesday)" in content
+    assert "Asia/Shanghai" in content
+    assert "时区:" in content
+    runtime_content = system_messages[1]["content"]
+    assert "## 当前运行环境" in runtime_content
+    assert "当前模型: Gemini3Pro" in runtime_content
+    assert "路由类型: chat" in runtime_content
+    assert "[Current Message Context]" in system_messages[2]["content"]
+    assert "当前消息渠道: WebUI (webui)" in system_messages[2]["content"]
+    assert "answer the user's direct request and then stop" in system_messages[3]["content"]
+
+
+def test_system_prompt_contains_model_info() -> None:
+    memory = StubSessionMemory()
+
+    class StubRouter:
+        async def call(self, model_name, messages):
+            del model_name, messages
+            return "unused"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+    )
+
+    messages = asyncio.run(
+        pipeline._build_llm_messages(Message(text="hi", sender="user", session_id="s1"))
+    )
+    system_messages = [item["content"] for item in messages if item["role"] == "system"]
+    runtime_content = next(item for item in system_messages if "## 当前运行环境" in item)
+
+    assert "当前模型: Gemini3Pro (Gemini3Pro)" in runtime_content
+    assert "路由类型: chat" in runtime_content
+    assert "服务器时间:" in runtime_content
+
+
+def test_system_prompt_updates_on_fallback() -> None:
+    memory = StubSessionMemory()
+    captured_messages: list[list[dict[str, object]]] = []
+
+    runtime_config = RuntimeModelConfig.model_validate(
+        {
+            "default_model": "Gemini3Pro",
+            "task_routing": {"chat": "Gemini3Pro"},
+            "models": {
+                "Gemini3Pro": {
+                    "provider": "Hiapi",
+                    "litellm_model": "openai/gemini-2.5-pro",
+                    "fallback": "DeepseekV3_2",
+                    "api_base": "https://hiapi.online/v1",
+                    "api_key": "sk-hiapi",
+                },
+                "DeepseekV3_2": {
+                    "provider": "Volcengine",
+                    "litellm_model": "openai/ep-20251215171209-4z5qk",
+                    "fallback": None,
+                    "api_base": "https://ark.cn-beijing.volces.com/api/v3",
+                    "api_key": "volc-key",
+                },
+            },
+        }
+    )
+
+    async def fake_acompletion(**kwargs):
+        captured_messages.append(kwargs["messages"])
+        if kwargs["model"] == "openai/gemini-2.5-pro":
+            raise TimeoutError("primary timeout")
+        return {
+            "choices": [{"message": {"content": "fallback ok"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    router = ModelRouter(runtime_config, acompletion_fn=fake_acompletion)
+    pipeline = ChatPipeline(
+        router=router,
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        history_window=20,
+    )
+
+    reply = asyncio.run(pipeline.run_once(Message(text="hi", sender="user", session_id="s1")))
+
+    assert reply.text == "fallback ok"
+    first_runtime = next(
+        item["content"]
+        for item in captured_messages[0]
+        if item["role"] == "system" and "## 当前运行环境" in str(item["content"])
+    )
+    second_runtime = next(
+        item["content"]
+        for item in captured_messages[1]
+        if item["role"] == "system" and "## 当前运行环境" in str(item["content"])
+    )
+    assert "当前模型: Gemini3Pro (openai/gemini-2.5-pro)" in str(first_runtime)
+    assert "备用模型" not in str(first_runtime)
+    assert "当前模型: DeepseekV3_2 (openai/ep-20251215171209-4z5qk)" in str(second_runtime)
+    assert "主模型 Gemini3Pro 暂时不可用" in str(second_runtime)
+
+
+def test_fallback_visible_on_external_channel() -> None:
+    text, prelude_sent = summarize_channel_progress_event(
+        {
+            "type": "model_fallback",
+            "failed_model": "GPT-5.4",
+            "reason": "API timeout",
+            "fallback_model": "EdenQwen",
+        }
+    )
+
+    assert text == "⚠️ 主模型暂时不可用，已切换备用模型回复你"
+    assert prelude_sent is False
 
 
 def test_pipeline_broadcasts_reply_for_qq_channel() -> None:

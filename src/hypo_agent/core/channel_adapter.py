@@ -71,13 +71,16 @@ class WebUIAdapter:
         tool_call = event.tool_calls[0] if event.tool_calls else {}
 
         if event_type == "tool_call_start":
-            return {
+            payload = {
                 "type": "tool_call_start",
                 "tool_name": tool_call.get("tool_name", ""),
                 "tool_call_id": tool_call.get("tool_call_id", ""),
                 "arguments": tool_call.get("arguments", {}),
                 "session_id": session_id,
             }
+            if tool_call.get("iteration") is not None:
+                payload["iteration"] = tool_call.get("iteration")
+            return payload
 
         if event_type == "tool_call_result":
             payload = {
@@ -90,6 +93,12 @@ class WebUIAdapter:
                 "metadata": dict(tool_call.get("metadata", {})),
                 "session_id": session_id,
             }
+            if tool_call.get("summary"):
+                payload["summary"] = tool_call.get("summary")
+            if tool_call.get("duration_ms") is not None:
+                payload["duration_ms"] = tool_call.get("duration_ms")
+            if tool_call.get("iteration") is not None:
+                payload["iteration"] = tool_call.get("iteration")
             if event.compressed_meta is not None:
                 payload["compressed_meta"] = dict(event.compressed_meta)
             if event.attachments:

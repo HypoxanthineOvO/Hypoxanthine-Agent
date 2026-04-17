@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from dataclasses import dataclass, field
 import inspect
+import json
+from pathlib import Path
 import shlex
 from typing import Any, Awaitable, Callable, Protocol
 
@@ -62,6 +65,8 @@ class SlashCommandHandler:
         coder_task_service: Any | None = None,
         memory_gc: Any | None = None,
         model_probe_fn: Callable[[str, Any], Awaitable[Any]] | None = None,
+        restart_handler: Callable[..., Awaitable[str] | str] | None = None,
+        repo_root: Path | str = ".",
     ) -> None:
         self.router = router
         self.session_memory = session_memory
@@ -71,6 +76,8 @@ class SlashCommandHandler:
         self.coder_task_service = coder_task_service
         self.memory_gc = memory_gc
         self.model_probe_fn = model_probe_fn
+        self.restart_handler = restart_handler
+        self.repo_root = Path(repo_root).resolve(strict=False)
         self._registry: list[SlashCommandEntry] = [
             SlashCommandEntry(
                 command="/help",
@@ -131,6 +138,16 @@ class SlashCommandHandler:
                 handler=self._handle_gc,
             ),
             SlashCommandEntry(
+                command="/repair",
+                description="汇总最近错误并在可用时自动提交修复任务",
+                handler=self._handle_repair,
+            ),
+            SlashCommandEntry(
+                command="/restart",
+                description="确认后执行有限自重启（支持 force 跳过冷却期）",
+                handler=self._handle_restart,
+            ),
+            SlashCommandEntry(
                 command="/codex",
                 description="调用 Hypo-Coder 提交、查询、挂载和管理编码任务",
                 handler=self._handle_codex,
@@ -148,6 +165,10 @@ class SlashCommandHandler:
             return await self._handle_codex(inbound)
         if command_lower == "/reminders" or command_lower.startswith("/reminders "):
             return await self._handle_reminders(inbound)
+        if command_lower == "/repair" or command_lower.startswith("/repair "):
+            return await self._handle_repair(inbound)
+        if command_lower == "/restart" or command_lower.startswith("/restart "):
+            return await self._handle_restart(inbound)
 
         sorted_entries = sorted(
             self._registry,
@@ -399,6 +420,114 @@ class SlashCommandHandler:
         skipped = int(result.get("skipped_count") or 0)
         errors = int(result.get("error_count") or 0)
         return f"Memory GC 完成：processed={processed} skipped={skipped} errors={errors}"
+
+    async def _handle_repair(self, inbound: Message) -> str:
+        payload = (inbound.text or "").strip()[len("/repair") :].strip()
+        hours = 24
+        error_summary = await self._load_error_summary(hours=hours, session_id=inbound.session_id)
+        failed_tools = await self._load_failed_tool_history(hours=hours, session_id=inbound.session_id)
+
+        if not payload:
+            return self._format_repair_summary(
+                hours=hours,
+                error_summary=error_summary,
+                failed_tools=failed_tools,
+            )
+
+        recent_logs = await self._load_recent_logs(hours=hours, session_id=inbound.session_id)
+        matched_tools = self._filter_repair_tool_matches(failed_tools, payload)
+        matched_logs = self._filter_repair_log_matches(recent_logs, payload)
+        lines = [
+            "## 修复诊断",
+            "",
+            f"问题描述：{payload}",
+            f"过去 {hours}h 诊断摘要："
+            f" logs={int(error_summary.get('counts', {}).get('logs', 0) or 0)}"
+            f" tool_failures={int(error_summary.get('counts', {}).get('tool_failures', 0) or 0)}"
+            f" total={int(error_summary.get('counts', {}).get('total', 0) or 0)}",
+            "",
+            "相关工具失败：",
+        ]
+        if matched_tools:
+            for item in matched_tools[:5]:
+                lines.append(
+                    f"- {self._tool_display_name(item)} | {self._tool_error_text(item)} | "
+                    f"{item.get('created_at') or 'unknown'}"
+                )
+        else:
+            lines.append("- 未发现直接匹配的问题工具记录。")
+
+        lines.extend(["", "相关日志："])
+        if matched_logs:
+            for item in matched_logs[:5]:
+                lines.append(
+                    f"- {item.get('timestamp') or 'unknown'} | "
+                    f"{item.get('event') or item.get('raw') or 'unknown'}"
+                )
+        else:
+            lines.append("- 未发现直接匹配的错误日志。")
+
+        if self._tool_available("coder_submit_task"):
+            submit_result = await self._invoke_tool(
+                "coder_submit_task",
+                {
+                    "prompt": self._build_repair_task_prompt(
+                        issue=payload,
+                        error_summary=error_summary,
+                        failed_tools=matched_tools or failed_tools[:5],
+                        recent_logs=matched_logs,
+                    ),
+                    "working_directory": str(self.repo_root),
+                },
+                session_id=inbound.session_id,
+            )
+            if isinstance(submit_result, dict):
+                task_id = str(
+                    submit_result.get("task_id")
+                    or submit_result.get("taskId")
+                    or submit_result.get("status")
+                    or "unknown"
+                ).strip()
+                lines.extend(
+                    [
+                        "",
+                        f"已自动提交修复任务：{task_id}",
+                        "已告知 Coder/Codex 依据诊断继续修复，等待完成后回报结果。",
+                    ]
+                )
+                return "\n".join(lines)
+
+        lines.extend(
+            [
+                "",
+                "CoderSkill 不可用。",
+                "修复建议：",
+                self._build_repair_suggestion(issue=payload, failed_tools=matched_tools, recent_logs=matched_logs),
+            ]
+        )
+        return "\n".join(lines)
+
+    async def _handle_restart(self, inbound: Message) -> str:
+        payload = (inbound.text or "").strip()[len("/restart") :].strip().lower()
+        if not payload:
+            return "\n".join(
+                [
+                    "重启前请先确认。",
+                    "确认执行：/restart confirm",
+                    "如需跳过冷却期：/restart force",
+                ]
+            )
+        if payload not in {"confirm", "force"}:
+            return "用法：/restart | /restart confirm | /restart force"
+        if self.restart_handler is None:
+            return "重启能力不可用。"
+        result = self.restart_handler(
+            reason="manual slash command restart",
+            force=payload == "force",
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        return str(result)
 
     async def _handle_codex(self, inbound: Message) -> str:
         if self.coder_task_service is None:
@@ -826,3 +955,246 @@ class SlashCommandHandler:
         if len(text) <= 40:
             return text
         return text[:37] + "..."
+
+    def _tool_available(self, tool_name: str) -> bool:
+        if self.skill_manager is None:
+            return False
+        for schema in self.skill_manager.get_tools_schema(tool_names={tool_name}):
+            if self._read_tool_name(schema) == tool_name:
+                return True
+        return False
+
+    async def _invoke_tool(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        *,
+        session_id: str,
+    ) -> dict[str, Any] | None:
+        if self.skill_manager is None or not self._tool_available(tool_name):
+            return None
+        result = await self.skill_manager.invoke(tool_name, params, session_id=session_id)
+        if result.status != "success" or not isinstance(result.result, dict):
+            return None
+        return result.result
+
+    async def _load_error_summary(self, *, hours: int, session_id: str) -> dict[str, Any]:
+        loaded = await self._invoke_tool("get_error_summary", {"hours": hours}, session_id=session_id)
+        if loaded is not None:
+            return loaded
+        recent_failures = await self._manual_failed_tool_history(hours=hours, limit=10)
+        error_types: dict[str, int] = {}
+        recent_errors: list[dict[str, Any]] = []
+        for item in recent_failures:
+            key = f"tool:{self._tool_display_name(item)}"
+            error_types[key] = error_types.get(key, 0) + 1
+            recent_errors.append(
+                {
+                    "source": "tool",
+                    "timestamp": item.get("created_at"),
+                    "type": key,
+                    "summary": item.get("tool_name"),
+                    "detail": item.get("error_info") or item.get("input_summary") or "",
+                }
+            )
+        return {
+            "hours": hours,
+            "counts": {"logs": 0, "tool_failures": len(recent_failures), "total": len(recent_failures)},
+            "error_types": error_types,
+            "recent_errors": recent_errors[:5],
+            "log_source_available": False,
+            "log_warning": "log inspector unavailable; using structured store fallback",
+        }
+
+    async def _load_failed_tool_history(self, *, hours: int, session_id: str) -> list[dict[str, Any]]:
+        loaded = await self._invoke_tool(
+            "get_tool_history",
+            {"success": False, "hours": hours, "limit": 10},
+            session_id=session_id,
+        )
+        if isinstance(loaded, dict):
+            items = loaded.get("items")
+            if isinstance(items, list):
+                return [item for item in items if isinstance(item, dict)]
+        return await self._manual_failed_tool_history(hours=hours, limit=10)
+
+    async def _load_recent_logs(self, *, hours: int, session_id: str) -> list[dict[str, Any]]:
+        loaded = await self._invoke_tool(
+            "get_recent_logs",
+            {"minutes": hours * 60, "level": "error", "limit": 50},
+            session_id=session_id,
+        )
+        if isinstance(loaded, dict):
+            items = loaded.get("items")
+            if isinstance(items, list):
+                return [item for item in items if isinstance(item, dict)]
+        return []
+
+    async def _manual_failed_tool_history(self, *, hours: int, limit: int) -> list[dict[str, Any]]:
+        loader = getattr(self.structured_store, "list_tool_invocations", None)
+        if not callable(loader):
+            return []
+        since_iso = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
+        rows = await loader(limit=limit, since_iso=since_iso)
+        failed_rows: list[dict[str, Any]] = []
+        for row in rows:
+            status = str(row.get("status") or "").strip().lower()
+            if status == "success":
+                continue
+            failed_rows.append(
+                {
+                    "tool_name": str(row.get("tool_name") or ""),
+                    "skill_name": str(row.get("skill_name") or ""),
+                    "error_info": str(row.get("error_info") or ""),
+                    "input_summary": str(row.get("params_json") or row.get("result_summary") or ""),
+                    "created_at": str(row.get("created_at") or ""),
+                }
+            )
+        return failed_rows
+
+    def _format_repair_summary(
+        self,
+        *,
+        hours: int,
+        error_summary: dict[str, Any],
+        failed_tools: list[dict[str, Any]],
+    ) -> str:
+        counts = error_summary.get("counts") if isinstance(error_summary.get("counts"), dict) else {}
+        lines = [
+            "## 修复诊断",
+            "",
+            f"过去 {hours}h 诊断摘要："
+            f" logs={int(counts.get('logs', 0) or 0)}"
+            f" tool_failures={int(counts.get('tool_failures', 0) or 0)}"
+            f" total={int(counts.get('total', 0) or 0)}",
+            "",
+            "最近失败工具：",
+        ]
+        if failed_tools:
+            for item in failed_tools[:5]:
+                lines.append(
+                    f"- {self._tool_display_name(item)} | {self._tool_error_text(item)} | "
+                    f"{item.get('created_at') or 'unknown'}"
+                )
+        else:
+            lines.append("- 最近 24h 没有失败工具记录。")
+        return "\n".join(lines)
+
+    def _filter_repair_tool_matches(
+        self,
+        items: list[dict[str, Any]],
+        query: str,
+    ) -> list[dict[str, Any]]:
+        lowered = query.casefold()
+        matches: list[dict[str, Any]] = []
+        for item in items:
+            haystack = " ".join(
+                [
+                    str(item.get("tool_name") or ""),
+                    str(item.get("skill_name") or ""),
+                    str(item.get("error_info") or ""),
+                    str(item.get("input_summary") or ""),
+                    str(item.get("output_summary") or ""),
+                ]
+            ).casefold()
+            if lowered in haystack:
+                matches.append(item)
+        return matches
+
+    def _filter_repair_log_matches(
+        self,
+        items: list[dict[str, Any]],
+        query: str,
+    ) -> list[dict[str, Any]]:
+        lowered = query.casefold()
+        matches: list[dict[str, Any]] = []
+        for item in items:
+            context = item.get("context")
+            haystack = " ".join(
+                [
+                    str(item.get("event") or ""),
+                    str(item.get("logger") or ""),
+                    str(item.get("raw") or ""),
+                    json.dumps(context, ensure_ascii=False, sort_keys=True) if isinstance(context, dict) else str(context or ""),
+                ]
+            ).casefold()
+            if lowered in haystack:
+                matches.append(item)
+        return matches
+
+    def _build_repair_task_prompt(
+        self,
+        *,
+        issue: str,
+        error_summary: dict[str, Any],
+        failed_tools: list[dict[str, Any]],
+        recent_logs: list[dict[str, Any]],
+    ) -> str:
+        lines = [
+            "Investigate and fix a Hypo-Agent regression.",
+            f"Issue report: {issue}",
+            f"Working directory: {self.repo_root}",
+            "",
+            "Diagnostic summary:",
+            json.dumps(error_summary, ensure_ascii=False, sort_keys=True),
+            "",
+            "Related failed tools:",
+        ]
+        if failed_tools:
+            for item in failed_tools[:5]:
+                lines.append(
+                    f"- {self._tool_display_name(item)} | "
+                    f"{self._tool_error_text(item)} | {item.get('created_at') or 'unknown'}"
+                )
+        else:
+            lines.append("- none")
+        lines.extend(["", "Related logs:"])
+        if recent_logs:
+            for item in recent_logs[:5]:
+                lines.append(f"- {item.get('timestamp') or 'unknown'} | {item.get('event') or item.get('raw') or 'unknown'}")
+        else:
+            lines.append("- none")
+        lines.extend(
+            [
+                "",
+                "Requirements:",
+                "- diagnose the root cause first",
+                "- implement the minimal fix",
+                "- add or update tests",
+                "- run targeted verification",
+                "- summarize changed files and verification results",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _build_repair_suggestion(
+        self,
+        *,
+        issue: str,
+        failed_tools: list[dict[str, Any]],
+        recent_logs: list[dict[str, Any]],
+    ) -> str:
+        if failed_tools:
+            top_tool = self._tool_display_name(failed_tools[0])
+            top_error = self._tool_error_text(failed_tools[0])
+            return f"- 先复现“{issue}”，重点检查 {top_tool}，最近错误为：{top_error}"
+        if recent_logs:
+            top_log = recent_logs[0]
+            return f"- 先检查错误日志事件 {top_log.get('event') or top_log.get('raw') or 'unknown'}，确认是否为稳定代码/配置问题"
+        return f"- 先复现“{issue}”，再检查最近 24h 的失败工具与错误日志"
+
+    def _tool_display_name(self, item: dict[str, Any]) -> str:
+        skill_name = str(item.get("skill_name") or "").strip()
+        tool_name = str(item.get("tool_name") or "").strip() or "unknown"
+        if skill_name:
+            return f"{skill_name}.{tool_name}"
+        return tool_name
+
+    def _tool_error_text(self, item: dict[str, Any]) -> str:
+        return str(item.get("error_info") or item.get("detail") or item.get("input_summary") or "unknown").strip()
+
+    def _read_tool_name(self, schema: dict[str, Any]) -> str:
+        function_payload = schema.get("function")
+        if isinstance(function_payload, dict):
+            return str(function_payload.get("name") or "").strip()
+        return ""

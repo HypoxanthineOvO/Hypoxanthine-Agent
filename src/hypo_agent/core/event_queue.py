@@ -3,7 +3,13 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Literal
 
-SchedulerEventType = Literal["reminder_trigger", "heartbeat_trigger", "email_scan_trigger", "hypo_info_trigger"]
+SchedulerEventType = Literal[
+    "reminder_trigger",
+    "heartbeat_trigger",
+    "email_scan_trigger",
+    "hypo_info_trigger",
+    "wewe_rss_trigger",
+]
 
 
 class EventQueue:

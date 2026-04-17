@@ -58,7 +58,7 @@ def test_webui_adapter_formats_assistant_chunk_from_rich_response() -> None:
     assert formatted["text"] == "chunk-1"
     assert formatted["sender"] == "assistant"
     assert formatted["session_id"] == "s1"
-    assert formatted["timestamp"].endswith("Z")
+    assert formatted["timestamp"].endswith("+08:00")
 
 
 def test_webui_adapter_formats_assistant_done_with_attachments() -> None:
@@ -84,6 +84,33 @@ def test_webui_adapter_formats_assistant_done_with_attachments() -> None:
 
     assert formatted["type"] == "assistant_done"
     assert formatted["attachments"][0]["filename"] == "export.pdf"
+
+
+def test_webui_adapter_formats_assistant_done_with_image_attachment() -> None:
+    adapter = WebUIAdapter()
+    formatted = asyncio.run(
+        adapter.format(
+            {
+                "type": "assistant_done",
+                "text": "已自动切换到浏览器二维码，请扫描新二维码。",
+                "sender": "assistant",
+                "session_id": "s1",
+                "attachments": [
+                    {
+                        "type": "image",
+                        "url": "/tmp/zhihu-qr.png",
+                        "filename": "zhihu-qr.png",
+                        "mime_type": "image/png",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert formatted["type"] == "assistant_done"
+    assert formatted["text"] == "已自动切换到浏览器二维码，请扫描新二维码。"
+    assert formatted["attachments"][0]["type"] == "image"
+    assert formatted["attachments"][0]["filename"] == "zhihu-qr.png"
 
 
 def test_webui_adapter_formats_tool_result_with_compressed_meta() -> None:

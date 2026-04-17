@@ -338,10 +338,49 @@ def test_pipeline_event_consumer_writes_hypo_info_message() -> None:
         await pipeline.stop_event_consumer()
 
         assert len(memory.appended) == 1
-        assert memory.appended[0].message_tag == "tool_status"
+        assert memory.appended[0].message_tag == "hypo_info"
         assert "Hypo-Info" in (memory.appended[0].text or "")
         assert len(pushed) == 1
-        assert pushed[0].message_tag == "tool_status"
+        assert pushed[0].message_tag == "hypo_info"
+
+    asyncio.run(_run())
+
+
+def test_pipeline_event_consumer_writes_wewe_rss_message() -> None:
+    async def _run() -> None:
+        queue = EventQueue()
+        memory = StubSessionMemory()
+        pushed: list[Message] = []
+
+        async def on_proactive_message(message: Message) -> None:
+            pushed.append(message)
+
+        pipeline = ChatPipeline(
+            router=StubRouter(),
+            chat_model="Gemini3Pro",
+            session_memory=memory,
+            event_queue=queue,
+            on_proactive_message=on_proactive_message,
+        )
+
+        await pipeline.start_event_consumer()
+        await queue.put(
+            {
+                "event_type": "wewe_rss_trigger",
+                "session_id": "main",
+                "summary": "WeWe RSS 微信读书账号已失效：reader-a",
+                "channel": "qq",
+            }
+        )
+        await asyncio.sleep(0.05)
+        await pipeline.stop_event_consumer()
+
+        assert len(memory.appended) == 1
+        assert memory.appended[0].message_tag == "tool_status"
+        assert "WeWe RSS" in (memory.appended[0].text or "")
+        assert memory.appended[0].metadata["target_channels"] == ["qq"]
+        assert len(pushed) == 1
+        assert pushed[0].metadata["target_channels"] == ["qq"]
 
     asyncio.run(_run())
 
@@ -455,5 +494,78 @@ def test_pipeline_event_consumer_emits_error_for_unhandled_user_message_exceptio
             "retryable": True,
             "session_id": "main",
         }
+
+    asyncio.run(_run())
+
+
+
+def test_pipeline_event_consumer_forwards_progress_events_to_emit_callback() -> None:
+    async def _run() -> None:
+        queue = EventQueue()
+        memory = StubSessionMemory()
+        emitted: list[dict[str, object]] = []
+
+        class SkillManager:
+            def get_tools_schema(self) -> list[dict]:
+                return [{"type": "function", "function": {"name": "exec_command"}}]
+
+            async def invoke(self, tool_name: str, params: dict, *, session_id=None, skill_name=None):
+                del tool_name, params, session_id, skill_name
+                from hypo_agent.models import SkillOutput
+                return SkillOutput(status="success", result="ok")
+
+        class Router:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+                del model_name, messages, tools, session_id
+                self.calls += 1
+                if self.calls == 1:
+                    return {
+                        "text": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_command",
+                                    "arguments": '{"command":"echo hi"}',
+                                },
+                            }
+                        ],
+                    }
+                return {"text": "done", "tool_calls": []}
+
+            async def stream(self, model_name, messages, *, session_id=None, tools=None):
+                del model_name, messages, session_id, tools
+                if False:  # pragma: no cover
+                    yield ""
+
+        pipeline = ChatPipeline(
+            router=Router(),
+            chat_model="Gemini3Pro",
+            session_memory=memory,
+            event_queue=queue,
+            skill_manager=SkillManager(),
+        )
+
+        async def emit(event: dict[str, object]) -> None:
+            emitted.append(dict(event))
+
+        await pipeline.start_event_consumer()
+        await queue.put(
+            {
+                "event_type": "user_message",
+                "message": Message(text="run", sender="user", session_id="main"),
+                "emit": emit,
+            }
+        )
+        await asyncio.sleep(0.05)
+        await pipeline.stop_event_consumer()
+
+        assert any(item.get("type") == "pipeline_stage" for item in emitted)
+        assert any(item.get("type") == "react_iteration" for item in emitted)
+        assert any(item.get("type") == "assistant_done" for item in emitted)
 
     asyncio.run(_run())

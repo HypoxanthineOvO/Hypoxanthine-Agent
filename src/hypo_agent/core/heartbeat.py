@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -10,6 +9,7 @@ from typing import Any
 import structlog
 
 from hypo_agent.models import Message
+from hypo_agent.utils.timeutil import now_iso
 
 logger = structlog.get_logger("hypo_agent.heartbeat")
 
@@ -103,7 +103,7 @@ class HeartbeatService:
         prompt = self._load_prompt_text()
         if not prompt:
             summary = f"Heartbeat 配置异常：未找到或内容为空 - {self.prompt_path.as_posix()}"
-            self.last_heartbeat_at = datetime.now(UTC).isoformat()
+            self.last_heartbeat_at = now_iso()
             logger.error(
                 "heartbeat.prompt.missing",
                 session_id=self.default_session_id,
@@ -200,7 +200,7 @@ class HeartbeatService:
         except TimeoutError:
             summary = "Heartbeat 检查超时（可能是模型/工具调用异常）。请查看日志或稍后重试。"
             await self._push_summary(summary)
-            self.last_heartbeat_at = datetime.now(UTC).isoformat()
+            self.last_heartbeat_at = now_iso()
             self._mark_failure()
             logger.error(
                 "heartbeat.timeout",
@@ -215,7 +215,7 @@ class HeartbeatService:
                 "event_sources": event_source_statuses,
             }
         finally:
-            self.last_heartbeat_at = datetime.now(UTC).isoformat()
+            self.last_heartbeat_at = now_iso()
 
         duration_ms = int((perf_counter() - started_at) * 1000)
 
@@ -324,7 +324,7 @@ class HeartbeatService:
 
     def _mark_success(self) -> None:
         self.consecutive_failures = 0
-        self.last_success_at = datetime.now(UTC).isoformat()
+        self.last_success_at = now_iso()
 
     def _mark_failure(self) -> None:
         self.consecutive_failures += 1

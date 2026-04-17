@@ -54,6 +54,138 @@ class EchoSkill(BaseSkill):
         return SkillOutput(status="success", result={"echo": params.get("text", "")})
 
 
+class FakeRepairSkill(BaseSkill):
+    name = "repair_diag"
+    description = "Repair diagnostics"
+    required_permissions: list[str] = []
+
+    def __init__(
+        self,
+        *,
+        error_summary: dict[str, object] | None = None,
+        tool_history: dict[str, object] | None = None,
+        recent_logs: dict[str, object] | None = None,
+    ) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self.error_summary = error_summary or {
+            "hours": 24,
+            "counts": {"logs": 2, "tool_failures": 3, "total": 5},
+            "error_types": {"tool:agent_search.web_search": 2},
+            "recent_errors": [
+                {
+                    "source": "tool",
+                    "timestamp": "2026-04-12T00:00:00+00:00",
+                    "type": "tool:agent_search.web_search",
+                    "summary": "web_search",
+                    "detail": "timeout",
+                }
+            ],
+        }
+        self.tool_history = tool_history or {
+            "count": 2,
+            "items": [
+                {
+                    "tool_name": "web_search",
+                    "skill_name": "agent_search",
+                    "error_info": "timeout",
+                    "input_summary": '{"query": "Claude news"}',
+                    "created_at": "2026-04-12T00:00:00+00:00",
+                },
+                {
+                    "tool_name": "read_file",
+                    "skill_name": "filesystem",
+                    "error_info": "permission denied",
+                    "input_summary": '{"path": "/tmp/x"}',
+                    "created_at": "2026-04-11T23:00:00+00:00",
+                },
+            ],
+        }
+        self.recent_logs = recent_logs or {
+            "available": True,
+            "count": 2,
+            "items": [
+                {
+                    "timestamp": "2026-04-12T00:00:00+00:00",
+                    "event": "web_search timeout",
+                    "logger": "hypo_agent.agent_search",
+                    "context": {"error": "timeout"},
+                    "raw": '{"event":"web_search timeout"}',
+                }
+            ],
+        }
+
+    @property
+    def tools(self) -> list[dict]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_error_summary",
+                    "parameters": {"type": "object", "properties": {"hours": {"type": "integer"}}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_tool_history",
+                    "parameters": {"type": "object", "properties": {"hours": {"type": "integer"}}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_recent_logs",
+                    "parameters": {"type": "object", "properties": {"minutes": {"type": "integer"}}},
+                },
+            },
+        ]
+
+    async def execute(self, tool_name: str, params: dict) -> SkillOutput:
+        self.calls.append((tool_name, dict(params)))
+        if tool_name == "get_error_summary":
+            return SkillOutput(status="success", result=dict(self.error_summary))
+        if tool_name == "get_tool_history":
+            return SkillOutput(status="success", result=dict(self.tool_history))
+        if tool_name == "get_recent_logs":
+            return SkillOutput(status="success", result=dict(self.recent_logs))
+        return SkillOutput(status="error", error_info=f"unsupported tool: {tool_name}")
+
+
+class FakeCoderSubmitSkill(BaseSkill):
+    name = "coder_submit"
+    description = "Coder submit"
+    required_permissions: list[str] = []
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    @property
+    def tools(self) -> list[dict]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "coder_submit_task",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {"type": "string"},
+                            "working_directory": {"type": "string"},
+                        },
+                    },
+                },
+            }
+        ]
+
+    async def execute(self, tool_name: str, params: dict) -> SkillOutput:
+        del tool_name
+        self.calls.append(dict(params))
+        return SkillOutput(
+            status="success",
+            result={"task_id": "coder-fix-123", "status": "queued"},
+        )
+
+
 class FakeCoderTaskService:
     def __init__(self) -> None:
         self.submit_calls: list[dict[str, object]] = []
@@ -487,6 +619,81 @@ def test_slash_commands_gc_runs_memory_gc(tmp_path: Path) -> None:
         assert "Memory GC" in result
         assert "processed=2" in result
         assert memory_gc.calls == 1
+
+    asyncio.run(_run())
+
+
+def test_repair_no_args(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, _, _ = await _build_handler(tmp_path)
+        repair_skill = FakeRepairSkill()
+        handler.skill_manager.register(repair_skill)
+
+        text = await handler.try_handle(Message(text="/repair", sender="user", session_id="s1"))
+
+        assert text is not None
+        assert "诊断摘要" in text
+        assert "web_search" in text
+        assert "tool_failures=3" in text
+        assert repair_skill.calls[0][0] == "get_error_summary"
+        assert repair_skill.calls[0][1]["hours"] == 24
+        assert repair_skill.calls[1][0] == "get_tool_history"
+        assert repair_skill.calls[1][1]["success"] is False
+        assert repair_skill.calls[1][1]["hours"] == 24
+        assert repair_skill.calls[1][1]["limit"] == 10
+
+    asyncio.run(_run())
+
+
+def test_repair_with_description(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, _, _ = await _build_handler(tmp_path)
+        repair_skill = FakeRepairSkill()
+        coder_skill = FakeCoderSubmitSkill()
+        handler.skill_manager.register(repair_skill)
+        handler.skill_manager.register(coder_skill)
+
+        text = await handler.try_handle(
+            Message(text="/repair web_search 超时", sender="user", session_id="s1")
+        )
+
+        assert text is not None
+        assert "web_search 超时" in text
+        assert "已自动提交修复任务" in text
+        assert any(call[0] == "get_recent_logs" for call in repair_skill.calls)
+        assert coder_skill.calls[0]["working_directory"] == str(Path.cwd().resolve())
+        assert "web_search" in str(coder_skill.calls[0]["prompt"])
+
+    asyncio.run(_run())
+
+
+def test_repair_coder_unavailable(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, _, _ = await _build_handler(tmp_path)
+        repair_skill = FakeRepairSkill()
+        handler.skill_manager.register(repair_skill)
+
+        text = await handler.try_handle(
+            Message(text="/repair web_search 超时", sender="user", session_id="s1")
+        )
+
+        assert text is not None
+        assert "CoderSkill 不可用" in text
+        assert "修复建议" in text
+
+    asyncio.run(_run())
+
+
+def test_restart_command(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, _, _ = await _build_handler(tmp_path)
+
+        text = await handler.try_handle(Message(text="/restart", sender="user", session_id="s1"))
+
+        assert text is not None
+        assert "确认" in text
+        assert "/restart confirm" in text
+        assert "/restart force" in text
 
     asyncio.run(_run())
 

@@ -12,6 +12,7 @@ const props = defineProps<{
 }>();
 
 const isNarration = (): boolean => props.message.message_tag === "narration";
+const isPipelineProgress = (): boolean => props.message.kind === "pipeline_event";
 
 const sourceLabel = (): string => {
   const channel = String(props.message.channel ?? "").trim().toLowerCase();
@@ -39,7 +40,7 @@ const avatarLabel = (): string => {
 
 const formattedTime = computed(() => {
   const raw = props.message.timestamp;
-  if (!raw || isNarration()) {
+  if (!raw || isNarration() || isPipelineProgress()) {
     return "";
   }
   return formatMessageTime(raw);
@@ -69,12 +70,13 @@ const attachmentLabel = (rawPath: string, filename?: string | null): string =>
     class="message-bubble"
     :data-sender="message.sender"
     :data-message-tag="message.message_tag"
+    :data-message-kind="message.kind"
   >
-    <div v-if="!isNarration()" class="bubble-avatar">{{ avatarLabel() }}</div>
+    <div v-if="!isNarration() && !isPipelineProgress()" class="bubble-avatar">{{ avatarLabel() }}</div>
     <div class="bubble-content">
       <header class="bubble-meta">
         <span class="sender-name">
-          {{ isNarration() ? "旁白" : (message.senderName ?? message.sender) }}
+          {{ isPipelineProgress() ? "进度" : (isNarration() ? "旁白" : (message.senderName ?? message.sender)) }}
         </span>
         <span v-if="message.message_tag === 'reminder'" class="message-tag">🔔 提醒</span>
         <span v-else-if="message.message_tag === 'heartbeat'" class="message-tag">💓 巡检</span>
@@ -119,7 +121,8 @@ const attachmentLabel = (rawPath: string, filename?: string | null): string =>
   margin-right: auto;
 }
 
-.message-bubble[data-message-tag="narration"] {
+.message-bubble[data-message-tag="narration"],
+.message-bubble[data-message-kind="pipeline_event"] {
   gap: 0.25rem;
   grid-template-columns: minmax(0, 1fr);
   max-width: min(70ch, 100%);
@@ -152,7 +155,8 @@ const attachmentLabel = (rawPath: string, filename?: string | null): string =>
   padding: 0.6rem 0.72rem;
 }
 
-.message-bubble[data-message-tag="narration"] .bubble-content {
+.message-bubble[data-message-tag="narration"] .bubble-content,
+.message-bubble[data-message-kind="pipeline_event"] .bubble-content {
   background: transparent;
   border: none;
   padding: 0.1rem 0.2rem;
@@ -212,14 +216,18 @@ const attachmentLabel = (rawPath: string, filename?: string | null): string =>
   justify-content: flex-end;
 }
 
-.message-bubble[data-message-tag="narration"] .bubble-meta {
+.message-bubble[data-message-tag="narration"] .bubble-meta,
+.message-bubble[data-message-kind="pipeline_event"] .bubble-meta {
   font-size: 0.7rem;
   margin-bottom: 0.15rem;
 }
 
 .message-bubble[data-message-tag="narration"] .sender-name,
 .message-bubble[data-message-tag="narration"] .message-tag,
-.message-bubble[data-message-tag="narration"] .bubble-time {
+.message-bubble[data-message-tag="narration"] .bubble-time,
+.message-bubble[data-message-kind="pipeline_event"] .sender-name,
+.message-bubble[data-message-kind="pipeline_event"] .message-tag,
+.message-bubble[data-message-kind="pipeline_event"] .bubble-time {
   color: color-mix(in srgb, var(--muted) 85%, transparent);
 }
 

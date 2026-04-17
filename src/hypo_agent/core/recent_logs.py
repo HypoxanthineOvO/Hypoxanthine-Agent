@@ -7,6 +7,8 @@ import logging
 from threading import Lock
 from typing import Any, Literal
 
+from hypo_agent.utils.timeutil import now_iso, to_local
+
 RecentLogLevel = Literal["error", "warning"]
 
 _MAX_RECENT_LOGS = 100
@@ -61,7 +63,7 @@ def record_recent_log(
         return
     entry = {
         "timestamp": timestamp
-        or datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        or now_iso(),
         "level": normalized_level,
         "message": _truncate(message, limit=240),
         "detail": _truncate(detail or message),
@@ -97,9 +99,7 @@ class RecentLogBufferHandler(logging.Handler):
         else:
             detail = fallback_detail
         record_recent_log(
-            timestamp=datetime.fromtimestamp(record.created, tz=UTC)
-            .isoformat()
-            .replace("+00:00", "Z"),
+            timestamp=to_local(datetime.fromtimestamp(record.created, tz=UTC)).replace(microsecond=0).isoformat(),
             level=normalized_level,
             message=message or raw_message,
             detail=detail or raw_message,

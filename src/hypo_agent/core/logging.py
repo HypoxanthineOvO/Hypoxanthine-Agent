@@ -10,7 +10,7 @@ from hypo_agent.core.recent_logs import install_recent_log_handler
 
 def configure_logging(level: str = "INFO", json_logs: bool = True) -> None:
     """Configure structlog for application-wide structured logging."""
-    timestamper = structlog.processors.TimeStamper(fmt="iso", utc=True)
+    timestamper = structlog.processors.TimeStamper(fmt="iso", utc=False)
     shared_processors = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 import structlog
@@ -159,7 +160,7 @@ async def _send_error_and_close(ws: WebSocket, session_id: str, exc: Exception) 
 
 def _normalize_event_timestamp(payload: dict[str, object]) -> dict[str, object]:
     event_type = str(payload.get("type") or "")
-    if event_type not in {"assistant_chunk", "assistant_done", "narration"}:
+    if not event_type:
         return payload
     if payload.get("timestamp"):
         return payload
@@ -206,7 +207,20 @@ async def websocket_chat(ws: WebSocket) -> None:
                 if asyncio.iscoroutine(callback_result):
                     await callback_result
             pipeline: ChatPipeline = ws.app.state.pipeline
-            async for event in pipeline.stream_reply(inbound):
+
+            async def emit_progress(payload: dict[str, object]) -> None:
+                await ws.send_json(_normalize_event_timestamp(dict(payload)))
+
+            stream_reply = pipeline.stream_reply
+            stream_reply_kwargs: dict[str, object] = {}
+            try:
+                signature = inspect.signature(stream_reply)
+            except (TypeError, ValueError):
+                signature = None
+            if signature is not None and "event_emitter" in signature.parameters:
+                stream_reply_kwargs["event_emitter"] = emit_progress
+
+            async for event in stream_reply(inbound, **stream_reply_kwargs):
                 await ws.send_json(_normalize_event_timestamp(dict(event)))
     except (ValidationError, ValueError):
         await ws.close(code=4400)

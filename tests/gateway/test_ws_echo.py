@@ -76,6 +76,30 @@ class ToolEventPipeline:
         }
 
 
+class ProgressEventPipeline:
+    async def stream_reply(self, inbound, *, event_emitter=None):
+        assert event_emitter is not None
+        await event_emitter(
+            {
+                "type": "pipeline_stage",
+                "stage": "preprocessing",
+                "detail": "正在分析你的消息...",
+                "session_id": inbound.session_id,
+            }
+        )
+        yield {
+            "type": "assistant_chunk",
+            "text": "ok",
+            "sender": "assistant",
+            "session_id": inbound.session_id,
+        }
+        yield {
+            "type": "assistant_done",
+            "sender": "assistant",
+            "session_id": inbound.session_id,
+        }
+
+
 class AttachmentPipeline:
     def __init__(self) -> None:
         self.inbound = None
@@ -99,9 +123,9 @@ def _client(app_factory, token: str = "test-token", pipeline=None) -> TestClient
     return TestClient(app)
 
 
-def _assert_utc_timestamp(value: object) -> None:
+def _assert_local_timestamp(value: object) -> None:
     assert isinstance(value, str)
-    assert value.endswith("Z")
+    assert value.endswith("+08:00")
     assert "T" in value
 
 
@@ -131,12 +155,12 @@ def test_ws_streams_valid_message_payload(app_factory) -> None:
             assert first["text"] == "HELLO"
             assert first["sender"] == "assistant"
             assert first["session_id"] == "s1"
-            _assert_utc_timestamp(first.get("timestamp"))
+            _assert_local_timestamp(first.get("timestamp"))
 
             assert second["type"] == "assistant_done"
             assert second["sender"] == "assistant"
             assert second["session_id"] == "s1"
-            _assert_utc_timestamp(second.get("timestamp"))
+            _assert_local_timestamp(second.get("timestamp"))
 
 
 def test_ws_rejects_invalid_message_shape(app_factory) -> None:
@@ -158,12 +182,12 @@ def test_ws_defaults_missing_session_id_to_main(app_factory) -> None:
             assert first["text"] == "HELLO"
             assert first["sender"] == "assistant"
             assert first["session_id"] == "main"
-            _assert_utc_timestamp(first.get("timestamp"))
+            _assert_local_timestamp(first.get("timestamp"))
 
             assert second["type"] == "assistant_done"
             assert second["sender"] == "assistant"
             assert second["session_id"] == "main"
-            _assert_utc_timestamp(second.get("timestamp"))
+            _assert_local_timestamp(second.get("timestamp"))
 
 
 def test_ws_sends_error_event_on_pipeline_runtime_error(app_factory) -> None:
@@ -229,8 +253,24 @@ def test_ws_forwards_tool_events_without_modification(app_factory) -> None:
             assert second["type"] == "tool_call_result"
             assert third["type"] == "assistant_chunk"
             assert fourth["type"] == "assistant_done"
-            _assert_utc_timestamp(third.get("timestamp"))
-            _assert_utc_timestamp(fourth.get("timestamp"))
+            _assert_local_timestamp(third.get("timestamp"))
+            _assert_local_timestamp(fourth.get("timestamp"))
+
+
+def test_ws_forwards_pipeline_progress_events_via_event_emitter(app_factory) -> None:
+    with _client(app_factory, pipeline=ProgressEventPipeline()) as client:
+        with client.websocket_connect("/ws?token=test-token") as ws:
+            ws.send_json({"text": "hello", "sender": "user", "session_id": "s1"})
+            first = ws.receive_json()
+            second = ws.receive_json()
+            third = ws.receive_json()
+
+            assert first["type"] == "pipeline_stage"
+            assert first["stage"] == "preprocessing"
+            assert first["session_id"] == "s1"
+            _assert_local_timestamp(first.get("timestamp"))
+            assert second["type"] == "assistant_chunk"
+            assert third["type"] == "assistant_done"
 
 
 def test_ws_broadcasts_server_timestamped_user_message_to_peer(app_factory) -> None:
@@ -245,7 +285,7 @@ def test_ws_broadcasts_server_timestamped_user_message_to_peer(app_factory) -> N
             assert echoed_user["text"] == "hello"
             assert echoed_user["sender"] == "user"
             assert echoed_user["session_id"] == "main"
-            _assert_utc_timestamp(echoed_user.get("timestamp"))
+            _assert_local_timestamp(echoed_user.get("timestamp"))
 
             sender.receive_json()
             sender.receive_json()

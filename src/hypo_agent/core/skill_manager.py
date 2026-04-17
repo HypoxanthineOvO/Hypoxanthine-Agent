@@ -78,12 +78,31 @@ class SkillManager:
         for skill in skills:
             self.register(skill, source=source)
 
-    def get_tools_schema(self) -> list[dict[str, Any]]:
+    def get_tools_schema(
+        self,
+        *,
+        tool_names: set[str] | None = None,
+        skill_names: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        filter_by_tool_names = tool_names is not None
+        filter_by_skill_names = skill_names is not None
+        requested_tool_names = {str(name).strip() for name in (tool_names or set()) if str(name).strip()}
+        requested_skill_names = {str(name).strip() for name in (skill_names or set()) if str(name).strip()}
+
         all_tools: list[dict[str, Any]] = []
         for schema, _, _ in self._builtin_tools.values():
+            tool_name = self._read_tool_name(schema)
+            if filter_by_tool_names and tool_name not in requested_tool_names:
+                continue
             all_tools.append(schema)
         for skill in self._skills.values():
-            all_tools.extend(skill.tools)
+            if filter_by_skill_names and skill.name not in requested_skill_names:
+                continue
+            for tool in skill.tools:
+                tool_name = self._read_tool_name(tool)
+                if filter_by_tool_names and tool_name not in requested_tool_names:
+                    continue
+                all_tools.append(tool)
         return all_tools
 
     def register_builtin_tool(
@@ -117,6 +136,101 @@ class SkillManager:
     def registration_snapshot(self) -> list[dict[str, Any]]:
         return self.list_skills()
 
+    def get_skill_catalog(self) -> str:
+        items = self.list_skills()
+        if not items:
+            return ""
+        lines = ["[Available Skills]"]
+        for item in items:
+            name = str(item.get("name") or "").strip()
+            description = self._catalog_description(str(item.get("description") or ""))
+            if not name or not description:
+                continue
+            tools = [
+                str(tool_name).strip()
+                for tool_name in (item.get("tools") or [])
+                if str(tool_name).strip()
+            ]
+            if tools:
+                lines.append(f"- {name}: {description}（工具名: {', '.join(tools)}）")
+            else:
+                lines.append(f"- {name}: {description}")
+        if len(lines) == 1:
+            return ""
+        lines.append("当你需要使用某个模块的具体工具时，请直接尝试调用——系统会自动加载对应工具。")
+        return "\n".join(lines)
+
+    def get_skill_tools_schema(self, skill_name: str) -> list[dict[str, Any]]:
+        normalized = str(skill_name or "").strip()
+        if not normalized or normalized not in self._skills:
+            return []
+        return list(self._skills[normalized].tools)
+
+    def find_skill_by_tool_name(self, tool_name: str) -> BaseSkill | None:
+        normalized = str(tool_name or "").strip()
+        if not normalized:
+            return None
+        owner = self._tool_to_skill.get(normalized)
+        if owner is not None:
+            return owner
+
+        normalized_casefold = normalized.casefold()
+        exact_skill_matches: list[BaseSkill] = []
+        prefix_skill_matches: list[BaseSkill] = []
+        keyword_matches: list[BaseSkill] = []
+
+        for skill in self._skills.values():
+            skill_name = str(skill.name or "").strip()
+            if not skill_name:
+                continue
+            skill_name_casefold = skill_name.casefold()
+            if normalized_casefold == skill_name_casefold:
+                exact_skill_matches.append(skill)
+                continue
+            if skill_name_casefold.startswith(normalized_casefold):
+                prefix_skill_matches.append(skill)
+                continue
+            keywords = self._keyword_candidates_for_skill(skill)
+            if any(
+                keyword == normalized_casefold
+                or keyword.startswith(normalized_casefold)
+                or normalized_casefold in keyword
+                for keyword in keywords
+            ):
+                keyword_matches.append(skill)
+
+        if len(exact_skill_matches) == 1:
+            return exact_skill_matches[0]
+        if len(prefix_skill_matches) == 1:
+            return prefix_skill_matches[0]
+        if len(keyword_matches) == 1:
+            return keyword_matches[0]
+        return None
+
+    def match_skills_for_text(self, text: str) -> list[str]:
+        normalized = str(text or "").casefold()
+        if not normalized:
+            return []
+
+        matched: list[tuple[int, str]] = []
+        for skill in self._skills.values():
+            score = 0
+            if skill.name.casefold() in normalized:
+                score += 3
+            description = self._catalog_description(skill.description)
+            if description and description.casefold() in normalized:
+                score += 2
+            score += sum(
+                1
+                for token in self._keyword_candidates_for_skill(skill)
+                if token and token in normalized
+            )
+            if score > 0:
+                matched.append((score, skill.name))
+
+        matched.sort(key=lambda item: (-item[0], item[1]))
+        return [name for _, name in matched]
+
     @staticmethod
     def known_skill_names(path: Path | str = "config/skills.yaml") -> set[str]:
         payload = SkillManager._load_skills_payload(path)
@@ -145,6 +259,48 @@ class SkillManager:
             return {}
         payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         return payload if isinstance(payload, dict) else {}
+
+    def _keyword_candidates_for_skill(self, skill: BaseSkill) -> set[str]:
+        candidates: set[str] = set()
+        description = self._catalog_description(skill.description)
+        candidates.update(self._extract_keyword_candidates(skill.name))
+        candidates.update(self._extract_keyword_candidates(description))
+        for hint in getattr(skill, "keyword_hints", []) or []:
+            candidates.update(self._extract_keyword_candidates(str(hint)))
+        for tool in skill.tools:
+            tool_name = self._read_tool_name(tool)
+            if tool_name:
+                candidates.update(self._extract_keyword_candidates(tool_name))
+            tool_description = str(tool.get("function", {}).get("description") or "").strip()
+            candidates.update(self._extract_keyword_candidates(tool_description))
+        return candidates
+
+    def _extract_keyword_candidates(self, text: str) -> set[str]:
+        normalized = " ".join(str(text or "").strip().split())
+        if not normalized:
+            return set()
+
+        candidates: set[str] = set()
+        for token in normalized.replace("/", " ").replace("_", " ").replace("-", " ").split():
+            cleaned = token.strip("()[]{}:;,.'\"")
+            if len(cleaned) >= 2:
+                candidates.add(cleaned.casefold())
+
+        compact = normalized.casefold()
+        if any("\u4e00" <= ch <= "\u9fff" for ch in compact):
+            for chunk in compact.split("，"):
+                chunk = chunk.strip("。；、,;: ")
+                if len(chunk) >= 2:
+                    candidates.add(chunk)
+        return candidates
+
+    def _catalog_description(self, description: str) -> str:
+        normalized = " ".join(str(description or "").split()).strip()
+        if not normalized:
+            return ""
+        if len(normalized) <= 96:
+            return normalized
+        return f"{normalized[:93].rstrip()}..."
 
     async def invoke(
         self,

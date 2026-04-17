@@ -289,12 +289,285 @@ describe("useChatSocket", () => {
       }),
     );
 
-    expect(socket.messages.value).toHaveLength(2);
-    expect(socket.messages.value[0]?.event_type).toBe("tool_call_start");
-    expect(socket.messages.value[0]?.tool_name).toBe("exec_command");
-    expect(socket.messages.value[1]?.event_type).toBe("tool_call_result");
-    expect(socket.messages.value[1]?.error_info).toBeNull();
-    expect(socket.messages.value[1]?.metadata?.ephemeral).toBe(true);
+    expect(socket.messages.value).toHaveLength(3);
+    const toolMessages = socket.messages.value.filter((message) => message.kind === "tool_call");
+    const progressMessage = socket.messages.value.find((message) => message.kind === "pipeline_event");
+    expect(progressMessage?.text).toContain("exec_command 已完成");
+    expect(toolMessages).toHaveLength(2);
+    expect(toolMessages[0]?.event_type).toBe("tool_call_start");
+    expect(toolMessages[0]?.tool_name).toBe("exec_command");
+    expect(toolMessages[1]?.event_type).toBe("tool_call_result");
+    expect(toolMessages[1]?.error_info).toBeNull();
+    expect(toolMessages[1]?.metadata?.ephemeral).toBe(true);
+  });
+
+  it("aggregates pipeline progress events into a collapsible status card", () => {
+    vi.useFakeTimers();
+    const socket = useChatSocket({
+      url: "ws://localhost:8000/ws",
+      token: "abc123",
+      sessionId: ref("main"),
+    });
+    socket.connect();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+    ws.emitMessage(
+      JSON.stringify({
+        type: "pipeline_stage",
+        stage: "preprocessing",
+        detail: "正在分析你的消息...",
+        session_id: "main",
+        timestamp: "2026-04-11T20:00:00+08:00",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "react_iteration",
+        iteration: 2,
+        max_iterations: 8,
+        status: "继续推理...",
+        session_id: "main",
+        timestamp: "2026-04-11T20:00:01+08:00",
+      }),
+    );
+    vi.advanceTimersByTime(800);
+    ws.emitMessage(
+      JSON.stringify({
+        type: "tool_call_result",
+        tool_name: "web_search",
+        tool_call_id: "call-2",
+        status: "success",
+        result: { items: 5 },
+        error_info: null,
+        metadata: { ephemeral: true },
+        summary: "找到 5 条结果",
+        duration_ms: 1200,
+        session_id: "main",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "assistant_done",
+        sender: "assistant",
+        session_id: "main",
+      }),
+    );
+
+    const progressMessage = socket.messages.value.find((message) => message.kind === "pipeline_event");
+    expect(progressMessage).toBeTruthy();
+    expect(progressMessage?.text).toContain("找到 5 条结果");
+    expect(progressMessage?.metadata?.pipeline_collapsed).toBe(true);
+    expect(progressMessage?.metadata?.pipeline_items).toHaveLength(1);
+    vi.useRealTimers();
+  });
+
+  it("does not display fast pipeline stages that complete before the delay window", () => {
+    vi.useFakeTimers();
+    const socket = useChatSocket({
+      url: "ws://localhost:8000/ws",
+      token: "abc123",
+      sessionId: ref("main"),
+    });
+    socket.connect();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+    ws.emitMessage(
+      JSON.stringify({
+        type: "pipeline_stage",
+        stage: "memory_injection",
+        detail: "正在检索相关记忆...",
+        session_id: "main",
+      }),
+    );
+    vi.advanceTimersByTime(200);
+    ws.emitMessage(
+      JSON.stringify({
+        type: "pipeline_stage",
+        stage: "model_routing",
+        detail: "正在选择模型...",
+        session_id: "main",
+      }),
+    );
+    vi.advanceTimersByTime(200);
+    ws.emitMessage(
+      JSON.stringify({
+        type: "pipeline_stage",
+        stage: "tool_execution",
+        detail: "正在准备工具...",
+        session_id: "main",
+      }),
+    );
+    vi.advanceTimersByTime(400);
+    ws.emitMessage(
+      JSON.stringify({
+        type: "assistant_chunk",
+        text: "ok",
+        sender: "assistant",
+        session_id: "main",
+      }),
+    );
+    vi.advanceTimersByTime(1000);
+
+    expect(socket.messages.value.find((message) => message.kind === "pipeline_event")).toBeFalsy();
+    vi.useRealTimers();
+  });
+
+  it("displays a slow pipeline stage only after the delay threshold", () => {
+    vi.useFakeTimers();
+    const socket = useChatSocket({
+      url: "ws://localhost:8000/ws",
+      token: "abc123",
+      sessionId: ref("main"),
+    });
+    socket.connect();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+    ws.emitMessage(
+      JSON.stringify({
+        type: "pipeline_stage",
+        stage: "memory_injection",
+        detail: "正在检索相关记忆...",
+        session_id: "main",
+      }),
+    );
+
+    expect(socket.messages.value.find((message) => message.kind === "pipeline_event")).toBeFalsy();
+    vi.advanceTimersByTime(799);
+    expect(socket.messages.value.find((message) => message.kind === "pipeline_event")).toBeFalsy();
+    vi.advanceTimersByTime(1);
+
+    const progressMessage = socket.messages.value.find((message) => message.kind === "pipeline_event");
+    expect(progressMessage?.text).toContain("正在检索相关记忆");
+    vi.useRealTimers();
+  });
+
+  it("replaces an earlier slow stage when a later slow stage also becomes visible", () => {
+    vi.useFakeTimers();
+    const socket = useChatSocket({
+      url: "ws://localhost:8000/ws",
+      token: "abc123",
+      sessionId: ref("main"),
+    });
+    socket.connect();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+    ws.emitMessage(
+      JSON.stringify({
+        type: "pipeline_stage",
+        stage: "memory_injection",
+        detail: "正在检索相关记忆...",
+        session_id: "main",
+      }),
+    );
+    vi.advanceTimersByTime(800);
+
+    let progressMessage = socket.messages.value.find((message) => message.kind === "pipeline_event");
+    expect(progressMessage?.text).toContain("正在检索相关记忆");
+    expect(progressMessage?.metadata?.pipeline_items).toHaveLength(1);
+
+    ws.emitMessage(
+      JSON.stringify({
+        type: "pipeline_stage",
+        stage: "model_routing",
+        detail: "正在选择模型...",
+        session_id: "main",
+      }),
+    );
+    vi.advanceTimersByTime(800);
+
+    progressMessage = socket.messages.value.find((message) => message.kind === "pipeline_event");
+    expect(progressMessage?.text).toContain("正在选择模型");
+    expect(progressMessage?.text).not.toContain("正在检索相关记忆");
+    expect(progressMessage?.metadata?.pipeline_items).toHaveLength(1);
+    vi.useRealTimers();
+  });
+
+  it("displays tool call start immediately without waiting for the stage delay", () => {
+    vi.useFakeTimers();
+    const socket = useChatSocket({
+      url: "ws://localhost:8000/ws",
+      token: "abc123",
+      sessionId: ref("main"),
+    });
+    socket.connect();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+    ws.emitMessage(
+      JSON.stringify({
+        type: "tool_call_start",
+        tool_name: "web_search",
+        tool_call_id: "call-1",
+        arguments: { query: "hypo agent" },
+        session_id: "main",
+      }),
+    );
+
+    const progressMessage = socket.messages.value.find((message) => message.kind === "pipeline_event");
+    expect(progressMessage?.text).toContain("正在调用 web_search");
+    vi.useRealTimers();
+  });
+
+  it("suppresses duplicate tool_status messages after pipeline progress starts", () => {
+    const socket = useChatSocket({
+      url: "ws://localhost:8000/ws",
+      token: "abc123",
+      sessionId: ref("main"),
+    });
+    socket.connect();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+    ws.emitMessage(
+      JSON.stringify({
+        type: "tool_call_start",
+        tool_name: "web_search",
+        tool_call_id: "call-1",
+        arguments: { query: "hypo agent" },
+        session_id: "main",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        text: "🔍 正在搜索...",
+        sender: "assistant",
+        session_id: "main",
+        message_tag: "tool_status",
+        metadata: { ephemeral: true },
+      }),
+    );
+
+    const plainToolStatus = socket.messages.value.filter(
+      (message) => message.message_tag === "tool_status" && message.kind === "text",
+    );
+    const toolMessages = socket.messages.value.filter((message) => message.kind === "tool_call");
+    const progressMessage = socket.messages.value.find((message) => message.kind === "pipeline_event");
+
+    expect(toolMessages).toHaveLength(1);
+    expect(progressMessage?.text).toContain("正在调用 web_search");
+    expect(plainToolStatus).toHaveLength(0);
   });
 
   it("converts ws error events into retryable error cards for the active session only", () => {

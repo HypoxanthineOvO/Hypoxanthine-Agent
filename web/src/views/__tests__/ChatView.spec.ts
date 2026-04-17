@@ -557,6 +557,72 @@ describe("ChatView", () => {
     expect(wrapper.text()).toContain("已经帮你扫了一遍。");
   });
 
+  it("renders a collapsible pipeline progress card for stage and react events", async () => {
+    const wrapper = mount(ChatView, {
+      props: {
+        wsUrl: "ws://localhost:8000/ws",
+        token: "test-token",
+      },
+    });
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+    ws.emitMessage(
+      JSON.stringify({
+        type: "pipeline_stage",
+        stage: "preprocessing",
+        detail: "正在分析你的消息...",
+        session_id: "main",
+        timestamp: "2026-04-11T20:00:00+08:00",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "react_iteration",
+        iteration: 2,
+        max_iterations: 8,
+        status: "继续推理...",
+        session_id: "main",
+        timestamp: "2026-04-11T20:00:01+08:00",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "tool_call_result",
+        tool_name: "web_search",
+        tool_call_id: "call-2",
+        status: "success",
+        result: { items: 5 },
+        error_info: null,
+        metadata: { ephemeral: true },
+        summary: "找到 5 条结果",
+        duration_ms: 1200,
+        session_id: "main",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "assistant_done",
+        sender: "assistant",
+        session_id: "main",
+      }),
+    );
+
+    await flushUi();
+    await flushUi();
+
+    const card = wrapper.get('[data-testid="pipeline-progress-card"]');
+    expect(card.text()).toContain("找到 5 条结果");
+    expect(card.text()).toContain("推理中 (2/8)");
+    expect(card.classes()).toContain("is-collapsed");
+  });
+
   it("inserts a time separator when visible messages are more than five minutes apart", async () => {
     const fetchMock = vi.fn();
     fetchMock

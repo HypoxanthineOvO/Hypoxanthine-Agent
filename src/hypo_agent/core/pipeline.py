@@ -4,17 +4,18 @@ import asyncio
 import base64
 from collections.abc import AsyncIterator
 from contextvars import ContextVar
-from datetime import datetime
 import inspect
 import json
 from pathlib import Path
 import re
+from math import ceil
 from time import perf_counter
 from typing import Any, Protocol
 
 import structlog
 
 from hypo_agent.core.channel_adapter import ChannelAdapter, WebUIAdapter
+from hypo_agent.core.model_runtime_context import build_runtime_model_context
 from hypo_agent.core.notion_todo_binding import (
     confirm_pending_notion_todo_candidate,
     get_pending_notion_todo_candidate,
@@ -27,9 +28,10 @@ from hypo_agent.core.skill_catalog import SkillManifest
 from hypo_agent.core.time_utils import utc_isoformat, utc_now
 from hypo_agent.core.uploads import guess_mime_type
 from hypo_agent.exceptions import HypoAgentError
-from hypo_agent.memory.semantic_memory import ChunkResult, estimate_token_count
+from hypo_agent.memory.semantic_memory import estimate_token_count
 from hypo_agent.memory.session import SessionMemory
 from hypo_agent.models import Attachment, Message, SkillOutput
+from hypo_agent.utils.timeutil import now_local
 
 logger = structlog.get_logger("hypo_agent.core.pipeline")
 
@@ -75,6 +77,12 @@ TOOL_USE_SYSTEM_PROMPT = (
     "You must first ask for confirmation, wait for the user's explicit approval, "
     "and never call save_sop in the same turn as the confirmation question. "
     "When a task looks repetitive or operational, use search_sop(query, top_k) to retrieve saved SOPs."
+    " When the user reports a broken feature or you detect repeated tool failures, "
+    "first diagnose with get_error_summary(hours=24) and get_tool_history(success=false, hours=24). "
+    "If the issue is likely code/config related instead of a transient network problem, "
+    "submit a repair task with coder_submit_task only after diagnosis. "
+    "After submitting the repair, tell the user you have escalated it and wait for Codex/Coder completion. "
+    "Do not submit blind repair tasks without diagnostic evidence. "
     " After a tool returns, write the final user-facing reply in natural language. "
     "Do not dump raw JSON, serialized tool payloads, or internal status wrappers unless the user explicitly asks for raw data."
 )
@@ -89,11 +97,11 @@ REPLY_BOUNDARY_SYSTEM_PROMPT = (
 )
 
 KILL_SWITCH_MESSAGE = "⚠️ Kill Switch 已激活。所有执行已停止。发送 /resume 恢复。"
-SESSION_FUSED_MESSAGE = "⚠️ 本次对话累计错误过多（5 次），已暂停执行。请检查问题后重新发送消息继续。"
-COMPRESSED_MARKER_PREFIX = "[📦 Output compressed"
-HEARTBEAT_TOOL_CONTENT_CHAR_LIMIT = 1800
+SESSION_FUSED_MESSAGE = "⚠️ 本次对话累计错误过多，已暂停执行。请检查问题后重新发送消息继续。"
+COMPRESSED_MARKER_PREFIX = "[📦 原始输出"
+HEARTBEAT_TOOL_CONTENT_CHAR_LIMIT = 4000
 HEARTBEAT_TOOL_CONTENT_LINE_LIMIT = 80
-HEARTBEAT_TOOL_VALUE_CHAR_LIMIT = 600
+HEARTBEAT_TOOL_VALUE_CHAR_LIMIT = 1200
 HEARTBEAT_TOOL_COLLECTION_LIMIT = 8
 HEARTBEAT_TOOL_DEPTH_LIMIT = 3
 HEARTBEAT_TRUNCATION_MARKER = "... [truncated for heartbeat]"
@@ -156,6 +164,47 @@ _PIPELINE_RECOVERABLE_ERRORS = (
     ValueError,
 )
 
+_HISTORY_SKIP_MESSAGE_TAGS = {
+    "reminder",
+    "heartbeat",
+    "email_scan",
+    "scheduler",
+    "tool_status",
+    "subscription",
+}
+
+_CORE_TOOL_WHITELIST = {
+    "update_persona_memory",
+    "save_sop",
+    "search_sop",
+    "web_search",
+    "web_read",
+    "exec_command",
+    "run_code",
+    "read_file",
+    "write_file",
+    "list_directory",
+    "create_reminder",
+    "list_reminders",
+    "update_reminder",
+    "delete_reminder",
+    "snooze_reminder",
+    "save_preference",
+    "get_preference",
+}
+
+_RETRYABLE_TOOLS = {
+    "web_search",
+    "read_file",
+    "get_recent_logs",
+    "get_session_history",
+    "get_tool_history",
+    "get_mail_snapshot",
+    "get_reminder_snapshot",
+    "get_notion_todo_snapshot",
+    "get_heartbeat_snapshot",
+}
+
 
 def _error_fields(exc: Exception) -> dict[str, str]:
     message = str(exc).strip()
@@ -177,6 +226,8 @@ class ChatModelRouter(Protocol):
         *,
         tools: list[dict[str, Any]] | None = None,
         timeout_seconds: float | None = None,
+        task_type: str | None = None,
+        event_emitter: Any | None = None,
     ) -> str: ...
 
     async def call_with_tools(
@@ -187,6 +238,8 @@ class ChatModelRouter(Protocol):
         tools: list[dict[str, Any]] | None = None,
         session_id: str | None = None,
         timeout_seconds: float | None = None,
+        task_type: str | None = None,
+        event_emitter: Any | None = None,
     ) -> dict[str, Any]: ...
 
     async def stream(
@@ -197,11 +250,26 @@ class ChatModelRouter(Protocol):
         session_id: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         timeout_seconds: float | None = None,
+        task_type: str | None = None,
+        event_emitter: Any | None = None,
     ) -> AsyncIterator[str]: ...
 
 
 class ChatSkillManager(Protocol):
-    def get_tools_schema(self) -> list[dict[str, Any]]: ...
+    def get_tools_schema(
+        self,
+        *,
+        tool_names: set[str] | None = None,
+        skill_names: set[str] | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def get_skill_catalog(self) -> str: ...
+
+    def get_skill_tools_schema(self, skill_name: str) -> list[dict[str, Any]]: ...
+
+    def find_skill_by_tool_name(self, tool_name: str) -> Any | None: ...
+
+    def match_skills_for_text(self, text: str) -> list[str]: ...
 
     async def invoke(
         self,
@@ -222,6 +290,8 @@ class ChatOutputCompressor(Protocol):
         self,
         output: str,
         metadata: dict[str, Any],
+        *,
+        tool_name: str | None = None,
     ) -> tuple[str, bool]: ...
 
 
@@ -232,18 +302,22 @@ class ChatPipeline:
         chat_model: str,
         session_memory: SessionMemory,
         heartbeat_chat_model: str | None = None,
-        history_window: int = 20,
+        history_window: int = 100,
+        history_token_budget: int = 7000,
         skill_manager: ChatSkillManager | None = None,
         structured_store: Any | None = None,
         circuit_breaker: Any | None = None,
-        max_react_rounds: int = 15,
+        max_react_rounds: int = 8,
+        max_react_timeout_seconds: int | None = 120,
         heartbeat_max_react_rounds: int | None = None,
+        heartbeat_react_timeout_seconds: int | None = 180,
         heartbeat_model_timeout_seconds: int | None = 60,
         heartbeat_allowed_tools: set[str] | None = None,
         slash_commands: SlashCommands | None = None,
         output_compressor: ChatOutputCompressor | None = None,
         channel_adapter: ChannelAdapter | None = None,
         event_queue: Any | None = None,
+        event_emitter: Any | None = None,
         on_proactive_message: Any | None = None,
         persona_system_prompt: str = "",
         persona_manager: Any | None = None,
@@ -253,23 +327,36 @@ class ChatPipeline:
         on_narration: Any | None = None,
         skill_catalog: Any | None = None,
         coder_task_service: Any | None = None,
+        wewe_rss_monitor: Any | None = None,
     ) -> None:
         self.router = router
         self.chat_model = chat_model
         self.session_memory = session_memory
         self.history_window = history_window
+        self.history_token_budget = max(0, int(history_token_budget))
         self.skill_manager = skill_manager
         self.structured_store = structured_store
         self.circuit_breaker = circuit_breaker
         self.max_react_rounds = max_react_rounds
+        self.max_react_timeout_seconds = (
+            None
+            if max_react_timeout_seconds is None
+            else max(1, int(max_react_timeout_seconds))
+        )
         self.heartbeat_chat_model = str(heartbeat_chat_model or "").strip() or None
         self.heartbeat_max_react_rounds = heartbeat_max_react_rounds
+        self.heartbeat_react_timeout_seconds = (
+            None
+            if heartbeat_react_timeout_seconds is None
+            else max(1, int(heartbeat_react_timeout_seconds))
+        )
         self.heartbeat_model_timeout_seconds = heartbeat_model_timeout_seconds
         self.heartbeat_allowed_tools = set(heartbeat_allowed_tools or set())
         self.slash_commands = slash_commands
         self.output_compressor = output_compressor
         self.channel_adapter = channel_adapter or WebUIAdapter()
         self.event_queue = event_queue
+        self.event_emitter = event_emitter
         self.on_proactive_message = on_proactive_message
         self.persona_system_prompt = persona_system_prompt.strip()
         self.persona_manager = persona_manager
@@ -279,10 +366,12 @@ class ChatPipeline:
         self.on_narration = on_narration
         self.skill_catalog = skill_catalog
         self.coder_task_service = coder_task_service
+        self.wewe_rss_monitor = wewe_rss_monitor
         self._event_consumer_task: asyncio.Task[None] | None = None
         self._pending_sop_usage: set[str] = set()
         self._last_activity_at = utc_isoformat(utc_now())
         self._last_activity_monotonic = perf_counter()
+        self._session_loaded_skills: dict[str, set[str]] = {}
 
     async def start_event_consumer(self) -> None:
         if self.event_queue is None:
@@ -303,6 +392,27 @@ class ChatPipeline:
             await task
         except asyncio.CancelledError:
             pass
+
+    def _resolve_event_emitter(self, override: Any | None = None) -> Any | None:
+        return override or self.event_emitter
+
+    async def _emit_progress_event(
+        self,
+        payload: dict[str, Any],
+        *,
+        event_emitter: Any | None = None,
+    ) -> None:
+        emitter = self._resolve_event_emitter(event_emitter)
+        if emitter is None:
+            return
+        event = dict(payload)
+        event.setdefault("timestamp", utc_isoformat(utc_now()))
+        try:
+            result = emitter(event)
+            if inspect.isawaitable(result):
+                await result
+        except _PIPELINE_RECOVERABLE_ERRORS:
+            logger.warning("pipeline.progress_emit_failed", event_type=event.get("type"), exc_info=True)
 
     async def enqueue_user_message(
         self,
@@ -415,6 +525,26 @@ class ChatPipeline:
             return None
         return float(timeout_seconds)
 
+    def _react_timeout_for(self, inbound: Message | None) -> float | None:
+        if self._is_heartbeat_request(inbound):
+            timeout_seconds = self.heartbeat_react_timeout_seconds
+        else:
+            timeout_seconds = self.max_react_timeout_seconds
+        if timeout_seconds is None:
+            return None
+        return float(timeout_seconds)
+
+    def _remaining_react_timeout(
+        self,
+        react_deadline: float | None,
+    ) -> float | None:
+        if react_deadline is None:
+            return None
+        remaining = react_deadline - perf_counter()
+        if remaining <= 0:
+            raise TimeoutError("ReAct timeout exceeded")
+        return float(ceil(remaining))
+
     def _resolve_heartbeat_model(self) -> str:
         configured = str(self.heartbeat_chat_model or "").strip()
         if configured:
@@ -429,20 +559,400 @@ class ChatPipeline:
                 return candidate
         return self.chat_model
 
-    def _filter_tools_for_inbound(
+    def _session_loaded_skill_names(self, session_id: str | None) -> set[str]:
+        key = str(session_id or "").strip()
+        if not key:
+            return set()
+        return set(self._session_loaded_skills.get(key, set()))
+
+    def _remember_loaded_skills(
+        self,
+        session_id: str | None,
+        skill_names: set[str],
+    ) -> None:
+        key = str(session_id or "").strip()
+        normalized = {str(name).strip() for name in skill_names if str(name).strip()}
+        if not key or not normalized:
+            return
+        current = self._session_loaded_skills.setdefault(key, set())
+        current.update(normalized)
+
+    def _skill_manager_get_tools_schema(
+        self,
+        *,
+        tool_names: set[str] | None = None,
+        skill_names: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        if self.skill_manager is None:
+            return []
+        filter_by_tool_names = tool_names is not None
+        filter_by_skill_names = skill_names is not None
+        normalized_tool_names = {str(name).strip() for name in (tool_names or set()) if str(name).strip()}
+        normalized_skill_names = {str(name).strip() for name in (skill_names or set()) if str(name).strip()}
+        if filter_by_tool_names and not normalized_tool_names:
+            return []
+        if filter_by_skill_names and not normalized_skill_names:
+            return []
+        getter = getattr(self.skill_manager, "get_tools_schema", None)
+        if not callable(getter):
+            return []
+
+        try:
+            if self._method_supports_kwarg(getter, "tool_names") or self._method_supports_kwarg(getter, "skill_names"):
+                return getter(
+                    tool_names=normalized_tool_names if filter_by_tool_names else None,
+                    skill_names=normalized_skill_names if filter_by_skill_names else None,
+                )
+            tools = getter()
+        except TypeError:
+            tools = getter()
+        if not isinstance(tools, list):
+            return []
+
+        filtered = list(tools)
+        if filter_by_skill_names:
+            explicit = self._skill_manager_get_skill_tools_schema_bulk(normalized_skill_names)
+            if explicit:
+                filtered = explicit
+            else:
+                filtered = [
+                    tool
+                    for tool in filtered
+                    if (
+                        (owner := self._skill_manager_find_skill_by_tool_name(
+                            str(tool.get("function", {}).get("name") or "").strip()
+                        ))
+                        is not None
+                        and owner.name in normalized_skill_names
+                    )
+                ]
+        if filter_by_tool_names:
+            filtered = [
+                tool
+                for tool in filtered
+                if str(tool.get("function", {}).get("name") or "").strip() in normalized_tool_names
+            ]
+        return filtered
+
+    def _skill_manager_get_skill_tools_schema_bulk(
+        self,
+        skill_names: set[str],
+    ) -> list[dict[str, Any]]:
+        tools: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for skill_name in skill_names:
+            for tool in self._skill_manager_get_skill_tools_schema(skill_name):
+                tool_name = str(tool.get("function", {}).get("name") or "").strip()
+                if not tool_name or tool_name in seen:
+                    continue
+                seen.add(tool_name)
+                tools.append(tool)
+        return tools
+
+    def _skill_manager_get_skill_tools_schema(self, skill_name: str) -> list[dict[str, Any]]:
+        if self.skill_manager is None:
+            return []
+        getter = getattr(self.skill_manager, "get_skill_tools_schema", None)
+        if callable(getter):
+            try:
+                tools = getter(skill_name)
+            except TypeError:
+                tools = []
+            if isinstance(tools, list):
+                return tools
+        return []
+
+    def _skill_manager_find_skill_by_tool_name(self, tool_name: str) -> Any | None:
+        if self.skill_manager is None:
+            return None
+        finder = getattr(self.skill_manager, "find_skill_by_tool_name", None)
+        if not callable(finder):
+            return None
+        try:
+            return finder(tool_name)
+        except TypeError:
+            return None
+
+    def _skill_manager_match_skills_for_text(self, text: str) -> list[str]:
+        if self.skill_manager is None:
+            return []
+        matcher = getattr(self.skill_manager, "match_skills_for_text", None)
+        if not callable(matcher):
+            return []
+        try:
+            matched = matcher(text)
+        except Exception:
+            logger.warning("tool_exposure.preload_match_failed", exc_info=True)
+            return []
+        if not isinstance(matched, list):
+            return []
+        return [str(name).strip() for name in matched if str(name).strip()]
+
+    def _supports_progressive_tool_disclosure(self) -> bool:
+        if self.skill_manager is None:
+            return False
+        return callable(getattr(self.skill_manager, "find_skill_by_tool_name", None)) and callable(
+            getattr(self.skill_manager, "get_skill_tools_schema", None)
+        )
+
+    def _match_preloaded_skill_names(
+        self,
+        inbound: Message,
+        *,
+        candidate_skills: list[SkillManifest] | None = None,
+    ) -> set[str]:
+        if self.skill_manager is None:
+            return set()
+
+        skill_names: set[str] = set()
+        text = self._message_text_for_llm(inbound)
+        skill_names.update(self._skill_manager_match_skills_for_text(text))
+
+        for manifest in candidate_skills or []:
+            manifest_name = str(getattr(manifest, "name", "") or "").strip()
+            if manifest_name and self._skill_manager_get_skill_tools_schema(manifest_name):
+                skill_names.add(manifest_name)
+                continue
+            for tool_name in getattr(manifest, "allowed_tools", []) or []:
+                owner = self._skill_manager_find_skill_by_tool_name(tool_name)
+                if owner is not None:
+                    skill_names.add(owner.name)
+        return skill_names
+
+    def _core_tool_names_for_inbound(self, inbound: Message | None) -> set[str] | None:
+        if self._is_heartbeat_request(inbound):
+            if self.heartbeat_allowed_tools:
+                return set(self.heartbeat_allowed_tools)
+            return None
+        return set(_CORE_TOOL_WHITELIST)
+
+    def _merge_tool_schemas(
+        self,
+        *tool_groups: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for group in tool_groups:
+            for tool in group:
+                tool_name = str(tool.get("function", {}).get("name") or "").strip()
+                if not tool_name or tool_name in seen:
+                    continue
+                merged.append(tool)
+                seen.add(tool_name)
+        return merged
+
+    def _build_exposed_tools(
+        self,
+        *,
+        inbound: Message | None,
+        session_id: str | None,
+        preloaded_skill_names: set[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        assert self.skill_manager is not None
+        core_tool_names = self._core_tool_names_for_inbound(inbound)
+        core_tools = (
+            self._skill_manager_get_tools_schema(tool_names=core_tool_names)
+            if core_tool_names is not None
+            else self._skill_manager_get_tools_schema()
+        )
+        persisted_skill_names = self._session_loaded_skill_names(session_id)
+        preloaded_names = {str(name).strip() for name in (preloaded_skill_names or set()) if str(name).strip()}
+        persisted_tools = self._skill_manager_get_tools_schema(skill_names=persisted_skill_names)
+        preloaded_tools = self._skill_manager_get_tools_schema(skill_names=preloaded_names)
+        exposed_tools = self._merge_tool_schemas(core_tools, persisted_tools, preloaded_tools)
+        exposure = {
+            "core_tool_names": [
+                str(tool.get("function", {}).get("name") or "").strip()
+                for tool in core_tools
+                if str(tool.get("function", {}).get("name") or "").strip()
+            ],
+            "preloaded_skill_names": sorted(preloaded_names),
+            "persisted_skill_names": sorted(persisted_skill_names),
+            "tool_names": [
+                str(tool.get("function", {}).get("name") or "").strip()
+                for tool in exposed_tools
+                if str(tool.get("function", {}).get("name") or "").strip()
+            ],
+        }
+        exposure["core_count"] = len(exposure["core_tool_names"])
+        exposure["preloaded_count"] = len(preloaded_tools)
+        exposure["persisted_dynamic_count"] = len(persisted_tools)
+        return exposed_tools, exposure
+
+    def _tool_names(self, tools: list[dict[str, Any]]) -> set[str]:
+        return {
+            str(tool.get("function", {}).get("name") or "").strip()
+            for tool in tools
+            if str(tool.get("function", {}).get("name") or "").strip()
+        }
+
+    def _legacy_filtered_tools(
         self,
         tools: list[dict[str, Any]],
         *,
         inbound: Message | None,
+        candidate_skills: list[SkillManifest] | None = None,
     ) -> list[dict[str, Any]]:
-        if not self._is_heartbeat_request(inbound) or not self.heartbeat_allowed_tools:
-            return tools
-        allowed = self.heartbeat_allowed_tools
-        return [
+        if not tools:
+            return []
+
+        allowed_tool_names: set[str] = set()
+        if self._is_heartbeat_request(inbound) and self.heartbeat_allowed_tools:
+            allowed_tool_names.update(self.heartbeat_allowed_tools)
+        else:
+            tool_names = self._tool_names(tools)
+            if candidate_skills or (tool_names & _CORE_TOOL_WHITELIST):
+                allowed_tool_names.update(_CORE_TOOL_WHITELIST)
+                for manifest in candidate_skills or []:
+                    allowed_tool_names.update(manifest.allowed_tools)
+        if not allowed_tool_names:
+            return list(tools)
+        filtered = [
             tool
             for tool in tools
-            if str(tool.get("function", {}).get("name") or "").strip() in allowed
+            if str(tool.get("function", {}).get("name") or "").strip() in allowed_tool_names
         ]
+        return filtered or list(tools)
+
+    def _first_unexposed_tool_call(
+        self,
+        tool_calls: list[dict[str, Any]],
+        *,
+        exposed_tool_names: set[str],
+        inbound: Message | None,
+    ) -> dict[str, Any] | None:
+        for tool_call in tool_calls:
+            tool_name = self._extract_tool_name(tool_call)
+            if not tool_name:
+                continue
+            if tool_name in exposed_tool_names:
+                continue
+            if self._is_heartbeat_request(inbound) and self.heartbeat_allowed_tools:
+                if tool_name not in self.heartbeat_allowed_tools:
+                    return tool_call
+            return tool_call
+        return None
+
+    def _tool_pruning_snapshot(
+        self,
+        tools: list[dict[str, Any]],
+        filtered_tools: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        original_names = [
+            str(tool.get("function", {}).get("name") or "").strip()
+            for tool in tools
+            if str(tool.get("function", {}).get("name") or "").strip()
+        ]
+        filtered_names = [
+            str(tool.get("function", {}).get("name") or "").strip()
+            for tool in filtered_tools
+            if str(tool.get("function", {}).get("name") or "").strip()
+        ]
+        dropped_names = [name for name in original_names if name not in set(filtered_names)]
+        return {
+            "tool_names": filtered_names,
+            "tool_count": len(filtered_names),
+            "dropped_tools": dropped_names,
+            "dropped_count": len(dropped_names),
+        }
+
+    def _history_message_should_skip(self, message: Message) -> bool:
+        tag = str(message.message_tag or "").strip().lower()
+        channel = self._normalized_channel_name(message.channel)
+        return tag in _HISTORY_SKIP_MESSAGE_TAGS or channel == "system"
+
+    def _estimate_message_tokens(self, message: dict[str, Any]) -> int:
+        role = str(message.get("role") or "")
+        content = message.get("content")
+        if isinstance(content, str):
+            payload = content
+        else:
+            payload = json.dumps(content, ensure_ascii=False, default=str)
+        return estimate_token_count(role) + estimate_token_count(payload) + 8
+
+    def _estimate_prompt_tokens(self, messages: list[dict[str, Any]]) -> int:
+        return sum(self._estimate_message_tokens(message) for message in messages)
+
+    def _select_history_messages(self, history: list[Message]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        budget = self.history_token_budget
+        selected: list[dict[str, Any]] = []
+        used_tokens = 0
+        skipped_system = 0
+        dropped_budget = 0
+
+        for item in reversed(history):
+            if self._history_message_should_skip(item):
+                skipped_system += 1
+                continue
+            llm_item = self._to_llm_message(item)
+            if llm_item is None:
+                continue
+            message_tokens = self._estimate_message_tokens(llm_item)
+            if selected and budget > 0 and used_tokens + message_tokens > budget:
+                dropped_budget += 1
+                continue
+            if budget > 0 and used_tokens + message_tokens > budget and not selected:
+                dropped_budget += 1
+                continue
+            selected.append(llm_item)
+            used_tokens += message_tokens
+
+        selected.reverse()
+        return selected, {
+            "history_messages_seen": len(history),
+            "history_messages_selected": len(selected),
+            "history_messages_skipped_system": skipped_system,
+            "history_messages_dropped_budget": dropped_budget,
+            "history_tokens": used_tokens,
+            "history_token_budget": budget,
+        }
+
+    def _budget_warning_round(self, max_react_rounds: int) -> int:
+        if max_react_rounds <= 0:
+            return 0
+        return max(1, int(max_react_rounds * 0.7))
+
+    def _apply_budget_pressure(
+        self,
+        react_messages: list[dict[str, Any]],
+        *,
+        round_num: int,
+        max_react_rounds: int,
+    ) -> list[dict[str, Any]]:
+        warning_round = self._budget_warning_round(max_react_rounds)
+        if round_num < warning_round:
+            return react_messages
+        budget_left = max(0, max_react_rounds - round_num + 1)
+        pressured = list(react_messages)
+        pressured.append(
+            {
+                "role": "system",
+                "content": (
+                    f"Budget warning: you are in round {round_num}/{max_react_rounds}. "
+                    f"At most {budget_left} tool round(s) remain. "
+                    "Only call another tool if it is strictly necessary; otherwise finalize."
+                ),
+            }
+        )
+        return pressured
+
+    def _resolve_router_timeout(
+        self,
+        *,
+        inbound: Message | None,
+        react_deadline: float | None = None,
+    ) -> float | None:
+        timeout_candidates = [
+            value
+            for value in (
+                self._remaining_react_timeout(react_deadline),
+                self._heartbeat_timeout_for(inbound),
+            )
+            if value is not None
+        ]
+        if not timeout_candidates:
+            return None
+        return min(timeout_candidates)
 
     def _method_supports_kwarg(self, method: Any, name: str) -> bool:
         try:
@@ -456,11 +966,22 @@ class ChatPipeline:
         messages: list[dict[str, Any]],
         *,
         inbound: Message | None,
+        react_deadline: float | None = None,
+        task_type: str | None = None,
+        event_emitter: Any | None = None,
     ) -> str:
         kwargs: dict[str, Any] = {}
-        timeout_seconds = self._heartbeat_timeout_for(inbound)
+        timeout_seconds = self._resolve_router_timeout(
+            inbound=inbound,
+            react_deadline=react_deadline,
+        )
         if timeout_seconds is not None and self._method_supports_kwarg(self.router.call, "timeout_seconds"):
             kwargs["timeout_seconds"] = timeout_seconds
+        if task_type is not None and self._method_supports_kwarg(self.router.call, "task_type"):
+            kwargs["task_type"] = task_type
+        resolved_event_emitter = self._resolve_event_emitter(event_emitter)
+        if resolved_event_emitter is not None and self._method_supports_kwarg(self.router.call, "event_emitter"):
+            kwargs["event_emitter"] = resolved_event_emitter
         return await self.router.call(model_name, messages, **kwargs)
 
     async def _router_call_with_tools(
@@ -471,15 +992,29 @@ class ChatPipeline:
         inbound: Message | None,
         tools: list[dict[str, Any]] | None = None,
         session_id: str | None = None,
+        react_deadline: float | None = None,
+        task_type: str | None = None,
+        event_emitter: Any | None = None,
     ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
         if self._method_supports_kwarg(self.router.call_with_tools, "tools"):
             kwargs["tools"] = tools
         if self._method_supports_kwarg(self.router.call_with_tools, "session_id"):
             kwargs["session_id"] = session_id
-        timeout_seconds = self._heartbeat_timeout_for(inbound)
+        timeout_seconds = self._resolve_router_timeout(
+            inbound=inbound,
+            react_deadline=react_deadline,
+        )
         if timeout_seconds is not None and self._method_supports_kwarg(self.router.call_with_tools, "timeout_seconds"):
             kwargs["timeout_seconds"] = timeout_seconds
+        if task_type is not None and self._method_supports_kwarg(self.router.call_with_tools, "task_type"):
+            kwargs["task_type"] = task_type
+        resolved_event_emitter = self._resolve_event_emitter(event_emitter)
+        if (
+            resolved_event_emitter is not None
+            and self._method_supports_kwarg(self.router.call_with_tools, "event_emitter")
+        ):
+            kwargs["event_emitter"] = resolved_event_emitter
         return await self.router.call_with_tools(model_name, messages, **kwargs)
 
     async def _router_stream(
@@ -490,15 +1025,26 @@ class ChatPipeline:
         inbound: Message | None,
         tools: list[dict[str, Any]] | None = None,
         session_id: str | None = None,
+        react_deadline: float | None = None,
+        task_type: str | None = None,
+        event_emitter: Any | None = None,
     ) -> AsyncIterator[str]:
         kwargs: dict[str, Any] = {}
         if self._method_supports_kwarg(self.router.stream, "tools"):
             kwargs["tools"] = tools
         if self._method_supports_kwarg(self.router.stream, "session_id"):
             kwargs["session_id"] = session_id
-        timeout_seconds = self._heartbeat_timeout_for(inbound)
+        timeout_seconds = self._resolve_router_timeout(
+            inbound=inbound,
+            react_deadline=react_deadline,
+        )
         if timeout_seconds is not None and self._method_supports_kwarg(self.router.stream, "timeout_seconds"):
             kwargs["timeout_seconds"] = timeout_seconds
+        if task_type is not None and self._method_supports_kwarg(self.router.stream, "task_type"):
+            kwargs["task_type"] = task_type
+        resolved_event_emitter = self._resolve_event_emitter(event_emitter)
+        if resolved_event_emitter is not None and self._method_supports_kwarg(self.router.stream, "event_emitter"):
+            kwargs["event_emitter"] = resolved_event_emitter
         async for chunk in self.router.stream(model_name, messages, **kwargs):
             yield chunk
 
@@ -509,7 +1055,10 @@ class ChatPipeline:
         model_name: str,
         session_id: str,
         max_react_rounds: int,
+        inbound: Message | None = None,
         heartbeat_mode: bool = False,
+        react_deadline: float | None = None,
+        task_type: str | None = None,
     ) -> str:
         if heartbeat_mode:
             return self._build_heartbeat_round_limit_summary(
@@ -535,11 +1084,20 @@ class ChatPipeline:
                 decision_kwargs["tools"] = None
             if self._method_supports_kwarg(self.router.call_with_tools, "session_id"):
                 decision_kwargs["session_id"] = session_id
-            if (
-                self.heartbeat_model_timeout_seconds is not None
-                and self._method_supports_kwarg(self.router.call_with_tools, "timeout_seconds")
+            timeout_seconds = self._resolve_router_timeout(
+                inbound=inbound,
+                react_deadline=react_deadline,
+            )
+            if timeout_seconds is not None and self._method_supports_kwarg(
+                self.router.call_with_tools,
+                "timeout_seconds",
             ):
-                decision_kwargs["timeout_seconds"] = self.heartbeat_model_timeout_seconds
+                decision_kwargs["timeout_seconds"] = timeout_seconds
+            if task_type is not None and self._method_supports_kwarg(
+                self.router.call_with_tools,
+                "task_type",
+            ):
+                decision_kwargs["task_type"] = task_type
             decision = await self.router.call_with_tools(
                 model_name,
                 final_messages,
@@ -555,11 +1113,16 @@ class ChatPipeline:
                     stream_kwargs["session_id"] = session_id
                 if self._method_supports_kwarg(self.router.stream, "tools"):
                     stream_kwargs["tools"] = None
-                if (
-                    self.heartbeat_model_timeout_seconds is not None
-                    and self._method_supports_kwarg(self.router.stream, "timeout_seconds")
+                if timeout_seconds is not None and self._method_supports_kwarg(
+                    self.router.stream,
+                    "timeout_seconds",
                 ):
-                    stream_kwargs["timeout_seconds"] = self.heartbeat_model_timeout_seconds
+                    stream_kwargs["timeout_seconds"] = timeout_seconds
+                if task_type is not None and self._method_supports_kwarg(
+                    self.router.stream,
+                    "task_type",
+                ):
+                    stream_kwargs["task_type"] = task_type
                 async for chunk in self.router.stream(
                     model_name,
                     final_messages,
@@ -644,6 +1207,17 @@ class ChatPipeline:
             )
             return outbound
 
+        pre_llm_message = await self._try_handle_pre_llm_message(inbound)
+        if pre_llm_message is not None:
+            self._append_session_message(inbound)
+            self._append_session_message(pre_llm_message)
+            await self._broadcast_message(
+                pre_llm_message,
+                origin_channel=inbound.channel,
+                origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
+            )
+            return pre_llm_message
+
         pre_llm_text = await self._try_handle_pre_llm_shortcuts(inbound)
         if pre_llm_text is not None:
             self._append_session_message(inbound)
@@ -680,13 +1254,30 @@ class ChatPipeline:
             return outbound
 
         candidate_skills = self._match_skill_candidates(inbound)
+        task_type = self._resolve_task_type_for_inbound(
+            inbound,
+            use_tools=False,
+            candidate_skills=candidate_skills,
+        )
+        model_name = self._resolve_model_for_inbound(
+            inbound,
+            use_tools=False,
+            candidate_skills=candidate_skills,
+        )
         llm_messages = await self._build_llm_messages(
             inbound,
             candidate_skills=candidate_skills,
+            model_name=model_name,
+            task_type=task_type,
         )
-        model_name = self._resolve_model_for_inbound(inbound)
         self._append_session_message(inbound)
-        text = await self._router_call(model_name, llm_messages, inbound=inbound)
+        text = await self._router_call(
+            model_name,
+            llm_messages,
+            inbound=inbound,
+            task_type=task_type,
+            event_emitter=self.event_emitter,
+        )
         text = await self._append_codex_status_bar(text, session_id=inbound.session_id)
         outbound = Message(
             text=text,
@@ -704,7 +1295,12 @@ class ChatPipeline:
         )
         return outbound
 
-    async def stream_reply(self, inbound: Message) -> AsyncIterator[dict[str, Any]]:
+    async def stream_reply(
+        self,
+        inbound: Message,
+        *,
+        event_emitter: Any | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
         narration_tasks: set[asyncio.Task[None]] = set()
         try:
             collected_attachments: list[Attachment] = []
@@ -736,6 +1332,29 @@ class ChatPipeline:
                 yield await self._format_event(
                     event_type="assistant_done",
                     response=RichResponse(),
+                    session_id=inbound.session_id,
+                )
+                return
+
+            pre_llm_message = await self._try_handle_pre_llm_message(inbound)
+            if pre_llm_message is not None:
+                self._append_session_message(inbound)
+                yield await self._format_event(
+                    event_type="assistant_chunk",
+                    response=RichResponse(text=pre_llm_message.text or ""),
+                    session_id=inbound.session_id,
+                )
+                self._append_session_message(pre_llm_message)
+                await self._broadcast_message(
+                    pre_llm_message,
+                    origin_channel=inbound.channel,
+                    origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
+                )
+                yield await self._format_event(
+                    event_type="assistant_done",
+                    response=RichResponse(
+                        attachments=[attachment.model_copy() for attachment in pre_llm_message.attachments],
+                    ),
                     session_id=inbound.session_id,
                 )
                 return
@@ -796,15 +1415,64 @@ class ChatPipeline:
                 )
                 return
 
+            await self._emit_progress_event(
+                {
+                    "type": "pipeline_stage",
+                    "stage": "preprocessing",
+                    "detail": "正在分析你的消息...",
+                    "session_id": inbound.session_id,
+                },
+                event_emitter=event_emitter,
+            )
             max_react_rounds = self._effective_max_react_rounds(inbound)
             use_tools = self.skill_manager is not None and max_react_rounds > 0
             candidate_skills = self._match_skill_candidates(inbound)
-            llm_messages = await self._build_llm_messages(
+            await self._emit_progress_event(
+                {
+                    "type": "pipeline_stage",
+                    "stage": "memory_injection",
+                    "detail": "正在检索相关记忆...",
+                    "session_id": inbound.session_id,
+                },
+                event_emitter=event_emitter,
+            )
+            task_type = self._resolve_task_type_for_inbound(
                 inbound,
                 use_tools=use_tools,
                 candidate_skills=candidate_skills,
             )
-            model_name = self._resolve_model_for_inbound(inbound)
+            model_name = self._resolve_model_for_inbound(
+                inbound,
+                use_tools=use_tools,
+                candidate_skills=candidate_skills,
+            )
+            llm_messages = await self._build_llm_messages(
+                inbound,
+                use_tools=use_tools,
+                candidate_skills=candidate_skills,
+                model_name=model_name,
+                task_type=task_type,
+            )
+            await self._emit_progress_event(
+                {
+                    "type": "pipeline_stage",
+                    "stage": "model_routing",
+                    "detail": f"选择模型: {model_name}",
+                    "model": model_name,
+                    "task_type": task_type,
+                    "session_id": inbound.session_id,
+                },
+                event_emitter=event_emitter,
+            )
+            prompt_tokens = self._estimate_prompt_tokens(llm_messages)
+            logger.info(
+                "pipeline.model_selected",
+                session_id=inbound.session_id,
+                model_name=model_name,
+                use_tools=use_tools,
+                prompt_tokens=prompt_tokens,
+                candidate_skills=[manifest.name for manifest in candidate_skills],
+            )
             self._append_session_message(inbound)
 
             full_text = ""
@@ -812,31 +1480,68 @@ class ChatPipeline:
             session_fused = False
             last_compressed_meta: dict[str, Any] | None = None
             last_tool_fallback_text: str | None = None
+            react_iterations_completed = 0
+            react_tool_calls_total = 0
 
             if use_tools:
                 assert self.skill_manager is not None
-                tools = self._filter_tools_for_inbound(
-                    self.skill_manager.get_tools_schema(),
-                    inbound=inbound,
-                )
-                tool_names = [
-                    str(tool.get("function", {}).get("name") or "")
-                    for tool in tools
-                    if str(tool.get("function", {}).get("name") or "").strip()
-                ]
+                all_tools = self._skill_manager_get_tools_schema()
+                progressive_disclosure_enabled = self._supports_progressive_tool_disclosure()
+                preloaded_skill_names: set[str] = set()
+                if progressive_disclosure_enabled:
+                    preloaded_skill_names = self._match_preloaded_skill_names(
+                        inbound,
+                        candidate_skills=candidate_skills,
+                    )
+                    tools, exposure_snapshot = self._build_exposed_tools(
+                        inbound=inbound,
+                        session_id=inbound.session_id,
+                        preloaded_skill_names=preloaded_skill_names,
+                    )
+                else:
+                    tools = self._legacy_filtered_tools(
+                        all_tools,
+                        inbound=inbound,
+                        candidate_skills=candidate_skills,
+                    )
+                    exposure_snapshot = {
+                        "core_count": len(self._tool_names(tools)),
+                        "preloaded_count": 0,
+                        "persisted_dynamic_count": 0,
+                    }
+                tool_snapshot = self._tool_pruning_snapshot(all_tools, tools)
+                tool_names = self._tool_names(tools)
                 react_messages: list[dict[str, Any]] = list(llm_messages)
                 reached_round_limit = True
+                react_deadline = None
+                react_timeout_seconds = self._react_timeout_for(inbound)
+                if react_timeout_seconds is not None:
+                    react_deadline = perf_counter() + react_timeout_seconds
                 logger.info(
                     "react.start",
                     session_id=inbound.session_id,
                     max_rounds=max_react_rounds,
+                    react_timeout_seconds=react_timeout_seconds,
                 )
                 logger.debug(
                     "react.tools",
                     session_id=inbound.session_id,
-                    tool_names=tool_names,
-                    tool_count=len(tool_names),
+                    **tool_snapshot,
                 )
+                logger.info(
+                    "tool_exposure.snapshot",
+                    session_id=inbound.session_id,
+                    core_count=exposure_snapshot["core_count"],
+                    preloaded_count=exposure_snapshot["preloaded_count"],
+                    dynamic_count=exposure_snapshot["persisted_dynamic_count"],
+                )
+                if preloaded_skill_names:
+                    self._remember_loaded_skills(inbound.session_id, preloaded_skill_names)
+                    logger.info(
+                        "tool_exposure.preloaded",
+                        session_id=inbound.session_id,
+                        skill_names=sorted(preloaded_skill_names),
+                    )
 
                 for round_num in range(1, max_react_rounds + 1):
                     if self._kill_switch_active():
@@ -848,19 +1553,163 @@ class ChatPipeline:
                         )
                         killed = True
                         break
-                    decision = await self._router_call_with_tools(
-                        model_name,
-                        react_messages,
-                        inbound=inbound,
-                        tools=tools,
-                        session_id=inbound.session_id,
+                    react_iterations_completed = round_num
+                    await self._emit_progress_event(
+                        {
+                            "type": "react_iteration",
+                            "iteration": round_num,
+                            "max_iterations": max_react_rounds,
+                            "status": "继续推理...",
+                            "session_id": inbound.session_id,
+                        },
+                        event_emitter=event_emitter,
                     )
-                    tool_calls = decision.get("tool_calls") or []
+                    round_messages = self._apply_budget_pressure(
+                        react_messages,
+                        round_num=round_num,
+                        max_react_rounds=max_react_rounds,
+                    )
+                    tool_not_found_handled = False
+                    while True:
+                        decision = await self._router_call_with_tools(
+                            model_name,
+                            round_messages,
+                            inbound=inbound,
+                            tools=tools,
+                            session_id=inbound.session_id,
+                            react_deadline=react_deadline,
+                            task_type=task_type,
+                            event_emitter=event_emitter,
+                        )
+                        tool_calls = decision.get("tool_calls") or []
+                        missing_tool_call = (
+                            self._first_unexposed_tool_call(
+                                tool_calls,
+                                exposed_tool_names=tool_names,
+                                inbound=inbound,
+                            )
+                            if progressive_disclosure_enabled
+                            else None
+                        )
+                        if missing_tool_call is None:
+                            break
+
+                        missing_tool_name = self._extract_tool_name(missing_tool_call)
+                        owning_skill = self._skill_manager_find_skill_by_tool_name(missing_tool_name)
+                        if (
+                            owning_skill is not None
+                            and self._is_heartbeat_request(inbound)
+                            and self.heartbeat_allowed_tools
+                            and missing_tool_name not in self.heartbeat_allowed_tools
+                        ):
+                            owning_skill = None
+                        if owning_skill is not None:
+                            self._remember_loaded_skills(inbound.session_id, {owning_skill.name})
+                            logger.info(
+                                "skill.dynamic_load",
+                                session_id=inbound.session_id,
+                                skill_name=owning_skill.name,
+                                tool_name=missing_tool_name,
+                            )
+                            logger.info(
+                                "tool_exposure.dynamic",
+                                session_id=inbound.session_id,
+                                skill_name=owning_skill.name,
+                                tool_name=missing_tool_name,
+                            )
+                            tools, exposure_snapshot = self._build_exposed_tools(
+                                inbound=inbound,
+                                session_id=inbound.session_id,
+                            )
+                            tool_snapshot = self._tool_pruning_snapshot(all_tools, tools)
+                            tool_names = self._tool_names(tools)
+                            logger.debug(
+                                "react.tools",
+                                session_id=inbound.session_id,
+                                **tool_snapshot,
+                            )
+                            logger.info(
+                                "tool_exposure.snapshot",
+                                session_id=inbound.session_id,
+                                core_count=exposure_snapshot["core_count"],
+                                preloaded_count=exposure_snapshot["preloaded_count"],
+                                dynamic_count=exposure_snapshot["persisted_dynamic_count"],
+                            )
+                            continue
+
+                        tool_calls = [missing_tool_call]
+                        react_messages.append(
+                            {
+                                "role": "assistant",
+                                "content": decision.get("text", ""),
+                                "tool_calls": tool_calls,
+                            }
+                        )
+                        tool_name = missing_tool_name
+                        tool_call_id = str(missing_tool_call.get("id") or "")
+                        arguments = self._parse_tool_arguments(missing_tool_call)
+                        output = self._tool_not_found_output(tool_name)
+                        await self._send_tool_status(
+                            tool_name=tool_name,
+                            status="fail",
+                            session_id=inbound.session_id,
+                            error=output.error_info or "",
+                            event_emitter=event_emitter,
+                            origin_channel=inbound.channel,
+                            origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
+                        )
+                        yield await self._format_event(
+                            event_type="tool_call_start",
+                            response=RichResponse(
+                                tool_calls=[
+                                    {
+                                        "tool_name": tool_name,
+                                        "tool_call_id": tool_call_id,
+                                        "arguments": arguments,
+                                        "iteration": round_num,
+                                    }
+                                ]
+                            ),
+                            session_id=inbound.session_id,
+                        )
+                        yield await self._format_event(
+                            event_type="tool_call_result",
+                            response=RichResponse(
+                                tool_calls=[
+                                    {
+                                        "tool_name": tool_name,
+                                        "tool_call_id": tool_call_id,
+                                        "status": output.status,
+                                        "result": output.result,
+                                        "error_info": output.error_info,
+                                        "metadata": {"ephemeral": True},
+                                        "summary": self._tool_fallback_text(output),
+                                        "duration_ms": 0,
+                                        "iteration": round_num,
+                                    }
+                                ],
+                            ),
+                            session_id=inbound.session_id,
+                        )
+                        react_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call_id,
+                                "content": json.dumps(output.model_dump(mode="json"), ensure_ascii=False),
+                            }
+                        )
+                        tool_not_found_handled = True
+                        tool_calls = []
+                        break
+
+                    react_tool_calls_total += len(tool_calls)
                     logger.info(
                         "react.round",
                         round=round_num,
                         tool_calls=len(tool_calls),
                     )
+                    if tool_not_found_handled:
+                        continue
                     if not tool_calls:
                         reached_round_limit = False
                         text = str(decision.get("text") or "")
@@ -878,6 +1727,9 @@ class ChatPipeline:
                                 inbound=inbound,
                                 session_id=inbound.session_id,
                                 tools=tools,
+                                react_deadline=react_deadline,
+                                task_type=task_type,
+                                event_emitter=event_emitter,
                             ):
                                 if self._kill_switch_active():
                                     full_text = KILL_SWITCH_MESSAGE
@@ -928,6 +1780,9 @@ class ChatPipeline:
                             tool_name=tool_name,
                             status="start",
                             session_id=inbound.session_id,
+                            event_emitter=event_emitter,
+                            origin_channel=inbound.channel,
+                            origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
                         )
                         yield await self._format_event(
                             event_type="tool_call_start",
@@ -937,6 +1792,7 @@ class ChatPipeline:
                                         "tool_name": tool_name,
                                         "tool_call_id": tool_call_id,
                                         "arguments": arguments,
+                                        "iteration": round_num,
                                     }
                                 ]
                             ),
@@ -945,11 +1801,13 @@ class ChatPipeline:
 
                         started_at = perf_counter()
                         try:
-                            output = await self.skill_manager.invoke(
-                                tool_name,
-                                arguments,
+                            output = await self._invoke_tool_with_retry(
+                                tool_name=tool_name,
+                                arguments=arguments,
                                 session_id=inbound.session_id,
-                                skill_name=active_skill.name if active_skill is not None else "direct",
+                                skill_name=self._resolve_tool_skill_name(candidate_skills, tool_name),
+                                event_emitter=event_emitter,
+                                iteration=round_num,
                             )
                         except HypoAgentError as exc:
                             await self._send_tool_status(
@@ -957,6 +1815,20 @@ class ChatPipeline:
                                 status="fail",
                                 session_id=inbound.session_id,
                                 error=str(exc),
+                                event_emitter=event_emitter,
+                                origin_channel=inbound.channel,
+                                origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
+                            )
+                            await self._emit_progress_event(
+                                {
+                                    "type": "tool_call_error",
+                                    "tool": tool_name,
+                                    "error": str(exc),
+                                    "will_retry": False,
+                                    "iteration": round_num,
+                                    "session_id": inbound.session_id,
+                                },
+                                event_emitter=event_emitter,
                             )
                             raise
                         finally:
@@ -966,12 +1838,17 @@ class ChatPipeline:
                                 started_at=started_at,
                             )
 
+                        duration_ms = int(max(0.0, perf_counter() - started_at) * 1000)
+
                         if output.status == "success":
                             self._track_sop_usage_from_tool_output(tool_name, output)
                             await self._send_tool_status(
                                 tool_name=tool_name,
                                 status="ok",
                                 session_id=inbound.session_id,
+                                event_emitter=event_emitter,
+                                origin_channel=inbound.channel,
+                                origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
                             )
                         else:
                             await self._send_tool_status(
@@ -979,9 +1856,24 @@ class ChatPipeline:
                                 status="fail",
                                 session_id=inbound.session_id,
                                 error=output.error_info,
+                                event_emitter=event_emitter,
+                                origin_channel=inbound.channel,
+                                origin_client_id=str(inbound.metadata.get("webui_client_id") or ""),
+                            )
+                            await self._emit_progress_event(
+                                {
+                                    "type": "tool_call_error",
+                                    "tool": tool_name,
+                                    "error": str(output.error_info or output.status),
+                                    "will_retry": False,
+                                    "iteration": round_num,
+                                    "session_id": inbound.session_id,
+                                },
+                                event_emitter=event_emitter,
                             )
                         serialized_output = json.dumps(output.model_dump(mode="json"), ensure_ascii=False)
-                        last_tool_fallback_text = self._tool_fallback_text(output) or last_tool_fallback_text
+                        tool_summary = self._tool_fallback_text(output)
+                        last_tool_fallback_text = tool_summary or last_tool_fallback_text
                         tool_content = self._tool_content_for_react(
                             output,
                             serialized_output=serialized_output,
@@ -1006,6 +1898,7 @@ class ChatPipeline:
                             tool_content, was_compressed = await self.output_compressor.compress_if_needed(
                                 tool_content,
                                 compression_metadata,
+                                tool_name=tool_name,
                             )
                             if was_compressed:
                                 tool_result_for_event = tool_content
@@ -1022,6 +1915,17 @@ class ChatPipeline:
                                         output=output,
                                         compressed_meta=compressed_meta_for_event,
                                     )
+                                    await self._emit_progress_event(
+                                        {
+                                            "type": "compression",
+                                            "tool": tool_name,
+                                            "tool_call_id": tool_call_id,
+                                            "original_chars": int(compressed_meta_for_event.get("original_chars") or 0),
+                                            "compressed_chars": int(compressed_meta_for_event.get("compressed_chars") or 0),
+                                            "session_id": inbound.session_id,
+                                        },
+                                        event_emitter=event_emitter,
+                                    )
                         yield await self._format_event(
                             event_type="tool_call_result",
                             response=RichResponse(
@@ -1035,6 +1939,9 @@ class ChatPipeline:
                                         "result": tool_result_for_event,
                                         "error_info": output.error_info,
                                         "metadata": tool_metadata_for_event,
+                                        "summary": tool_summary,
+                                        "duration_ms": duration_ms,
+                                        "iteration": round_num,
                                     }
                                 ],
                             ),
@@ -1078,7 +1985,10 @@ class ChatPipeline:
                             model_name=model_name,
                             session_id=inbound.session_id,
                             max_react_rounds=max_react_rounds,
+                            inbound=inbound,
                             heartbeat_mode=self._is_heartbeat_request(inbound),
+                            react_deadline=react_deadline,
+                            task_type=task_type,
                         )
                         yield await self._format_event(
                             event_type="assistant_chunk",
@@ -1095,12 +2005,23 @@ class ChatPipeline:
                         response=RichResponse(text=full_text),
                         session_id=inbound.session_id,
                     )
+                await self._emit_progress_event(
+                    {
+                        "type": "react_complete",
+                        "total_iterations": react_iterations_completed,
+                        "total_tool_calls": react_tool_calls_total,
+                        "session_id": inbound.session_id,
+                    },
+                    event_emitter=event_emitter,
+                )
             else:
                 async for chunk in self._router_stream(
                     model_name,
                     llm_messages,
                     inbound=inbound,
                     session_id=inbound.session_id,
+                    task_type=task_type,
+                    event_emitter=event_emitter,
                 ):
                     if self._kill_switch_active():
                         full_text = KILL_SWITCH_MESSAGE
@@ -1238,12 +2159,25 @@ class ChatPipeline:
                 return parsed
         return {}
 
+    def _tool_not_found_output(self, tool_name: str) -> SkillOutput:
+        normalized = str(tool_name or "").strip() or "unknown_tool"
+        return SkillOutput(
+            status="error",
+            error_info=f"tool_not_found: {normalized}",
+            result={
+                "error": "tool_not_found",
+                "tool_name": normalized,
+            },
+        )
+
     async def _build_llm_messages(
         self,
         inbound: Message,
         *,
         use_tools: bool = False,
         candidate_skills: list[SkillManifest] | None = None,
+        model_name: str | None = None,
+        task_type: str | None = None,
     ) -> list[dict[str, Any]]:
         text = self._message_text_for_llm(inbound)
         if not text and not self._has_image_attachments(inbound):
@@ -1259,9 +2193,31 @@ class ChatPipeline:
         persona_prompt = await self._resolve_persona_prompt(text, inbound=inbound)
         if persona_prompt:
             llm_messages.append({"role": "system", "content": persona_prompt})
+        skill_catalog = self._skill_catalog_context()
+        if skill_catalog:
+            llm_messages.append({"role": "system", "content": skill_catalog})
         if use_tools:
             llm_messages.append({"role": "system", "content": TOOL_USE_SYSTEM_PROMPT})
         llm_messages.append({"role": "system", "content": self._system_time_context()})
+        resolved_task_type = task_type or self._resolve_task_type_for_inbound(
+            inbound,
+            use_tools=use_tools,
+            candidate_skills=candidate_skills,
+        )
+        resolved_model_name = model_name or self._resolve_model_for_inbound(
+            inbound,
+            use_tools=use_tools,
+            candidate_skills=candidate_skills,
+        )
+        llm_messages.append(
+            {
+                "role": "system",
+                "content": self._runtime_model_context(
+                    model_name=resolved_model_name,
+                    task_type=resolved_task_type,
+                ),
+            }
+        )
         inbound_context = self._current_message_context(inbound)
         if inbound_context:
             llm_messages.append({"role": "system", "content": inbound_context})
@@ -1284,13 +2240,55 @@ class ChatPipeline:
                 inbound.session_id,
                 limit=self.history_window,
             )
-            for item in history:
-                llm_item = self._to_llm_message(item)
-                if llm_item is not None:
-                    llm_messages.append(llm_item)
+            selected_history, history_stats = self._select_history_messages(history)
+            llm_messages.extend(selected_history)
+            logger.info(
+                "pipeline.history_window",
+                session_id=inbound.session_id,
+                **history_stats,
+            )
 
         llm_messages.append({"role": "user", "content": user_content})
         return llm_messages
+
+    def _runtime_model_context(
+        self,
+        *,
+        model_name: str,
+        task_type: str,
+        primary_model_name: str | None = None,
+    ) -> str:
+        model_id = self._model_identifier(model_name)
+        return build_runtime_model_context(
+            model_display_name=model_name,
+            model_id=model_id,
+            task_type=task_type,
+            primary_model_display_name=primary_model_name,
+        )
+
+    def _model_identifier(self, model_name: str) -> str:
+        config = getattr(self.router, "config", None)
+        models = getattr(config, "models", None)
+        if isinstance(models, dict):
+            cfg = models.get(model_name)
+            model_id = getattr(cfg, "litellm_model", None)
+            if isinstance(model_id, str) and model_id.strip():
+                return model_id
+        return model_name
+
+    def _skill_catalog_context(self) -> str:
+        if self.skill_manager is None:
+            return ""
+        getter = getattr(self.skill_manager, "get_skill_catalog", None)
+        if not callable(getter):
+            return ""
+        try:
+            return str(getter() or "").strip()
+        except TypeError:
+            return ""
+        except Exception:
+            logger.warning("pipeline.skill_catalog_failed", exc_info=True)
+            return ""
 
     async def _resolve_persona_prompt(self, query: str, *, inbound: Message | None = None) -> str:
         if inbound is not None and self._is_heartbeat_request(inbound):
@@ -1351,6 +2349,21 @@ class ChatPipeline:
         if len(matching) == 1:
             return matching[0]
         return None
+
+    def _resolve_tool_skill_name(
+        self,
+        candidate_skills: list[SkillManifest],
+        tool_name: str,
+    ) -> str:
+        active_skill = self._select_active_skill_manifest(candidate_skills, tool_name)
+        if active_skill is not None:
+            return active_skill.name
+        if self.skill_manager is None:
+            return "direct"
+        owner = self._skill_manager_find_skill_by_tool_name(tool_name)
+        if owner is not None:
+            return owner.name
+        return "direct"
 
     async def _semantic_memory_context(self, query: str, *, skip_search: bool = False) -> str:
         if skip_search:
@@ -1505,13 +2518,56 @@ class ChatPipeline:
             text = f"{history_context}\n\n{text}"
         return {"role": role, "content": text}
 
-    def _resolve_model_for_inbound(self, inbound: Message) -> str:
+    def _resolve_task_type_for_inbound(
+        self,
+        inbound: Message,
+        *,
+        use_tools: bool,
+        candidate_skills: list[SkillManifest] | None = None,
+    ) -> str:
         if self._is_heartbeat_request(inbound):
-            return self._resolve_heartbeat_model()
+            return "heartbeat"
         if self._has_image_attachments(inbound):
+            return "vision"
+        if use_tools and candidate_skills:
+            getter = getattr(self.router, "get_model_for_task", None)
+            if callable(getter):
+                try:
+                    candidate = str(getter("reasoning") or "").strip()
+                except Exception:
+                    candidate = ""
+                if candidate:
+                    return "reasoning"
+        return "chat"
+
+    def _resolve_model_for_inbound(
+        self,
+        inbound: Message,
+        *,
+        use_tools: bool,
+        candidate_skills: list[SkillManifest] | None = None,
+    ) -> str:
+        task_type = self._resolve_task_type_for_inbound(
+            inbound,
+            use_tools=use_tools,
+            candidate_skills=candidate_skills,
+        )
+        if task_type == "heartbeat":
+            return self._resolve_heartbeat_model()
+        if task_type == "vision":
             getter = getattr(self.router, "get_model_for_task", None)
             if callable(getter):
                 return str(getter("vision") or self.chat_model)
+            return self.chat_model
+        if task_type == "reasoning":
+            getter = getattr(self.router, "get_model_for_task", None)
+            if callable(getter):
+                try:
+                    candidate = str(getter("reasoning") or "").strip()
+                except Exception:
+                    candidate = ""
+                if candidate:
+                    return candidate
         return self.chat_model
 
     def _message_text_for_llm(self, message: Message) -> str:
@@ -1709,16 +2765,13 @@ class ChatPipeline:
         return status_bar
 
     def _system_time_context(self) -> str:
-        now = datetime.now().astimezone()
+        now = now_local()
         tzinfo = now.tzinfo
-        tz_name = None
-        if tzinfo is not None:
-            tz_name = getattr(tzinfo, "key", None)
-            if not tz_name:
-                tz_name = tzinfo.tzname(now)
+        tz_name = getattr(tzinfo, "key", None) if tzinfo is not None else None
         if not tz_name:
-            tz_name = "local"
-        return f"[System Context]\n当前时间: {now.isoformat()} ({tz_name})"
+            tz_name = "Asia/Shanghai"
+        current_time = now.strftime("%Y年%m月%d日 %H:%M (%A)")
+        return f"[System Context]\n当前时间: {current_time}\n时区: {tz_name}"
 
     def _apply_compression_marker(
         self,
@@ -1747,8 +2800,8 @@ class ChatPipeline:
         if original_chars <= 0 or compressed_chars <= 0:
             return None
         return (
-            f"[📦 Output compressed from {original_chars} → {compressed_chars} chars. "
-            "Original saved to logs. Ask me for details.]"
+            f'[📦 原始输出 {original_chars} 字符，已压缩至 {compressed_chars} 字符。'
+            '如需查看原文请说"给我看原始输出"]'
         )
 
     def _tool_fallback_text(self, output: SkillOutput) -> str:
@@ -1783,6 +2836,38 @@ class ChatPipeline:
         if confirmation is not None:
             return confirmation
         return await self._try_handle_notion_todo_snapshot_request(inbound)
+
+    async def _try_handle_pre_llm_message(self, inbound: Message) -> Message | None:
+        if str(inbound.sender or "").strip().lower() != "user":
+            return None
+        monitor = self.wewe_rss_monitor
+        if monitor is None:
+            return None
+        try:
+            is_login_request = bool(monitor.is_login_request(inbound.text))
+        except Exception:
+            logger.warning("pipeline.wewe_shortcut_match_failed", exc_info=True)
+            return None
+        if not is_login_request:
+            return None
+        try:
+            message = await monitor.start_login_flow(
+                session_id=inbound.session_id,
+                channel=inbound.channel,
+                sender_id=inbound.sender_id,
+            )
+        except _PIPELINE_RECOVERABLE_ERRORS:
+            logger.warning("pipeline.wewe_shortcut_failed", exc_info=True)
+            return Message(
+                text="WeWe RSS 二维码获取失败，请稍后重试。",
+                sender="assistant",
+                session_id=inbound.session_id,
+                channel=inbound.channel,
+                sender_id=inbound.sender_id,
+                message_tag="tool_status",
+                metadata={"target_channels": [str(inbound.channel or "webui")]},
+            )
+        return message
 
     async def _try_handle_notion_todo_binding_confirmation(self, inbound: Message) -> str | None:
         pending = await get_pending_notion_todo_candidate(self.structured_store)
@@ -1981,6 +3066,61 @@ class ChatPipeline:
             return content
         return self._compact_tool_content_for_heartbeat(output, fallback_content=content)
 
+    def _tool_is_retryable(self, tool_name: str) -> bool:
+        return tool_name in _RETRYABLE_TOOLS
+
+    async def _invoke_tool_with_retry(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        session_id: str,
+        skill_name: str,
+        event_emitter: Any | None = None,
+        iteration: int | None = None,
+    ) -> SkillOutput:
+        assert self.skill_manager is not None
+        attempts = 2 if self._tool_is_retryable(tool_name) else 1
+        last_output: SkillOutput | None = None
+        for attempt in range(1, attempts + 1):
+            output = await self.skill_manager.invoke(
+                tool_name,
+                arguments,
+                session_id=session_id,
+                skill_name=skill_name,
+            )
+            last_output = output
+            if output.status == "success" or attempt >= attempts:
+                if attempt > 1:
+                    logger.info(
+                        "tool.retry.completed",
+                        session_id=session_id,
+                        tool_name=tool_name,
+                        attempts=attempt,
+                        final_status=output.status,
+                    )
+                return output
+            logger.warning(
+                "tool.retrying",
+                session_id=session_id,
+                tool_name=tool_name,
+                attempt=attempt,
+                error_info=output.error_info,
+            )
+            await self._emit_progress_event(
+                {
+                    "type": "tool_call_error",
+                    "tool": tool_name,
+                    "error": str(output.error_info or "tool failed"),
+                    "will_retry": True,
+                    "iteration": iteration,
+                    "session_id": session_id,
+                },
+                event_emitter=event_emitter,
+            )
+        assert last_output is not None
+        return last_output
+
     def _compact_tool_content_for_heartbeat(
         self,
         output: SkillOutput,
@@ -2126,9 +3266,14 @@ class ChatPipeline:
         status: str,
         session_id: str,
         error: str = "",
+        event_emitter: Any | None = None,
+        origin_channel: str | None = None,
+        origin_client_id: str | None = None,
     ) -> None:
         callback = self.on_proactive_message
         if callback is None:
+            return
+        if self._resolve_event_emitter(event_emitter) is not None:
             return
         if self._tool_status_suppressed():
             return
@@ -2148,7 +3293,17 @@ class ChatPipeline:
             message_tag="tool_status",
             metadata={"ephemeral": True},
         )
-        callback_result = callback(status_message)
+        try:
+            callback_result = callback(
+                status_message,
+                message_type="ai_reply",
+                origin_channel=origin_channel,
+                origin_client_id=origin_client_id,
+                exclude_channels={str(origin_channel).strip()} if str(origin_channel or "").strip() else None,
+                exclude_client_ids={str(origin_client_id).strip()} if str(origin_client_id or "").strip() else None,
+            )
+        except TypeError:
+            callback_result = callback(status_message)
         if inspect.isawaitable(callback_result):
             await callback_result
 
@@ -2332,7 +3487,10 @@ class ChatPipeline:
             ]
 
         try:
-            async for payload in self.stream_reply(inbound):
+            stream_kwargs: dict[str, Any] = {}
+            if self._method_supports_kwarg(self.stream_reply, "event_emitter"):
+                stream_kwargs["event_emitter"] = emitter
+            async for payload in self.stream_reply(inbound, **stream_kwargs):
                 emit_result = emitter(payload)
                 if inspect.isawaitable(emit_result):
                     await emit_result
@@ -2452,7 +3610,33 @@ class ChatPipeline:
                 text=text,
                 sender="assistant",
                 session_id=session_id,
+                message_tag="hypo_info",
+                channel="system",
+                metadata=self._event_message_metadata(event),
+            )
+
+        if event_type == "wewe_rss_trigger":
+            text = summary or title or "WeWe RSS 状态更新"
+            if not text.startswith(("📚", "⚠️", "ℹ️")):
+                text = f"📚 {text}"
+            return Message(
+                text=text,
+                sender="assistant",
+                session_id=session_id,
                 message_tag="tool_status",
+                channel="system",
+                metadata=self._event_message_metadata(event),
+            )
+
+        if event_type == "subscription_trigger":
+            text = summary or title or "📡 订阅更新"
+            if not text.startswith(("📺", "📢", "📡")):
+                text = f"📡 {text}"
+            return Message(
+                text=text,
+                sender="assistant",
+                session_id=session_id,
+                message_tag="subscription",
                 channel="system",
                 metadata=self._event_message_metadata(event),
             )
