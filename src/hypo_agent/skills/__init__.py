@@ -1,4 +1,5 @@
 from hypo_agent.skills.agent_search_skill import AgentSearchSkill
+from hypo_agent.skills.auth_skill import AuthSkill
 from hypo_agent.skills.base import BaseSkill
 from hypo_agent.skills.code_run_skill import CodeRunSkill
 from hypo_agent.skills.coder_skill import CoderSkill
@@ -13,6 +14,7 @@ from hypo_agent.skills.log_inspector_skill import LogInspectorSkill
 from hypo_agent.skills.memory_skill import MemorySkill
 from hypo_agent.skills.probe_skill import ProbeSkill
 from hypo_agent.skills.reminder_skill import ReminderSkill
+from hypo_agent.skills.subscription.skill import SubscriptionSkill
 from hypo_agent.skills.tmux_skill import TmuxSkill
 
 try:
@@ -25,6 +27,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
 
 __all__ = [
     "AgentSearchSkill",
+    "AuthSkill",
     "BaseSkill",
     "ExecSkill",
     "TmuxSkill",
@@ -36,6 +39,7 @@ __all__ = [
     "NotionSkill",
     "ProbeSkill",
     "ReminderSkill",
+    "SubscriptionSkill",
     "EmailScannerSkill",
     "InfoPortalSkill",
     "InfoReachSkill",
