@@ -150,7 +150,7 @@ def test_session_memory_writes_timestamp_to_jsonl(tmp_path: Path) -> None:
     raw = (sessions_dir / "main.jsonl").read_text(encoding="utf-8").strip()
     payload = json.loads(raw)
 
-    assert payload["timestamp"] == "2026-03-03T10:00:00Z"
+    assert payload["timestamp"] == "2026-03-03T18:00:00+08:00"
 
 
 def test_session_memory_keeps_legacy_messages_without_timestamp_empty(tmp_path: Path) -> None:

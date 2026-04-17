@@ -18,6 +18,7 @@ from hypo_agent.core.config_loader import load_secrets_config
 from hypo_agent.exceptions import ExternalServiceError
 from hypo_agent.models import SkillOutput
 from hypo_agent.skills.base import BaseSkill
+from hypo_agent.utils.timeutil import localize_iso
 
 _LOG = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ class HypoInfoClient:
         time_range: str = "today",
         min_importance: int | None = None,
         source_name: str | None = None,
+        limit: int | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"time_range": time_range}
         if category:
@@ -56,6 +58,8 @@ class HypoInfoClient:
             params["min_importance"] = min_importance
         if source_name:
             params["source_name"] = source_name
+        if limit is not None:
+            params["limit"] = limit
         return await self._get("/api/agent/query", params)
 
     async def digest(self, *, time_range: str = "today") -> dict[str, Any]:
@@ -337,20 +341,7 @@ class InfoReachSkill(BaseSkill):
 
     async def info_summary(self, *, time_range: str = "today") -> str:
         data = await self._client.digest(time_range=time_range)
-        lines: list[str] = []
-        if data.get("highlight"):
-            lines.append(data["highlight"])
-        for section in data.get("sections") or []:
-            category = section.get("category", "")
-            items = section.get("items") or []
-            if category:
-                lines.append(f"\n【{category}】")
-            for item in items:
-                lines.extend(self._format_digest_item(item))
-        stats = data.get("stats") or {}
-        if stats.get("total_articles"):
-            lines.append(f"\n共 {stats['total_articles']} 篇文章")
-        return "\n".join(lines).strip()
+        return self._format_digest_payload(data)
 
     async def info_subscribe(
         self,
@@ -368,8 +359,8 @@ class InfoReachSkill(BaseSkill):
             "categories": categories or [],
             "schedule": schedule,
             "last_run": None,
-            "created_at": now_iso,
-            "updated_at": now_iso,
+            "created_at": localize_iso(now_iso),
+            "updated_at": localize_iso(now_iso),
         }
         async with aiosqlite.connect(self._store_db_path()) as db:
             await db.execute(
@@ -421,17 +412,10 @@ class InfoReachSkill(BaseSkill):
 
     async def run_scheduled_summary(self) -> dict[str, Any]:
         """Called by scheduler for hypo_info_digest jobs."""
-        text = await self.info_summary(time_range="today")
+        text = await self._build_scheduled_summary_text(time_range="today")
         pushed = False
         if text and self.message_queue is not None:
-            await self.message_queue.put(
-                {
-                    "event_type": "hypo_info_trigger",
-                    "session_id": self.default_session_id,
-                    "title": "Hypo-Info 摘要",
-                    "summary": text,
-                }
-            )
+            await self._push_summary(text)
             pushed = True
         sub_pushes = await self._run_due_subscriptions()
         return {"summary_pushed": pushed, "subscription_pushes": sub_pushes}
@@ -530,9 +514,9 @@ class InfoReachSkill(BaseSkill):
             "keywords": json.loads(keywords_json or "[]"),
             "categories": json.loads(categories_json or "[]"),
             "schedule": schedule,
-            "last_run": last_run,
-            "created_at": created_at,
-            "updated_at": updated_at,
+            "last_run": localize_iso(last_run),
+            "created_at": localize_iso(created_at),
+            "updated_at": localize_iso(updated_at),
         }
 
     def _article_matches_subscription(self, article: dict[str, Any], sub: dict[str, Any]) -> bool:
@@ -555,16 +539,42 @@ class InfoReachSkill(BaseSkill):
             if not matched or self.message_queue is None:
                 continue
             summary_text = "；".join(str(a.get("title", "")) for a in matched[:3])
-            await self.message_queue.put(
-                {
-                    "event_type": "hypo_info_trigger",
-                    "session_id": self.default_session_id,
-                    "title": f"Hypo-Info 订阅：{sub['name']}",
-                    "summary": summary_text,
-                }
-            )
+            await self._push_summary(summary_text, title=f"Hypo-Info 订阅：{sub['name']}")
             pushed += 1
         return pushed
+
+    async def _build_scheduled_summary_text(self, *, time_range: str) -> str:
+        digest_payload = await self._client.digest(time_range=time_range)
+        digest_text = self._format_digest_payload(digest_payload)
+        if digest_text:
+            return digest_text
+
+        summary_payload = await self._client.summary(time_range=time_range)
+        summary_text = self._format_summary_payload(summary_payload)
+        if summary_text:
+            return summary_text
+
+        query_payload = await self._client.query(time_range=time_range, limit=20)
+        articles = query_payload.get("articles") if isinstance(query_payload, dict) else None
+        normalized_articles = [item for item in articles if isinstance(item, dict)] if isinstance(articles, list) else []
+        if normalized_articles:
+            return self._format_query_fallback_articles(
+                normalized_articles,
+                total=int(query_payload.get("total") or len(normalized_articles)),
+            )
+        return "📰 今日暂无新资讯。"
+
+    async def _push_summary(self, summary: str, *, title: str = "Hypo-Info 摘要") -> None:
+        if self.message_queue is None:
+            return
+        await self.message_queue.put(
+            {
+                "event_type": "hypo_info_trigger",
+                "session_id": self.default_session_id,
+                "title": title,
+                "summary": summary,
+            }
+        )
 
     @staticmethod
     def _normalize_string_list(value: Any) -> list[str]:
@@ -654,6 +664,72 @@ class InfoReachSkill(BaseSkill):
 
         fallback = json.dumps(item, ensure_ascii=False, sort_keys=True)
         return [f"  - {fallback}"]
+
+    def _format_digest_payload(self, data: dict[str, Any]) -> str:
+        lines: list[str] = []
+        highlight = str(data.get("highlight") or "").strip()
+        if highlight:
+            lines.append(highlight)
+        for section in data.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            category = str(section.get("category") or "").strip()
+            items = section.get("items") or []
+            if category:
+                if lines:
+                    lines.append("")
+                lines.append(f"【{category}】")
+            for item in items:
+                lines.extend(self._format_digest_item(item))
+        stats = data.get("stats") or {}
+        if stats.get("total_articles"):
+            if lines:
+                lines.append("")
+            lines.append(f"共 {stats['total_articles']} 篇文章")
+        return "\n".join(lines).strip()
+
+    def _format_summary_payload(self, data: dict[str, Any]) -> str:
+        categories = data.get("categories") or []
+        if not isinstance(categories, list):
+            categories = []
+        lines: list[str] = []
+        for category_item in categories:
+            if not isinstance(category_item, dict):
+                continue
+            category = self._first_non_empty(
+                category_item.get("category"),
+                category_item.get("category_l1"),
+                category_item.get("name"),
+            )
+            article_count = category_item.get("article_count")
+            top_articles = category_item.get("top_articles") or category_item.get("items") or []
+            if category:
+                if lines:
+                    lines.append("")
+                lines.append(f"【{category}】")
+            if article_count:
+                lines.append(f"  共 {article_count} 篇")
+            for item in top_articles[:3] if isinstance(top_articles, list) else []:
+                lines.extend(self._format_digest_item(item))
+        total_articles = data.get("total_articles")
+        if total_articles:
+            if lines:
+                lines.append("")
+            lines.append(f"共 {total_articles} 篇文章")
+        return "\n".join(lines).strip()
+
+    def _format_query_fallback_articles(self, articles: list[dict[str, Any]], *, total: int) -> str:
+        lines = [f"📰 今日资讯（共 {max(total, len(articles))} 条）："]
+        for article in articles[:5]:
+            title = self._first_non_empty(article.get("title"), article.get("headline"), "未命名文章")
+            summary = self._first_non_empty(article.get("summary"), article.get("digest"), article.get("description"))
+            url = self._first_non_empty(article.get("url"), article.get("link"))
+            lines.append(f"- {title}")
+            if summary:
+                lines.append(f"  摘要：{summary}")
+            if url:
+                lines.append(f"  链接：{url}")
+        return "\n".join(lines).strip()
 
     def _first_non_empty(self, *values: Any) -> str:
         for value in values:

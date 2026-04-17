@@ -22,6 +22,7 @@ from hypo_agent.exceptions import ModelError
 from hypo_agent.memory.email_store import EmailStore
 from hypo_agent.models import SkillOutput
 from hypo_agent.skills.base import BaseSkill
+from hypo_agent.utils.timeutil import localize_iso, now_iso, to_local
 
 logger = structlog.get_logger("hypo_agent.skills.email_scanner_skill")
 
@@ -547,7 +548,7 @@ class EmailScannerSkill(BaseSkill):
                 f"⚪ {category_counts['low_priority']} 封普通；"
                 f"📂 {category_counts['archive']} 封归档"
             )
-            self.last_scan_at = datetime.now(UTC).isoformat()
+            self.last_scan_at = now_iso()
             self.emails_processed += new_emails
             if triggered_by == "heartbeat":
                 if items:
@@ -1133,10 +1134,10 @@ class EmailScannerSkill(BaseSkill):
             "subject": str(payload.get("subject") or ""),
             "from": str(payload.get("from") or ""),
             "to": str(payload.get("to") or ""),
-            "date": received_dt.isoformat() if received_dt is not None else str(payload.get("received_at") or ""),
+            "date": to_local(received_dt).isoformat() if received_dt is not None else str(payload.get("received_at") or ""),
             "snippet": self._build_snippet(str(payload.get("body") or "")),
             "labels": labels,
-            "cached_at": datetime.now(UTC).isoformat(),
+            "cached_at": now_iso(),
             "has_body": self.email_store.get_body(str(payload.get("message_id") or "")) is not None,
             "account_name": account_name or payload.get("account_name"),
             "attachment_paths": attachment_paths or [],
@@ -1352,7 +1353,7 @@ class EmailScannerSkill(BaseSkill):
                 for item in accounts
                 if str(item.get("username") or "").strip()
             ],
-            "last_scan_at": self.last_scan_at,
-            "next_scan_at": next_scan_at,
+            "last_scan_at": localize_iso(self.last_scan_at),
+            "next_scan_at": localize_iso(next_scan_at),
             "emails_processed": self.emails_processed,
         }

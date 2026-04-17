@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from hypo_agent.models import HeartbeatCheck, SkillOutput
 from hypo_agent.skills.base import BaseSkill
+from hypo_agent.utils.timeutil import localize_iso
 
 
 class ReminderSkill(BaseSkill):
@@ -258,7 +259,10 @@ class ReminderSkill(BaseSkill):
             if cleaned and cleaned not in {"all", "*"}:
                 status_filter = cleaned
         rows = await self.structured_store.list_reminders(status=status_filter)
-        return SkillOutput(status="success", result={"items": rows})
+        return SkillOutput(
+            status="success",
+            result={"items": [self._localize_reminder_row(row) for row in rows]},
+        )
 
     async def _delete_reminder(self, params: dict[str, Any]) -> SkillOutput:
         reminder_id = self._read_reminder_id(params)
@@ -433,3 +437,12 @@ class ReminderSkill(BaseSkill):
             return ZoneInfo(self._default_timezone_name())
         except ZoneInfoNotFoundError:
             return ZoneInfo("UTC")
+
+    def _localize_reminder_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        localized = dict(row)
+        for key in ("created_at", "updated_at", "next_run_at"):
+            if key in localized:
+                localized[key] = localize_iso(localized.get(key))
+        if str(localized.get("schedule_type") or "") == "once":
+            localized["schedule_value"] = localize_iso(localized.get("schedule_value"))
+        return localized

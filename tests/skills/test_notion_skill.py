@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from hypo_agent.channels.notion.notion_client import NotionUnavailableError
@@ -112,6 +112,8 @@ class FakeNotionClient:
                         "type": "title",
                         "title": [{"type": "text", "plain_text": "完成测试", "annotations": {}}],
                     },
+                    "日期": {"type": "date", "date": {"start": "2026-04-03"}},
+                    "已完成": {"type": "checkbox", "checkbox": False},
                     "Status": {"type": "status", "status": {"name": "In Progress"}},
                     "Tags": {
                         "type": "multi_select",
@@ -420,11 +422,96 @@ services:
 
         payload = await heartbeat_service.registrations[0][1]()
 
-        assert payload == {"items": [{"title": "完成测试（截止今天）"}]}
+        assert payload == {"items": [{"title": "完成测试（今日相关）"}]}
         assert client.query_calls[0]["database_id"] == "22222222-2222-2222-2222-222222222222"
         assert client.query_calls[0]["page_size"] == 50
 
     asyncio.run(_run())
+
+
+def test_notion_heartbeat_source_includes_spanning_today_subtask_with_parent_title(tmp_path: Path) -> None:
+    class TodoClient(FakeNotionClient):
+        async def query_database(
+            self,
+            database_id: str,
+            filter: dict | None = None,
+            sorts: list | None = None,
+            page_size: int = 50,
+        ) -> list[dict]:
+            self.query_calls.append(
+                {
+                    "database_id": database_id,
+                    "filter": filter,
+                    "sorts": sorts,
+                    "page_size": page_size,
+                }
+            )
+            return [
+                {
+                    "id": "child-1",
+                    "properties": {
+                        "Name": {
+                            "type": "title",
+                            "title": [{"type": "text", "plain_text": "拆分任务", "annotations": {}}],
+                        },
+                        "日期": {
+                            "type": "date",
+                            "date": {"start": "2026-04-04", "end": "2026-04-06"},
+                        },
+                        "已完成": {"type": "checkbox", "checkbox": False},
+                        "Parent item": {"type": "relation", "relation": [{"id": "parent-1"}]},
+                    },
+                }
+            ]
+
+    async def _run() -> None:
+        secrets_path = tmp_path / "secrets.yaml"
+        secrets_path.write_text(
+            """
+providers: {}
+services:
+  notion:
+    integration_secret: "secret_xxx"
+    todo_database_id: "22222222-2222-2222-2222-222222222222"
+""".strip(),
+            encoding="utf-8",
+        )
+        heartbeat_service = DummyHeartbeatService()
+        client = TodoClient()
+        NotionSkill(
+            secrets_path=secrets_path,
+            notion_client=client,
+            heartbeat_service=heartbeat_service,
+            now_fn=lambda: datetime(2026, 4, 5, 9, 0, 0, tzinfo=UTC),
+        )
+
+        payload = await heartbeat_service.registrations[0][1]()
+
+        assert payload == {"items": [{"title": "论文返修 / 拆分任务（今日相关）"}]}
+        assert client.query_calls[0]["filter"] is None
+
+    asyncio.run(_run())
+
+
+def test_todo_item_matches_today_supports_cover_today_and_due_only() -> None:
+    skill = NotionSkill(notion_client=FakeNotionClient())
+    item = {
+        "title": "拆分任务",
+        "date_start": "2026-04-04",
+        "date_end": "2026-04-06",
+        "is_date_span": True,
+    }
+
+    assert skill.todo_item_matches_today(
+        item,
+        today=date(2026, 4, 5),
+        match_mode="cover_today",
+    ) is True
+    assert skill.todo_item_matches_today(
+        item,
+        today=date(2026, 4, 5),
+        match_mode="due_only",
+    ) is False
 
 
 def test_get_todo_snapshot_hydrates_parent_titles_and_preserves_daily_recurrence_metadata(tmp_path: Path) -> None:
@@ -498,6 +585,67 @@ services:
         assert result["items"][0]["title"] == "整理实验记录"
         assert result["items"][0]["parent_title"] == "论文返修"
         assert result["items"][1]["recurrence"] == "每天"
+
+    asyncio.run(_run())
+
+
+def test_get_todo_snapshot_normalizes_date_range_and_display_title(tmp_path: Path) -> None:
+    class TodoClient(FakeNotionClient):
+        async def query_database(
+            self,
+            database_id: str,
+            filter: dict | None = None,
+            sorts: list | None = None,
+            page_size: int = 50,
+        ) -> list[dict]:
+            self.query_calls.append(
+                {
+                    "database_id": database_id,
+                    "filter": filter,
+                    "sorts": sorts,
+                    "page_size": page_size,
+                }
+            )
+            return [
+                {
+                    "id": "child-1",
+                    "properties": {
+                        "Name": {
+                            "type": "title",
+                            "title": [{"type": "text", "plain_text": "整理实验记录", "annotations": {}}],
+                        },
+                        "日期": {
+                            "type": "date",
+                            "date": {"start": "2026-04-04", "end": "2026-04-06"},
+                        },
+                        "已完成": {"type": "checkbox", "checkbox": False},
+                        "Parent item": {"type": "relation", "relation": [{"id": "parent-1"}]},
+                    },
+                }
+            ]
+
+    async def _run() -> None:
+        secrets_path = tmp_path / "secrets.yaml"
+        secrets_path.write_text(
+            """
+providers: {}
+services:
+  notion:
+    integration_secret: "secret_xxx"
+    todo_database_id: "22222222-2222-2222-2222-222222222222"
+""".strip(),
+            encoding="utf-8",
+        )
+        skill = NotionSkill(secrets_path=secrets_path, notion_client=TodoClient())
+
+        result = await skill.get_todo_snapshot()
+
+        assert result["available"] is True
+        item = result["items"][0]
+        assert item["date_start"] == "2026-04-04"
+        assert item["date_end"] == "2026-04-06"
+        assert item["is_date_span"] is True
+        assert item["display_title"] == "论文返修 / 整理实验记录"
 
     asyncio.run(_run())
 

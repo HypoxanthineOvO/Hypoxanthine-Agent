@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import date, datetime
 import json
 from pathlib import Path
 import re
@@ -18,6 +18,7 @@ from hypo_agent.skills.notion_heartbeat import NotionTodoHeartbeatSource
 
 logger = structlog.get_logger("hypo_agent.skills.notion_skill")
 _SERVICE_UNAVAILABLE = "Notion 当前不可用，请检查网络、集成密钥和页面授权"
+_DEFAULT_TODO_TODAY_MATCH_MODE = "cover_today"
 _PAGE_ID_RE = re.compile(
     r"([0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
 )
@@ -35,9 +36,11 @@ class NotionSkill(BaseSkill):
         notion_client: Any | None = None,
         heartbeat_service: Any | None = None,
         now_fn: Callable[[], datetime] | None = None,
+        today_match_mode: str = _DEFAULT_TODO_TODAY_MATCH_MODE,
     ) -> None:
         self.secrets_path = Path(secrets_path)
         self.now_fn = now_fn or datetime.now
+        self._todo_today_match_mode = self._normalize_today_match_mode(today_match_mode)
         self._client = notion_client or self._build_client_from_config()
         self._todo_database_id: str | None = self._load_todo_database_id()
         if self._todo_database_id and heartbeat_service is not None and hasattr(
@@ -49,7 +52,10 @@ class NotionSkill(BaseSkill):
                     notion_client=self._client,
                     todo_database_id=self._todo_database_id,
                     now_fn=self.now_fn,
-                    title_getter=self._extract_title,
+                    row_normalizer=self.normalize_todo_rows,
+                    today_matcher=self.todo_item_matches_today,
+                    display_title_getter=self.render_todo_display_title,
+                    today_match_mode_getter=self.get_todo_today_match_mode,
                 ).collect,
             )
 
@@ -371,8 +377,63 @@ class NotionSkill(BaseSkill):
         return {
             "available": True,
             "database_id": database_id,
-            "items": await self._normalize_todo_rows(rows),
+            "items": await self.normalize_todo_rows(rows),
         }
+
+    def configure_todo_heartbeat(self, *, today_match_mode: str | None = None) -> None:
+        if today_match_mode is not None:
+            self._todo_today_match_mode = self._normalize_today_match_mode(today_match_mode)
+
+    def get_todo_today_match_mode(self) -> str:
+        return self._todo_today_match_mode
+
+    async def normalize_todo_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return await self._normalize_todo_rows(rows)
+
+    def render_todo_display_title(self, item: dict[str, Any]) -> str:
+        display_title = str(item.get("display_title") or "").strip()
+        if display_title:
+            return display_title
+        title = str(item.get("title") or "").strip() or "未命名任务"
+        parent_title = str(item.get("parent_title") or "").strip()
+        if parent_title:
+            return f"{parent_title} / {title}"
+        return title
+
+    def todo_item_due_date(self, item: dict[str, Any]) -> date | None:
+        due_text = (
+            str(item.get("date_end") or "").strip()
+            or str(item.get("due_date") or "").strip()
+            or str(item.get("date_start") or "").strip()
+        )
+        return self._parse_iso_date(due_text)
+
+    def todo_item_matches_today(
+        self,
+        item: dict[str, Any],
+        *,
+        today: date | None = None,
+        match_mode: str | None = None,
+    ) -> bool:
+        current_day = today or self.now_fn().date()
+        resolved_mode = self._normalize_today_match_mode(match_mode)
+        start = self._parse_iso_date(
+            str(item.get("date_start") or "").strip() or str(item.get("due_date") or "").strip()
+        )
+        end = self._parse_iso_date(
+            str(item.get("date_end") or "").strip()
+            or str(item.get("due_date") or "").strip()
+            or str(item.get("date_start") or "").strip()
+        )
+        if start is None:
+            return False
+        if resolved_mode == "due_only":
+            return start == current_day
+        if end is None:
+            end = start
+        if end < start:
+            end = start
+        return start <= current_day <= end
 
     async def notion_get_schema(self, database_id: str) -> str:
         database = await self._client.get_database(database_id)
@@ -617,6 +678,21 @@ class NotionSkill(BaseSkill):
             return ""
         return text[:10]
 
+    def _normalize_today_match_mode(self, value: str | None) -> str:
+        text = str(value or "").strip().casefold()
+        if text == "due_only":
+            return "due_only"
+        return _DEFAULT_TODO_TODAY_MATCH_MODE
+
+    def _parse_iso_date(self, value: Any) -> date | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text[:10]).date()
+        except ValueError:
+            return None
+
     def _extract_due_date(self, row: dict[str, Any]) -> str:
         properties = row.get("properties", {})
         if not isinstance(properties, dict):
@@ -704,15 +780,24 @@ class NotionSkill(BaseSkill):
             "优先级",
             "优先程度",
         )
-        due_date = str(row.get("due_date") or "").strip() or self._extract_first_property(
-            properties,
-            "日期",
-            "Due Date",
-            "Due",
-            "Deadline",
-            "截止日期",
-            "截至",
+        date_start = str(row.get("date_start") or "").strip()
+        date_end = str(row.get("date_end") or "").strip()
+        if not date_start:
+            date_start, date_end = self._extract_first_date_range(
+                properties,
+                "日期",
+                "Due Date",
+                "Due",
+                "Deadline",
+                "截止日期",
+                "截至",
+            )
+        if not date_end:
+            date_end = date_start
+        is_date_span = bool(row.get("is_date_span")) or (
+            bool(date_start) and bool(date_end) and date_end != date_start
         )
+        due_date = str(row.get("due_date") or "").strip() or date_end or date_start
         tags = str(row.get("tags") or "").strip() or self._extract_first_property(properties, "Tags", "标签")
         recurrence = str(row.get("recurrence") or "").strip() or self._extract_first_property(
             properties,
@@ -734,12 +819,19 @@ class NotionSkill(BaseSkill):
         title = str(row.get("title") or "").strip() or self._extract_title(row)
         normalized_status = status.casefold()
         normalized_done = done_value.casefold()
+        display_title = str(row.get("display_title") or "").strip() or self.render_todo_display_title(
+            {"title": title, "parent_title": parent_title}
+        )
         return {
             "id": str(row.get("id") or ""),
             "title": title,
+            "display_title": display_title,
             "status": status,
             "priority": priority,
             "due_date": due_date[:10] if due_date else "",
+            "date_start": date_start[:10] if date_start else "",
+            "date_end": date_end[:10] if date_end else "",
+            "is_date_span": is_date_span,
             "tags": tags,
             "done": normalized_done == "true" or normalized_status in {"done", "completed", "完成", "已完成"},
             "recurrence": recurrence,
@@ -789,3 +881,25 @@ class NotionSkill(BaseSkill):
             if page_id:
                 ids.append(page_id)
         return ids
+
+    def _extract_first_date_range(self, properties: Any, *names: str) -> tuple[str, str]:
+        if not isinstance(properties, dict):
+            return "", ""
+        for name in names:
+            value = properties.get(name)
+            start, end = self._extract_date_range_property(value)
+            if start:
+                return start, end
+        return "", ""
+
+    def _extract_date_range_property(self, value: Any) -> tuple[str, str]:
+        if not isinstance(value, dict):
+            return "", ""
+        if str(value.get("type") or "").strip() != "date":
+            return "", ""
+        payload = value.get("date")
+        if not isinstance(payload, dict):
+            return "", ""
+        start = str(payload.get("start") or "").strip()[:10]
+        end = str(payload.get("end") or "").strip()[:10] or start
+        return start, end

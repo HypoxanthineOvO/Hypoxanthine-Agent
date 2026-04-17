@@ -177,8 +177,8 @@ def test_list_devices_with_mock() -> None:
                 "platform": "windows",
                 "online": True,
                 "capabilities": ["screenshot", "process_list"],
-                "connected_at": "2026-03-26T10:00:00Z",
-                "last_seen": "2026-03-26T10:30:00Z",
+                "connected_at": "2026-03-26T18:00:00+08:00",
+                "last_seen": "2026-03-26T18:30:00+08:00",
             }
         ]
 

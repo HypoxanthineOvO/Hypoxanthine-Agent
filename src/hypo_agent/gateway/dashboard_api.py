@@ -16,6 +16,7 @@ from hypo_agent.core.skill_manager import SkillManager
 from hypo_agent.gateway.settings import load_channel_settings
 from hypo_agent.gateway.auth import require_api_token
 from hypo_agent.gateway.ws import connection_manager
+from hypo_agent.utils.timeutil import now_local, to_local
 
 router = APIRouter(prefix="/api")
 logger = structlog.get_logger("hypo_agent.gateway.dashboard_api")
@@ -44,7 +45,7 @@ def _parse_timestamp(value: str | None) -> datetime | None:
 
 
 def _day_key(dt: datetime) -> str:
-    return dt.astimezone(UTC).date().isoformat()
+    return to_local(dt).date().isoformat()
 
 
 def _quantile(values: list[float], q: float) -> float:
@@ -186,10 +187,10 @@ def _disabled_heartbeat_status() -> dict[str, Any]:
 async def dashboard_status(request: Request) -> dict[str, Any]:
     require_api_token(request)
 
-    started_at = getattr(request.app.state, "started_at", datetime.now(UTC))
+    started_at = getattr(request.app.state, "started_at", now_local())
     if started_at.tzinfo is None:
         started_at = started_at.replace(tzinfo=UTC)
-    now = datetime.now(UTC)
+    now = now_local()
     uptime_seconds = max((now - started_at).total_seconds(), 0.0)
 
     structured_store = request.app.state.structured_store
@@ -556,7 +557,7 @@ async def dashboard_recent_latency(
                 "session_id": row.get("session_id"),
                 "model": str(row.get("resolved_model") or "unknown").strip() or "unknown",
                 "latency_ms": float(latency),
-                "timestamp": created_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+                "timestamp": to_local(created_at).replace(microsecond=0).isoformat(),
             }
         )
         if len(data) >= limit:

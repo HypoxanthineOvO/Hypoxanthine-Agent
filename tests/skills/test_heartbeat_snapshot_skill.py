@@ -123,7 +123,10 @@ class StubNotionSkill:
                 {
                     "id": "p4",
                     "title": "整理实验记录",
-                    "due_date": "2026-04-05",
+                    "due_date": "2026-04-04",
+                    "date_start": "2026-04-04",
+                    "date_end": "2026-04-06",
+                    "is_date_span": True,
                     "done": False,
                     "priority": "高",
                     "tags": "",
@@ -131,6 +134,7 @@ class StubNotionSkill:
                     "recurrence": "",
                     "parent_page_id": "parent-1",
                     "parent_title": "论文返修",
+                    "display_title": "论文返修 / 整理实验记录",
                 },
             ],
         }
@@ -394,8 +398,9 @@ def test_heartbeat_snapshot_skill_returns_structured_sections(tmp_path: Path) ->
     assert payload["notion_todo"]["completed_today"][0]["title"] == "姜黄素"
     assert payload["notion_todo"]["pending_today"][1]["title"] == "整理实验记录"
     assert payload["notion_todo"]["pending_today"][1]["parent_title"] == "论文返修"
-    assert "今日到期未完成" in payload["notion_todo"]["human_summary"]
-    assert "今日到期未完成：\n\n- 今天高优任务" in payload["notion_todo"]["human_summary"]
+    assert payload["notion_todo"]["pending_today"][1]["is_date_span"] is True
+    assert "今日相关未完成" in payload["notion_todo"]["human_summary"]
+    assert "今日相关未完成：\n\n- 今天高优任务" in payload["notion_todo"]["human_summary"]
     assert "- 论文返修 / 整理实验记录" in payload["notion_todo"]["human_summary"]
     assert "\n\n三天内高优未完成：\n\n- 今天高优任务" in payload["notion_todo"]["human_summary"]
     assert "\n- 论文返修 / 整理实验记录" in payload["notion_todo"]["human_summary"]

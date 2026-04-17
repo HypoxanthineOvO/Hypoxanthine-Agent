@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import os
 from pathlib import Path
 import platform
@@ -241,34 +241,50 @@ class HeartbeatSnapshotSkill(BaseSkill):
                     "candidate": discovery.get("candidate"),
                     "candidates": discovery.get("candidates"),
                 }
-            rows = await client.query_database(database_id, filter=None, sorts=None, page_size=50)
+            raw_rows = await client.query_database(database_id, filter=None, sorts=None, page_size=50)
+            normalizer = getattr(notion_skill, "normalize_todo_rows", None)
+            if callable(normalizer):
+                rows = normalizer(raw_rows)
+                if asyncio.iscoroutine(rows):
+                    rows = await rows
+            else:
+                rows = raw_rows
         now = self._now().date()
         due_soon_limit = now + timedelta(days=3)
         pending_today: list[dict[str, Any]] = []
         high_priority_due_soon: list[dict[str, Any]] = []
         completed_today: list[dict[str, Any]] = []
         other_pending: list[dict[str, Any]] = []
+        notion_today_matcher = getattr(notion_skill, "todo_item_matches_today", None)
+        notion_due_date_getter = getattr(notion_skill, "todo_item_due_date", None)
         for row in rows:
             if not isinstance(row, dict):
                 continue
             item = self._normalize_notion_row(row)
-            due_date = self._parse_date(item.get("due_date"))
-            if due_date is None:
-                continue
+            if callable(notion_due_date_getter):
+                due_date = notion_due_date_getter(item)
+            else:
+                due_date = self._notion_item_due_date(item)
             done = bool(item.get("done"))
             is_high = self._is_high_priority(item)
-            if due_date == now and not done:
+            if callable(notion_today_matcher):
+                matches_today = bool(notion_today_matcher(item, today=now))
+            else:
+                matches_today = self._notion_item_matches_today(item, today=now)
+            if matches_today and not done:
                 pending_today.append(item)
             if (
+                due_date is not None
+                and
                 now <= due_date <= due_soon_limit
                 and not done
                 and is_high
                 and not self._is_daily_recurring_task(item)
             ):
                 high_priority_due_soon.append(item)
-            if due_date == now and done:
+            if matches_today and done:
                 completed_today.append(item)
-            if due_date >= now and not done:
+            if due_date is not None and due_date >= now and not done:
                 other_pending.append(item)
         return {
             "available": True,
@@ -765,7 +781,7 @@ class HeartbeatSnapshotSkill(BaseSkill):
         sections: list[str] = []
         if pending_today:
             items = "\n".join(f"- {self._display_notion_item(item)}" for item in pending_today[:5])
-            sections.append(f"今日到期未完成：\n\n{items}")
+            sections.append(f"今日相关未完成：\n\n{items}")
         if high_priority_due_soon:
             items = "\n".join(f"- {self._display_notion_item(item)}" for item in high_priority_due_soon[:5])
             sections.append(f"三天内高优未完成：\n\n{items}")
@@ -835,15 +851,24 @@ class HeartbeatSnapshotSkill(BaseSkill):
             "优先级",
             "优先程度",
         )
-        due_date = str(row.get("due_date") or "").strip() or self._extract_first_property(
-            properties,
-            "日期",
-            "Due Date",
-            "Due",
-            "Deadline",
-            "截止日期",
-            "截至",
+        date_start = str(row.get("date_start") or "").strip()
+        date_end = str(row.get("date_end") or "").strip()
+        if not date_start:
+            date_start, date_end = self._extract_first_date_range(
+                properties,
+                "日期",
+                "Due Date",
+                "Due",
+                "Deadline",
+                "截止日期",
+                "截至",
+            )
+        if not date_end:
+            date_end = date_start
+        is_date_span = bool(row.get("is_date_span")) or (
+            bool(date_start) and bool(date_end) and date_end != date_start
         )
+        due_date = str(row.get("due_date") or "").strip() or date_end or date_start
         tags = str(row.get("tags") or "").strip() or self._extract_first_property(properties, "Tags", "标签")
         done_value = str(row.get("done") or "").strip() or self._extract_first_property(
             properties,
@@ -863,12 +888,20 @@ class HeartbeatSnapshotSkill(BaseSkill):
             "频率",
         )
         parent_title = str(row.get("parent_title") or "").strip()
+        title = str(row.get("title") or "").strip() or self._extract_title(row)
+        display_title = str(row.get("display_title") or "").strip()
+        if not display_title:
+            display_title = f"{parent_title} / {title}" if parent_title else title
         return {
             "id": str(row.get("id") or ""),
-            "title": str(row.get("title") or "").strip() or self._extract_title(row),
+            "title": title,
+            "display_title": display_title,
             "status": status,
             "priority": priority,
             "due_date": due_date[:10] if due_date else "",
+            "date_start": date_start[:10] if date_start else "",
+            "date_end": date_end[:10] if date_end else "",
+            "is_date_span": is_date_span,
             "tags": tags,
             "done": str(done_value).lower() == "true",
             "recurrence": recurrence,
@@ -958,11 +991,39 @@ class HeartbeatSnapshotSkill(BaseSkill):
         )
 
     def _display_notion_item(self, item: dict[str, Any]) -> str:
+        display_title = str(item.get("display_title") or "").strip()
+        if display_title:
+            return display_title
         title = str(item.get("title") or "").strip() or "未命名任务"
         parent_title = str(item.get("parent_title") or "").strip()
         if parent_title:
             return f"{parent_title} / {title}"
         return title
+
+    def _notion_item_due_date(self, item: dict[str, Any]) -> date | None:
+        due_text = (
+            str(item.get("date_end") or "").strip()
+            or str(item.get("due_date") or "").strip()
+            or str(item.get("date_start") or "").strip()
+        )
+        return self._parse_date(due_text)
+
+    def _notion_item_matches_today(self, item: dict[str, Any], *, today: date) -> bool:
+        start = self._parse_date(
+            str(item.get("date_start") or "").strip() or str(item.get("due_date") or "").strip()
+        )
+        end = self._parse_date(
+            str(item.get("date_end") or "").strip()
+            or str(item.get("due_date") or "").strip()
+            or str(item.get("date_start") or "").strip()
+        )
+        if start is None:
+            return False
+        if end is None:
+            end = start
+        if end < start:
+            end = start
+        return start <= today <= end
 
     def _parse_datetime(self, value: Any) -> datetime | None:
         text = str(value or "").strip()
@@ -976,7 +1037,7 @@ class HeartbeatSnapshotSkill(BaseSkill):
             return parsed.replace(tzinfo=self._now().tzinfo)
         return parsed
 
-    def _parse_date(self, value: Any) -> datetime.date | None:
+    def _parse_date(self, value: Any) -> date | None:
         text = str(value or "").strip()
         if not text:
             return None
@@ -984,6 +1045,28 @@ class HeartbeatSnapshotSkill(BaseSkill):
             return datetime.fromisoformat(text[:10]).date()
         except ValueError:
             return None
+
+    def _extract_first_date_range(self, properties: Any, *names: str) -> tuple[str, str]:
+        if not isinstance(properties, dict):
+            return "", ""
+        for name in names:
+            value = properties.get(name)
+            start, end = self._extract_date_range_property(value)
+            if start:
+                return start, end
+        return "", ""
+
+    def _extract_date_range_property(self, value: Any) -> tuple[str, str]:
+        if not isinstance(value, dict):
+            return "", ""
+        if str(value.get("type") or "").strip() != "date":
+            return "", ""
+        payload = value.get("date")
+        if not isinstance(payload, dict):
+            return "", ""
+        start = str(payload.get("start") or "").strip()[:10]
+        end = str(payload.get("end") or "").strip()[:10] or start
+        return start, end
 
     def _safe_float(self, value: Any) -> float:
         try:
