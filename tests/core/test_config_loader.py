@@ -220,13 +220,28 @@ def test_repo_models_config_routes_lightweight_and_heartbeat_to_non_coding_model
     )
 
     assert runtime.default_model == "GPT"
-    assert runtime.task_routing["lightweight"] == "EdenQwen"
-    assert runtime.task_routing["compression"] == "EdenQwen"
-    assert runtime.task_routing["heartbeat"] == "EdenQwen"
-    assert runtime.task_routing["reasoning"] == "GPT"
+    assert runtime.task_routing["chat"] == "GeminiPro3_1"
+    assert runtime.task_routing["reasoning"] == "GeminiPro3_1"
+    assert runtime.task_routing["vision"] == "GeminiPro3_1"
+    assert runtime.task_routing["lightweight"] == "GeminiFlash"
+    assert runtime.task_routing["compression"] == "GeminiFlash"
+    assert runtime.task_routing["heartbeat"] == "GeminiFlash"
     assert runtime.models["EdenQwen"].litellm_model == "ollama_chat/qwen3.5:27b"
     assert runtime.models["EdenQwen"].provider == "Eden"
     assert runtime.models["EdenQwen"].fallback == "CodingPlanAuto"
+    assert "Gemini" not in runtime.models
+    assert runtime.models["GeminiPro3_1"].litellm_model == "anthropic/gemini-3.1-pro-high"
+    assert runtime.models["GeminiPro3_1"].provider == "VSPLab_Gemini"
+    assert runtime.models["GeminiPro3_1"].fallback == "GeminiPro3_0"
+    assert runtime.models["GeminiPro3_0"].litellm_model == "anthropic/gemini-3-pro-high"
+    assert runtime.models["GeminiPro3_0"].fallback == "GeminiLow"
+    assert runtime.models["GeminiLow"].litellm_model == "anthropic/gemini-3.1-pro-low"
+    assert runtime.models["GeminiLow"].fallback == "Claude"
+    assert runtime.models["GeminiFlash"].litellm_model == "anthropic/gemini-3-flash"
+    assert runtime.models["GeminiFlash"].fallback == "EdenQwen"
+    assert runtime.models["Claude"].litellm_model == "anthropic/claude-opus-4-5-thinking"
+    assert runtime.models["Claude"].provider == "VSPLab_Claude"
+    assert runtime.models["Claude"].fallback == "EdenQwen"
 
 
 def test_load_tasks_config_accepts_heartbeat_email_store_and_hypo_info_digest(tmp_path: Path) -> None:

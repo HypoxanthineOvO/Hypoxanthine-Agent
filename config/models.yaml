@@ -1,25 +1,54 @@
 default_model: GPT
 
 task_routing:
-  chat: GPT
-  reasoning: GPT
-  heartbeat: EdenQwen
-  lightweight: EdenQwen
-  compression: EdenQwen
+  chat: GeminiPro3_1
+  reasoning: GeminiPro3_1
+  heartbeat: GeminiFlash
+  lightweight: GeminiFlash
+  compression: GeminiFlash
   embedding: VolcanoEmbedding
-  vision: GPT
+  vision: GeminiPro3_1
 
 models:
   GPT:
     litellm_model: "openai/gpt-5.4"
-    provider: "TTAPI"
+    provider: "VSPLab"
     supports_tool_calling: true
     description: "OpenAI ChatGPT"
     fallback: CodingPlanAuto
     reasoning_config:
       chat: low
       reasoning: high
-
+  GeminiPro3_1:
+    litellm_model: "anthropic/gemini-3.1-pro-high"
+    provider: "VSPLab_Gemini"
+    supports_tool_calling: true
+    description: "Gemini 3.1 Pro via VSPLab Antigravity"
+    fallback: GeminiPro3_0
+  GeminiPro3_0:
+    litellm_model: "anthropic/gemini-3-pro-high"
+    provider: "VSPLab_Gemini"
+    supports_tool_calling: true
+    description: "Gemini 3.0 Pro via VSPLab Antigravity"
+    fallback: GeminiLow
+  GeminiLow:
+    litellm_model: "anthropic/gemini-3.1-pro-low"
+    provider: "VSPLab_Gemini"
+    supports_tool_calling: true
+    description: "Gemini 3.1 Pro Low via VSPLab Antigravity"
+    fallback: Claude
+  GeminiFlash:
+    litellm_model: "anthropic/gemini-3-flash"
+    provider: "VSPLab_Gemini"
+    supports_tool_calling: true
+    description: "Gemini 3 Flash via VSPLab Antigravity"
+    fallback: EdenQwen
+  Claude:
+    litellm_model: "anthropic/claude-opus-4-5-thinking"
+    provider: "VSPLab_Claude"
+    supports_tool_calling: true
+    description: "Claude Opus 4.5 Thinking via VSPLab Antigravity"
+    fallback: EdenQwen
   GenesisQwen122B:
     litellm_model: "openai/qwen3.5-122b"
     provider: "Genesis"

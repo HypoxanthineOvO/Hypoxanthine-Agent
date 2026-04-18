@@ -512,6 +512,12 @@ def test_secrets_yaml_example_includes_qq_template() -> None:
 
     config = SecretsConfig.model_validate(payload)
 
+    assert "VSPLab" in config.providers
+    assert config.providers["VSPLab"].api_base == "http://api.vsplab.cn/v1"
+    assert "VSPLab_Gemini" in config.providers
+    assert config.providers["VSPLab_Gemini"].api_base == "http://api.vsplab.cn/antigravity"
+    assert "VSPLab_Claude" in config.providers
+    assert config.providers["VSPLab_Claude"].api_base == "http://api.vsplab.cn/antigravity"
     assert config.services is not None
     assert config.services.qq is not None
     assert config.services.qq.napcat_ws_url == "ws://127.0.0.1:3009/onebot/v11/ws"
