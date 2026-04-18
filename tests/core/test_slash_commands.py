@@ -388,15 +388,92 @@ def test_help_contains_all_commands(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
+def test_all_slash_commands_have_help(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, _, _ = await _build_handler(tmp_path)
+
+        for entry in handler._registry:
+            assert getattr(entry, "help", None) is not None, entry.command
+            assert str(entry.help.brief or "").strip(), entry.command
+            assert str(entry.help.usage or "").strip(), entry.command
+            assert str(entry.help.description or "").strip(), entry.command
+            assert isinstance(entry.help.examples, list) and entry.help.examples, entry.command
+            assert str(entry.help.category or "").strip(), entry.command
+
+    asyncio.run(_run())
+
+
+def test_help_without_args_lists_by_category(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, _, _ = await _build_handler(tmp_path)
+        text = await handler.try_handle(Message(text="/help", sender="user", session_id="s1"))
+        assert text is not None
+        assert "## System" in text
+        assert "## Session" in text
+        assert "## Debug" in text
+        assert "## Dev" in text
+        assert "- `/codex`" in text
+        assert "提交、查看、挂载和管理 Codex 编码任务" in text
+
+    asyncio.run(_run())
+
+
+def test_help_with_command_name_shows_detail(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, _, _ = await _build_handler(tmp_path)
+        text = await handler.try_handle(Message(text="/help codex", sender="user", session_id="s1"))
+        assert text is not None
+        assert "# /codex" in text
+        assert "用法" in text
+        assert "/codex <prompt>" in text
+        assert "示例" in text
+        assert "coder_submit_task" in text
+
+    asyncio.run(_run())
+
+
+def test_help_with_unknown_command(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, _, _ = await _build_handler(tmp_path)
+        text = await handler.try_handle(Message(text="/help xxx", sender="user", session_id="s1"))
+        assert text is not None
+        assert "未找到" in text
+        assert "xxx" in text
+
+    asyncio.run(_run())
+
+
+def test_help_with_category(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, _, _ = await _build_handler(tmp_path)
+        text = await handler.try_handle(Message(text="/help dev", sender="user", session_id="s1"))
+        assert text is not None
+        assert "## Dev" in text
+        assert "/codex" in text
+        assert "/restart" not in text
+
+    asyncio.run(_run())
+
+
+def test_codex_help_has_examples(tmp_path: Path) -> None:
+    async def _run() -> None:
+        handler, _, _, _ = await _build_handler(tmp_path)
+        entry = next(item for item in handler._registry if item.command == "/codex")
+        assert getattr(entry, "help", None) is not None
+        assert any(str(example).strip() for example in entry.help.examples)
+
+    asyncio.run(_run())
+
+
 def test_help_chinese(tmp_path: Path) -> None:
     async def _run() -> None:
         handler, _, _, _ = await _build_handler(tmp_path)
         text = await handler.try_handle(Message(text="/help", sender="user", session_id="s1"))
         assert text is not None
-        assert "📋 可用斜杠指令" in text
-        assert "显示所有可用斜杠指令" in text
-        assert "查看模型路由、延迟、Token 消耗" in text
-        assert "别名" in text
+        assert "# 斜杠指令帮助" in text
+        assert "可用分组" in text
+        assert "查看全部指令，或查询单条指令帮助" in text
+        assert "查看当前模型路由、探测状态和用量" in text
         assert "/h, /帮助" in text
 
     asyncio.run(_run())

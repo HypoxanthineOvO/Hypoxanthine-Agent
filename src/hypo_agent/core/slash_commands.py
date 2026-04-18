@@ -46,11 +46,31 @@ class SlashStructuredStore(Protocol):
 
 
 @dataclass
+class SlashCommandHelp:
+    name: str
+    brief: str
+    usage: str
+    description: str
+    examples: list[str]
+    category: str
+
+
+@dataclass
 class SlashCommandEntry:
     command: str
     description: str
     handler: Any
     aliases: list[str] = field(default_factory=list)
+    help: SlashCommandHelp | None = None
+
+
+_HELP_CATEGORY_TITLES: dict[str, str] = {
+    "system": "System",
+    "session": "Session",
+    "debug": "Debug",
+    "dev": "Dev",
+    "other": "Other",
+}
 
 
 class SlashCommandHandler:
@@ -84,73 +104,270 @@ class SlashCommandHandler:
                 aliases=["/h", "/帮助"],
                 description="显示所有可用斜杠指令",
                 handler=self._handle_help,
+                help=SlashCommandHelp(
+                    name="/help",
+                    brief="查看全部指令，或查询单条指令帮助",
+                    usage="/help [<command>|<category>]",
+                    description=(
+                        "无参数时按分组列出所有斜杠指令。\n"
+                        "传入指令名时显示该指令的完整帮助。\n"
+                        "传入分类名时只显示该分类下的指令。"
+                    ),
+                    examples=[
+                        "/help",
+                        "/help codex",
+                        "/help dev",
+                    ],
+                    category="system",
+                ),
             ),
             SlashCommandEntry(
                 command="/model status",
                 aliases=["/model"],
                 description="查看模型路由、延迟、Token 消耗",
                 handler=self._handle_model_status,
+                help=SlashCommandHelp(
+                    name="/model status",
+                    brief="查看当前模型路由、探测状态和用量",
+                    usage="/model status",
+                    description=(
+                        "显示默认模型、任务路由、fallback 链路、最近探测结果、历史延迟和 token 用量。\n"
+                        "适合在怀疑模型不可用、fallback 频繁或成本异常时排查。\n"
+                        "别名 `/model` 会映射到同一条帮助。"
+                    ),
+                    examples=[
+                        "/model status",
+                        "/model",
+                    ],
+                    category="system",
+                ),
             ),
             SlashCommandEntry(
                 command="/token",
                 description="当前会话 Token 用量",
                 handler=self._handle_session_token,
+                help=SlashCommandHelp(
+                    name="/token",
+                    brief="查看当前会话的 token 用量",
+                    usage="/token",
+                    description=(
+                        "统计当前 session 内各模型的输入、输出和总 token。\n"
+                        "适合排查单个会话是否过长或某次对话消耗异常。"
+                    ),
+                    examples=["/token"],
+                    category="session",
+                ),
             ),
             SlashCommandEntry(
                 command="/token total",
                 description="全局 Token 用量统计",
                 handler=self._handle_global_token,
+                help=SlashCommandHelp(
+                    name="/token total",
+                    brief="查看全局 token 用量统计",
+                    usage="/token total",
+                    description=(
+                        "聚合整个实例上所有 session 的模型 token 用量。\n"
+                        "适合排查总体成本、模型分布和全局热点。"
+                    ),
+                    examples=["/token total"],
+                    category="session",
+                ),
             ),
             SlashCommandEntry(
                 command="/kill",
                 description="激活全局紧急停止开关",
                 handler=self._handle_kill,
+                help=SlashCommandHelp(
+                    name="/kill",
+                    brief="立刻打开全局 Kill Switch",
+                    usage="/kill",
+                    description=(
+                        "激活后，工具执行会被全局阻断，系统进入紧急停止状态。\n"
+                        "适合发现错误循环、异常调用或需要手动止损时使用。\n"
+                        "恢复需要显式执行 `/resume`。"
+                    ),
+                    examples=["/kill"],
+                    category="system",
+                ),
             ),
             SlashCommandEntry(
                 command="/resume",
                 description="解除全局紧急停止开关",
                 handler=self._handle_resume,
+                help=SlashCommandHelp(
+                    name="/resume",
+                    brief="解除全局 Kill Switch",
+                    usage="/resume",
+                    description=(
+                        "当系统被 `/kill` 暂停后，用这条命令恢复正常执行。\n"
+                        "如果当前并未处于 kill 状态，会返回提示而不会报错。"
+                    ),
+                    examples=["/resume"],
+                    category="system",
+                ),
             ),
             SlashCommandEntry(
                 command="/clear",
                 aliases=["/cls"],
                 description="清空当前会话历史",
                 handler=self._handle_clear_session,
+                help=SlashCommandHelp(
+                    name="/clear",
+                    brief="清空当前会话历史记录",
+                    usage="/clear",
+                    description=(
+                        "只清除当前 session 的历史消息，不影响其它会话。\n"
+                        "适合上下文污染、需要重新开始一轮对话时使用。\n"
+                        "别名 `/cls`。"
+                    ),
+                    examples=[
+                        "/clear",
+                        "/cls",
+                    ],
+                    category="session",
+                ),
             ),
             SlashCommandEntry(
                 command="/session list",
                 description="列出所有会话",
                 handler=self._handle_session_list,
+                help=SlashCommandHelp(
+                    name="/session list",
+                    brief="列出当前已有的全部会话",
+                    usage="/session list",
+                    description=(
+                        "显示 session_id、创建时间和消息数。\n"
+                        "适合排查历史会话、切换调试对象或确认是否存在旧上下文。"
+                    ),
+                    examples=["/session list"],
+                    category="session",
+                ),
             ),
             SlashCommandEntry(
                 command="/skills",
                 description="查看已注册技能及熔断状态",
                 handler=self._handle_skills_status,
+                help=SlashCommandHelp(
+                    name="/skills",
+                    brief="查看技能注册状态和熔断状态",
+                    usage="/skills",
+                    description=(
+                        "显示当前已注册技能、工具列表、是否启用以及熔断器状态。\n"
+                        "适合排查某个 skill 没有暴露、被禁用或被熔断的情况。"
+                    ),
+                    examples=["/skills"],
+                    category="debug",
+                ),
             ),
             SlashCommandEntry(
                 command="/reminders",
                 description="列出提醒（可选状态：active/paused/completed/missed）",
                 handler=self._handle_reminders,
+                help=SlashCommandHelp(
+                    name="/reminders",
+                    brief="列出提醒，可按状态过滤",
+                    usage="/reminders [active|paused|completed|missed|all]",
+                    description=(
+                        "默认显示非删除提醒；也可追加状态过滤。\n"
+                        "适合快速查看当前提醒系统里有哪些待办或已错过提醒。"
+                    ),
+                    examples=[
+                        "/reminders",
+                        "/reminders active",
+                    ],
+                    category="session",
+                ),
             ),
             SlashCommandEntry(
                 command="/gc",
                 description="手动触发 Memory GC",
                 handler=self._handle_gc,
+                help=SlashCommandHelp(
+                    name="/gc",
+                    brief="手动触发记忆垃圾回收",
+                    usage="/gc",
+                    description=(
+                        "执行 memory GC 并返回处理结果统计。\n"
+                        "适合在排查记忆堆积、旧数据未清理或测试环境污染时使用。"
+                    ),
+                    examples=["/gc"],
+                    category="debug",
+                ),
             ),
             SlashCommandEntry(
                 command="/repair",
                 description="汇总最近错误并在可用时自动提交修复任务",
                 handler=self._handle_repair,
+                help=SlashCommandHelp(
+                    name="/repair",
+                    brief="汇总近期错误并尝试发起修复任务",
+                    usage="/repair [<issue>]",
+                    description=(
+                        "无参数时输出最近 24 小时的错误摘要和失败工具统计。\n"
+                        "带问题描述时，会结合失败工具与近期日志生成修复诊断。\n"
+                        "如果 `coder_submit_task` 可用，会自动提交修复任务；否则只给出人工建议。"
+                    ),
+                    examples=[
+                        "/repair",
+                        "/repair web_search 超时",
+                    ],
+                    category="debug",
+                ),
             ),
             SlashCommandEntry(
                 command="/restart",
                 description="确认后执行有限自重启（支持 force 跳过冷却期）",
                 handler=self._handle_restart,
+                help=SlashCommandHelp(
+                    name="/restart",
+                    brief="执行有限自重启，支持确认和强制模式",
+                    usage="/restart [confirm|force]",
+                    description=(
+                        "直接输入 `/restart` 只会显示确认说明，不会立即重启。\n"
+                        "`/restart confirm` 在冷却期允许时执行重启；`/restart force` 会跳过冷却期。\n"
+                        "适合部署后异常、自愈验证或需要手动拉起新进程时使用。"
+                    ),
+                    examples=[
+                        "/restart",
+                        "/restart confirm",
+                        "/restart force",
+                    ],
+                    category="system",
+                ),
             ),
             SlashCommandEntry(
                 command="/codex",
                 description="调用 Hypo-Coder 提交、查询、挂载和管理编码任务",
                 handler=self._handle_codex,
+                help=SlashCommandHelp(
+                    name="/codex",
+                    brief="提交、查看、挂载和管理 Codex 编码任务",
+                    usage=(
+                        "/codex <prompt> [--dir /path]\n"
+                        "/codex send <instruction>\n"
+                        "/codex status <task_id|last>\n"
+                        "/codex list [status]\n"
+                        "/codex abort <task_id|last>\n"
+                        "/codex attach <task_id> [-n N]\n"
+                        "/codex logs [task_id|last] [-n N]\n"
+                        "/codex detach | /codex done | /codex health"
+                    ),
+                    description=(
+                        "这是面向用户的 Codex 任务入口，用来提交和管理长时编码任务。\n"
+                        "最常见用法是直接提交 prompt，也可以追加指令、查看状态、挂载输出或中止任务。\n"
+                        "`/codex` 是用户侧命令入口；`coder_submit_task` 是系统内部工具，两者目标一致但使用场景不同。\n"
+                        "当你记不住子命令时，优先用 `/help codex` 查看完整说明。"
+                    ),
+                    examples=[
+                        "/codex 修复登录页二维码失效 --dir /tmp/repo",
+                        "/codex status last",
+                        "/codex attach task-456 -n 20",
+                        "/codex logs task-456",
+                        "/codex abort last",
+                    ],
+                    category="dev",
+                ),
             ),
         ]
 
@@ -161,6 +378,8 @@ class SlashCommandHandler:
 
         command = " ".join(raw.split())
         command_lower = command.lower()
+        if self._is_help_invocation(command_lower):
+            return await self._handle_help(inbound)
         if command_lower == "/codex" or command_lower.startswith("/codex "):
             return await self._handle_codex(inbound)
         if command_lower == "/reminders" or command_lower.startswith("/reminders "):
@@ -192,17 +411,122 @@ class SlashCommandHandler:
             resolved = result
         return str(resolved)
 
-    def _handle_help(self, _: Message) -> str:
-        lines = [
-            "📋 可用斜杠指令",
-            "",
-            "| 指令 | 别名 | 说明 |",
-            "|------|------|------|",
-        ]
+    async def _handle_help(self, inbound: Message) -> str:
+        raw = (inbound.text or "").strip()
+        _, _, remainder = raw.partition(" ")
+        query = remainder.strip()
+        if not query:
+            return self._render_help_index()
+
+        category = self._match_help_category(query)
+        if category is not None:
+            return self._render_help_index(category=category)
+
+        entry = self._find_help_entry(query)
+        if entry is not None:
+            return self._render_help_detail(entry)
+
+        return f"未找到帮助主题：{query}\n输入 /help 查看全部命令。"
+
+    def _render_help_index(self, *, category: str | None = None) -> str:
+        grouped: dict[str, list[SlashCommandEntry]] = {}
         for entry in self._registry:
-            alias_text = ", ".join(entry.aliases) if entry.aliases else "—"
-            lines.append(f"| {entry.command} | {alias_text} | {entry.description} |")
+            normalized_help = self._normalized_entry_help(entry)
+            entry_category = normalized_help.category
+            if category is not None and entry_category != category:
+                continue
+            grouped.setdefault(entry_category, []).append(entry)
+
+        if not grouped:
+            title = _HELP_CATEGORY_TITLES.get(category or "", category or "Unknown")
+            return f"未找到分类：{title}\n输入 /help 查看全部命令。"
+
+        lines = ["# 斜杠指令帮助"]
+        if category is None:
+            lines.extend(
+                [
+                    "",
+                    "可用分组：`system`、`session`、`debug`、`dev`",
+                    "也可以用 `/help <指令名>` 查看单条指令详情。",
+                ]
+            )
+        for key in self._ordered_help_categories(grouped.keys()):
+            lines.extend(["", f"## {_HELP_CATEGORY_TITLES.get(key, key.title())}"])
+            for entry in grouped[key]:
+                help_meta = self._normalized_entry_help(entry)
+                alias_text = f"（别名：{', '.join(entry.aliases)}）" if entry.aliases else ""
+                lines.append(f"- `{entry.command}` — {help_meta.brief}{alias_text}")
         return "\n".join(lines)
+
+    def _render_help_detail(self, entry: SlashCommandEntry) -> str:
+        help_meta = self._normalized_entry_help(entry)
+        lines = [
+            f"# {help_meta.name}",
+            "",
+            f"**分类**：{_HELP_CATEGORY_TITLES.get(help_meta.category, help_meta.category.title())}",
+            f"**简介**：{help_meta.brief}",
+            "",
+            "## 用法",
+            "```text",
+            help_meta.usage,
+            "```",
+            "",
+            "## 说明",
+        ]
+        lines.extend(str(help_meta.description or "").strip().splitlines())
+        lines.extend(["", "## 示例"])
+        for example in help_meta.examples:
+            lines.append(f"- `{example}`")
+        return "\n".join(lines)
+
+    def _normalized_entry_help(self, entry: SlashCommandEntry) -> SlashCommandHelp:
+        if entry.help is not None:
+            return entry.help
+        return SlashCommandHelp(
+            name=entry.command,
+            brief=str(entry.description or "").strip() or "查看该指令的帮助",
+            usage=entry.command,
+            description=str(entry.description or "").strip() or "暂无详细说明。",
+            examples=[entry.command],
+            category="other",
+        )
+
+    def _ordered_help_categories(self, categories: Any) -> list[str]:
+        order = {key: index for index, key in enumerate(_HELP_CATEGORY_TITLES.keys())}
+        return sorted(categories, key=lambda item: (order.get(str(item), 999), str(item)))
+
+    def _is_help_invocation(self, command_lower: str) -> bool:
+        return (
+            command_lower == "/help"
+            or command_lower == "/h"
+            or command_lower == "/帮助"
+            or command_lower.startswith("/help ")
+            or command_lower.startswith("/h ")
+            or command_lower.startswith("/帮助 ")
+        )
+
+    def _normalize_help_key(self, raw: str) -> str:
+        normalized = " ".join(str(raw or "").strip().lower().split())
+        if normalized.startswith("/"):
+            normalized = normalized[1:]
+        return normalized
+
+    def _find_help_entry(self, raw: str) -> SlashCommandEntry | None:
+        normalized = self._normalize_help_key(raw)
+        if not normalized:
+            return None
+        for entry in self._registry:
+            candidates = [entry.command, *entry.aliases]
+            if any(self._normalize_help_key(candidate) == normalized for candidate in candidates):
+                return entry
+        return None
+
+    def _match_help_category(self, raw: str) -> str | None:
+        normalized = self._normalize_help_key(raw)
+        for key, title in _HELP_CATEGORY_TITLES.items():
+            if normalized == key or normalized == title.lower():
+                return key
+        return None
 
     async def _handle_model_status(self, _: Message) -> str:
         token_summary = await self.structured_store.summarize_token_usage()
@@ -708,21 +1032,10 @@ class SlashCommandHandler:
         return {"prompt": prompt, "working_directory": working_directory}
 
     def _codex_help_text(self) -> str:
-        return "\n".join(
-            [
-                "Codex 用法：",
-                "/codex <prompt> [--dir /path]",
-                "/codex send <追加指令>",
-                "/codex status <task_id|last>",
-                "/codex list [status]",
-                "/codex abort <task_id|last>",
-                "/codex attach <task_id> [-n N]",
-                "/codex logs [task_id|last] [-n N]",
-                "/codex detach",
-                "/codex done",
-                "/codex health",
-            ]
-        )
+        entry = next((item for item in self._registry if item.command == "/codex"), None)
+        if entry is None:
+            return "Codex 帮助不可用。"
+        return self._render_help_detail(entry)
 
     def _parse_codex_history_args(
         self,
