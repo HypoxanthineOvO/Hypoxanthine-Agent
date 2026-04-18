@@ -47,7 +47,7 @@ class AgentSearchSkill(BaseSkill):
             {
                 "type": "function",
                 "function": {
-                    "name": "web_search",
+                    "name": "search_web",
                     "description": "Search the web and return ranked results for a query.",
                     "parameters": {
                         "type": "object",
@@ -81,7 +81,7 @@ class AgentSearchSkill(BaseSkill):
         ]
 
     async def execute(self, tool_name: str, params: dict[str, Any]) -> SkillOutput:
-        if tool_name == "web_search":
+        if tool_name in {"search_web", "web_search"}:
             query = str(params.get("query") or "").strip()
             if not query:
                 return SkillOutput(status="error", error_info="query is required")
@@ -89,9 +89,9 @@ class AgentSearchSkill(BaseSkill):
             max_results = int(params.get("max_results") or 5)
             max_results = min(10, max(1, max_results))
             try:
-                result = await self.web_search(query, max_results=max_results)
+                result = await self.search_web(query, max_results=max_results)
             except _AGENT_SEARCH_ERRORS as exc:
-                logger.warning("agent_search.web_search.failed", error=str(exc))
+                logger.warning("agent_search.search_web.failed", error=str(exc))
                 return SkillOutput(status="error", error_info=str(exc))
             return SkillOutput(status="success", result=result)
 
@@ -109,7 +109,7 @@ class AgentSearchSkill(BaseSkill):
 
         return SkillOutput(status="error", error_info=f"Unsupported tool '{tool_name}'")
 
-    async def web_search(self, query: str, max_results: int = 5) -> dict[str, Any]:
+    async def search_web(self, query: str, max_results: int = 5) -> dict[str, Any]:
         client = self._get_client()
         payload = await asyncio.to_thread(
             client.search,
@@ -143,6 +143,9 @@ class AgentSearchSkill(BaseSkill):
             "response_time": payload.get("response_time") if isinstance(payload, dict) else None,
             "request_id": payload.get("request_id") if isinstance(payload, dict) else None,
         }
+
+    async def web_search(self, query: str, max_results: int = 5) -> dict[str, Any]:
+        return await self.search_web(query, max_results=max_results)
 
     async def web_read(self, url: str) -> dict[str, Any]:
         client = self._get_client()

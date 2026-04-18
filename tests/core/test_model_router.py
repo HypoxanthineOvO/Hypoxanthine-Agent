@@ -2,12 +2,48 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from litellm.exceptions import InternalServerError
 
 from hypo_agent.core.config_loader import RuntimeModelConfig
 from hypo_agent.core.model_router import ModelRouter
+
+
+def _web_search_tool_schema() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web and return ranked results for a query.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "max_results": {"type": "integer"},
+                },
+                "required": ["query"],
+            },
+        },
+    }
+
+
+def _read_file_tool_schema() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read file content.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                },
+                "required": ["path"],
+            },
+        },
+    }
 
 
 @pytest.fixture
@@ -317,6 +353,7 @@ def test_fallback_emits_event(runtime_config: RuntimeModelConfig) -> None:
             "reason": "API timeout",
             "fallback_model": "DeepseekV3_2",
             "requested_model": "Gemini3Pro",
+            "provider": "Hiapi",
             "session_id": "s-fallback",
         }
     ]
@@ -411,6 +448,124 @@ def test_model_router_skips_null_provider_model(
 
     assert text == "ok"
     assert called_models == ["openai/gemini-2.5-pro"]
+
+
+def test_model_router_antigravity_noop_when_tool_names_are_clean() -> None:
+    runtime = RuntimeModelConfig.model_validate(
+        {
+            "default_model": "GeminiLow",
+            "task_routing": {"chat": "GeminiLow"},
+            "models": {
+                "GeminiLow": {
+                    "provider": "VSPLab_Gemini",
+                    "litellm_model": "anthropic/gemini-3.1-pro-low",
+                    "fallback": None,
+                    "api_base": "http://api.vsplab.cn/antigravity",
+                    "api_key": "test-key",
+                    "supports_tool_calling": True,
+                }
+            },
+        }
+    )
+    captured: list[dict[str, Any]] = []
+    emitted: list[dict[str, Any]] = []
+
+    async def fake_acompletion(**kwargs):
+        captured.append(kwargs)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "search_web",
+                                    "arguments": "{\"query\":\"hi\"}",
+                                },
+                            }
+                        ],
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    async def event_emitter(event: dict[str, Any]) -> None:
+        emitted.append(event)
+
+    router = ModelRouter(runtime, acompletion_fn=fake_acompletion)
+    result = asyncio.run(
+        router.call_with_tools(
+            "GeminiLow",
+            [{"role": "user", "content": "hi"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "search_web",
+                        "description": "Search the web and return ranked results for a query.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                            },
+                            "required": ["query"],
+                        },
+                    },
+                },
+                _read_file_tool_schema(),
+            ],
+            session_id="s-antigravity",
+            event_emitter=event_emitter,
+        )
+    )
+
+    assert captured[0]["tools"][0]["function"]["name"] == "search_web"
+    assert captured[0]["tools"][1]["function"]["name"] == "read_file"
+    assert result["tool_calls"][0]["function"]["name"] == "search_web"
+    assert emitted == []
+
+
+def test_model_router_does_not_apply_antigravity_tool_transform_to_other_providers() -> None:
+    runtime = RuntimeModelConfig.model_validate(
+        {
+            "default_model": "GPT",
+            "task_routing": {"chat": "GPT"},
+            "models": {
+                "GPT": {
+                    "provider": "VSPLab",
+                    "litellm_model": "openai/gpt-5.4",
+                    "fallback": None,
+                    "api_base": "https://api.example.com/v1",
+                    "api_key": "test-key",
+                    "supports_tool_calling": True,
+                }
+            },
+        }
+    )
+    captured: list[dict[str, Any]] = []
+
+    async def fake_acompletion(**kwargs):
+        captured.append(kwargs)
+        return {
+            "choices": [{"message": {"content": "ok", "tool_calls": []}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    router = ModelRouter(runtime, acompletion_fn=fake_acompletion)
+    result = asyncio.run(
+        router.call_with_tools(
+            "GPT",
+            [{"role": "user", "content": "hi"}],
+            tools=[_web_search_tool_schema()],
+        )
+    )
+
+    assert captured[0]["tools"][0]["function"]["name"] == "web_search"
+    assert result["tool_calls"] == []
 
 
 def test_model_router_stream_yields_chunks(runtime_config: RuntimeModelConfig) -> None:

@@ -2,7 +2,7 @@
 name: "agent-search"
 description: "通过 Tavily 执行 Web search 与 page reading。用户需要在线检索、事实核验或读取公开网页时使用。"
 compatibility: "linux"
-allowed-tools: "web_search web_read"
+allowed-tools: "search_web web_read"
 metadata:
   hypo.category: "hybrid"
   hypo.backend: "agent_search"
@@ -26,12 +26,12 @@ metadata:
 
 ## 工具与接口 (Tools)
 
-- `web_search`：发现信息源、筛选候选页面。
+- `search_web`：发现信息源、筛选候选页面。
 - `web_read`：读取指定 URL 的正文内容。
 
 ## 标准流程 (Workflow)
 
-1. 默认先从 `web_search` 开始，写具体 query。
+1. 默认先从 `search_web` 开始，写具体 query。
 2. query 中尽量包含 `topic`、`entity`、`date`、`version`、`site`、`region` 等限定词。
 3. 首轮把 `max_results` 控制在 `3` 到 `5`，先看标题、snippet 和 URL。
 4. 只对真正相关的一两页调用 `web_read`。
@@ -39,8 +39,8 @@ metadata:
 
 ## 参数约定 (Parameters)
 
-- `web_search.query` 应写成具体搜索短语，而不是模糊问题。
-- `web_search.max_results` 默认用 `3` 到 `5`，只有第一轮明显不够时再放大。
+- `search_web.query` 应写成具体搜索短语，而不是模糊问题。
+- `search_web.max_results` 默认用 `3` 到 `5`，只有第一轮明显不够时再放大。
 - `web_read.url` 应传最终要总结或引用的公开页面地址。
 
 ## 边界与风险 (Guardrails)

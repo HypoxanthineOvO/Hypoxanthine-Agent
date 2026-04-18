@@ -25,6 +25,11 @@ try:
 except ImportError:  # pragma: no cover - optional runtime dependency
     OpenAIClientError = None
 
+from hypo_agent.core.antigravity_compat import (
+    is_antigravity_provider,
+    restore_antigravity_tool_call_names,
+    transform_antigravity_tools,
+)
 from hypo_agent.core.config_loader import RuntimeModelConfig
 from hypo_agent.core.model_runtime_context import (
     RUNTIME_MODEL_CONTEXT_HEADING,
@@ -151,8 +156,45 @@ class ModelRouter:
                     kwargs["api_base"] = cfg.api_base
                 if isinstance(cfg.api_key, str) and cfg.api_key.strip():
                     kwargs["api_key"] = cfg.api_key
+                transformed_tools = tools
+                reverse_tool_name_map: dict[str, str] = {}
                 if tools is not None:
-                    kwargs["tools"] = tools
+                    try:
+                        transform_result = self._transform_tools_for_candidate(
+                            tools,
+                            provider=cfg.provider,
+                        )
+                    except Exception:
+                        self.logger.exception(
+                            "model_tool_transform_failed",
+                            requested_model=model_name,
+                            resolved_model=candidate,
+                            provider=cfg.provider,
+                        )
+                        transform_result = None
+                    if transform_result is not None:
+                        transformed_tools = transform_result.tools
+                        reverse_tool_name_map = dict(transform_result.reverse_name_map)
+                        if transform_result.renamed_tools:
+                            self.logger.info(
+                                "model_tool_transform_applied",
+                                requested_model=model_name,
+                                resolved_model=candidate,
+                                provider=cfg.provider,
+                                renamed_tools=transform_result.renamed_tools,
+                            )
+                            await self._emit_model_event(
+                                event_emitter,
+                                {
+                                    "type": "model_tool_transform",
+                                    "requested_model": model_name,
+                                    "resolved_model": candidate,
+                                    "provider": cfg.provider,
+                                    "session_id": session_id,
+                                    "renamed_tools": transform_result.renamed_tools,
+                                },
+                            )
+                    kwargs["tools"] = transformed_tools
                 if timeout_seconds is not None:
                     kwargs["timeout"] = timeout_seconds
                 kwargs.update(
@@ -172,7 +214,7 @@ class ModelRouter:
                 self.logger.debug(
                     "call_with_tools.request",
                     model=cfg.litellm_model,
-                    tools_count=len(tools or []),
+                    tools_count=len(transformed_tools or []),
                     messages_count=len(prepared_messages),
                 )
 
@@ -185,6 +227,10 @@ class ModelRouter:
                     text_length=len(text),
                 )
                 tool_calls = self._extract_tool_calls(response)
+                tool_calls = restore_antigravity_tool_call_names(
+                    tool_calls,
+                    reverse_tool_name_map,
+                )
                 usage = self._extract_usage(response)
                 self.logger.info(
                     "model_call_success",
@@ -226,6 +272,7 @@ class ModelRouter:
                     candidate_chain=candidate_chain,
                     failed_index=index,
                     reason=str(exc),
+                    provider=cfg.provider,
                     session_id=session_id,
                     event_emitter=event_emitter,
                 )
@@ -303,8 +350,43 @@ class ModelRouter:
                     kwargs["api_base"] = cfg.api_base
                 if isinstance(cfg.api_key, str) and cfg.api_key.strip():
                     kwargs["api_key"] = cfg.api_key
+                transformed_tools = tools
                 if tools is not None:
-                    kwargs["tools"] = tools
+                    try:
+                        transform_result = self._transform_tools_for_candidate(
+                            tools,
+                            provider=cfg.provider,
+                        )
+                    except Exception:
+                        self.logger.exception(
+                            "model_tool_transform_failed",
+                            requested_model=model_name,
+                            resolved_model=candidate,
+                            provider=cfg.provider,
+                        )
+                        transform_result = None
+                    if transform_result is not None:
+                        transformed_tools = transform_result.tools
+                        if transform_result.renamed_tools:
+                            self.logger.info(
+                                "model_tool_transform_applied",
+                                requested_model=model_name,
+                                resolved_model=candidate,
+                                provider=cfg.provider,
+                                renamed_tools=transform_result.renamed_tools,
+                            )
+                            await self._emit_model_event(
+                                event_emitter,
+                                {
+                                    "type": "model_tool_transform",
+                                    "requested_model": model_name,
+                                    "resolved_model": candidate,
+                                    "provider": cfg.provider,
+                                    "session_id": session_id,
+                                    "renamed_tools": transform_result.renamed_tools,
+                                },
+                            )
+                    kwargs["tools"] = transformed_tools
                 if timeout_seconds is not None:
                     kwargs["timeout"] = timeout_seconds
                 kwargs.update(
@@ -377,6 +459,7 @@ class ModelRouter:
                     candidate_chain=candidate_chain,
                     failed_index=index,
                     reason=str(exc),
+                    provider=cfg.provider,
                     session_id=session_id,
                     event_emitter=event_emitter,
                 )
@@ -509,6 +592,7 @@ class ModelRouter:
         candidate_chain: list[str],
         failed_index: int,
         reason: str,
+        provider: str | None,
         session_id: str | None,
         event_emitter: Callable[[dict[str, Any]], Awaitable[None] | None] | None,
     ) -> None:
@@ -532,6 +616,7 @@ class ModelRouter:
                 "reason": reason,
                 "fallback_model": fallback_model,
                 "requested_model": requested_model,
+                "provider": provider,
                 "session_id": session_id,
             },
         )
@@ -863,6 +948,18 @@ class ModelRouter:
         # rejects historical function-call IDs unless they use the `fc_` prefix.
         model_name = str(litellm_model or "").split("/")[-1].strip().lower()
         return model_name.startswith("gpt-5")
+
+    def _transform_tools_for_candidate(
+        self,
+        tools: list[dict[str, Any]] | None,
+        *,
+        provider: str | None,
+    ):
+        if not tools:
+            return None
+        if not is_antigravity_provider(provider):
+            return None
+        return transform_antigravity_tools(tools)
 
     def _candidate_requires_single_leading_system_message(
         self,

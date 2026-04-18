@@ -11,6 +11,7 @@ import structlog
 logger = structlog.get_logger("hypo_agent.output_compressor")
 
 COMPRESSION_STRATEGIES = {
+    "search_web": "保留每条搜索结果的标题、URL和关键摘要句。不要合并条目。",
     "web_search": "保留每条搜索结果的标题、URL和关键摘要句。不要合并条目。",
     "web_read": "保留页面的主要内容结构、关键数据点和具体数值。去除导航栏、广告、页脚等无关内容。",
     "run_command": "保留命令的退出状态、错误信息、关键输出行。如果是日志，保留 ERROR/WARNING 级别的完整行。不要丢失文件名、行号、错误消息。",

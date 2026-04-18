@@ -47,6 +47,7 @@ from hypo_agent.core.event_queue import EventQueue
 from hypo_agent.core.heartbeat import HeartbeatService
 from hypo_agent.core.image_renderer import ImageRenderer
 from hypo_agent.core.model_router import ModelRouter
+from hypo_agent.core.antigravity_compat import log_antigravity_tool_name_audit
 from hypo_agent.core.narration_observer import NarrationObserver
 from hypo_agent.core.output_compressor import OutputCompressor
 from hypo_agent.core.pipeline import ChatPipeline
@@ -784,6 +785,13 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
             hard_threshold_chars=64000,
             structured_passthrough_chars=20000,
         )
+    if deps.skill_manager is not None:
+        tool_names = [
+            str(tool.get("function", {}).get("name") or "").strip()
+            for tool in deps.skill_manager.get_tools_schema()
+            if str(tool.get("function", {}).get("name") or "").strip()
+        ]
+        log_antigravity_tool_name_audit(tool_names)
     return ChatPipeline(
         router=router,
         chat_model=chat_model,

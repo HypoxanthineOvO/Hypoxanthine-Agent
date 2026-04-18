@@ -182,6 +182,24 @@ class StructuredStore:
                 )
                 await db.execute(
                     """
+                    CREATE TABLE IF NOT EXISTS alerts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        category TEXT NOT NULL,
+                        signature TEXT NOT NULL,
+                        message TEXT NOT NULL,
+                        metadata_json TEXT,
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_alerts_signature_created
+                    ON alerts(signature, created_at)
+                    """
+                )
+                await db.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS tool_invocations (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         session_id TEXT NOT NULL,
@@ -507,6 +525,31 @@ class StructuredStore:
         if row is None:
             return None
         return row[0]
+
+    async def record_alert(
+        self,
+        *,
+        category: str,
+        signature: str,
+        message: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO alerts(category, signature, message, metadata_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    str(category or "").strip(),
+                    str(signature or "").strip(),
+                    str(message or "").strip(),
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                    _now_iso(),
+                ),
+            )
+            await db.commit()
 
     def list_preferences_sync(self, limit: int = 20) -> list[tuple[str, str]]:
         if limit <= 0:

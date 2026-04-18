@@ -87,7 +87,7 @@ def test_very_long_truncated() -> None:
     asyncio.run(_run())
 
 
-def test_strategy_selection_web_search() -> None:
+def test_strategy_selection_search_web() -> None:
     router = StubRouter(lambda **_: "compressed")
     compressor = OutputCompressor(router=router)
     long_output = "search result\n" * 3000
@@ -96,7 +96,7 @@ def test_strategy_selection_web_search() -> None:
         await compressor.compress_if_needed(
             long_output,
             metadata={"session_id": "s1"},
-            tool_name="web_search",
+            tool_name="search_web",
         )
         prompt = str(router.calls[-1]["messages"][0]["content"])
         assert "保留每条搜索结果的标题、URL和关键摘要句" in prompt

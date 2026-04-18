@@ -9,7 +9,7 @@ tool_levels:
     - search_emails
     - exec_command
     - run_code
-    - web_search
+    - search_web
   medium:
     - write_file
     - create_file

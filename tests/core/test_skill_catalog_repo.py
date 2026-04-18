@@ -22,7 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
         ("agent-browser", "打开这个网页并点一下页面里的按钮", "exec_command"),
         ("github-ops", "帮我看看这个仓库有哪些 open PR", "exec_command"),
         ("log-inspector", "查看最近的错误日志", "read_file"),
-        ("agent-search", "搜索一下 Claude 4 最新消息", "web_search"),
+        ("agent-search", "搜索一下 Claude 4 最新消息", "search_web"),
         ("info-portal", "今天有什么 AI 新闻", "info_today"),
         ("notion", "帮我在 Notion 创建一个页面", "notion_create_entry"),
         ("coder", "提交一个代码任务给 Coder", "coder_submit_task"),

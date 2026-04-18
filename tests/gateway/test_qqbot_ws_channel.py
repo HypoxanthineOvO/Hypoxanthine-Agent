@@ -46,7 +46,7 @@ class ProgressQueuePipelineStub(QueuePipelineStub):
         await emit(
             {
                 "type": "tool_call_start",
-                "tool_name": "web_search",
+                "tool_name": "search_web",
                 "tool_call_id": "call-1",
                 "session_id": inbound.session_id,
             }
@@ -390,4 +390,3 @@ def test_qqbot_ws_client_suppresses_mechanical_progress_events(monkeypatch) -> N
     asyncio.run(client.run_once())
 
     assert pushed == []
-

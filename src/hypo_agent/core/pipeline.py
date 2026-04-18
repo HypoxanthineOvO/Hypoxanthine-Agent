@@ -4,6 +4,7 @@ import asyncio
 import base64
 from collections.abc import AsyncIterator
 from contextvars import ContextVar
+from datetime import datetime, timedelta
 import inspect
 import json
 from pathlib import Path
@@ -142,6 +143,11 @@ TOOL_STATUS_TEMPLATES: dict[str, dict[str, str]] = {
         "ok": "✅ 命令执行完成",
         "fail": "❌ 命令执行失败：{error}",
     },
+    "search_web": {
+        "start": "🔍 正在搜索...",
+        "ok": "🔍 搜索完成",
+        "fail": "❌ 搜索失败：{error}",
+    },
     "web_search": {
         "start": "🔍 正在搜索...",
         "ok": "🔍 搜索完成",
@@ -177,6 +183,7 @@ _CORE_TOOL_WHITELIST = {
     "update_persona_memory",
     "save_sop",
     "search_sop",
+    "search_web",
     "web_search",
     "web_read",
     "exec_command",
@@ -194,6 +201,7 @@ _CORE_TOOL_WHITELIST = {
 }
 
 _RETRYABLE_TOOLS = {
+    "search_web",
     "web_search",
     "read_file",
     "get_recent_logs",
@@ -203,6 +211,10 @@ _RETRYABLE_TOOLS = {
     "get_reminder_snapshot",
     "get_notion_todo_snapshot",
     "get_heartbeat_snapshot",
+}
+
+LEGACY_TOOL_NAME_REMAP = {
+    "web_search": "search_web",
 }
 
 
@@ -396,17 +408,95 @@ class ChatPipeline:
     def _resolve_event_emitter(self, override: Any | None = None) -> Any | None:
         return override or self.event_emitter
 
+    def _model_fallback_window_pref_key(self, provider: str) -> str:
+        return f"model_fallback_window.{provider}"
+
+    def _model_fallback_alert_pref_key(self, provider: str) -> str:
+        return f"model_fallback_alert_last.{provider}"
+
+    async def _record_model_fallback_observability(self, event: dict[str, Any]) -> None:
+        if self.structured_store is None:
+            return
+        provider = str(event.get("provider") or "").strip().lower()
+        if not provider:
+            return
+
+        now = utc_now()
+        window_key = self._model_fallback_window_pref_key(provider)
+        raw_window = await self.structured_store.get_preference(window_key)
+        entries: list[str] = []
+        if raw_window:
+            try:
+                parsed = json.loads(raw_window)
+            except json.JSONDecodeError:
+                parsed = []
+            if isinstance(parsed, list):
+                entries = [str(item).strip() for item in parsed if str(item).strip()]
+
+        threshold = now - timedelta(minutes=30)
+        retained_entries: list[str] = []
+        for item in entries:
+            try:
+                parsed_at = datetime.fromisoformat(item)
+            except ValueError:
+                continue
+            if parsed_at >= threshold:
+                retained_entries.append(item)
+        retained_entries.append(utc_isoformat(now))
+        await self.structured_store.set_preference(
+            window_key,
+            json.dumps(retained_entries, ensure_ascii=False),
+        )
+
+        if len(retained_entries) < 3:
+            return
+
+        alert_key = self._model_fallback_alert_pref_key(provider)
+        raw_last_alert = await self.structured_store.get_preference(alert_key)
+        if raw_last_alert:
+            try:
+                last_alert_at = datetime.fromisoformat(raw_last_alert)
+            except ValueError:
+                last_alert_at = None
+            else:
+                if now - last_alert_at < timedelta(hours=24):
+                    return
+
+        message = (
+            f"Provider '{provider}' triggered {len(retained_entries)} model fallbacks "
+            "within 30 minutes."
+        )
+        await self.structured_store.record_alert(
+            category="model_fallback",
+            signature=f"model_fallback:{provider}",
+            message=message,
+            metadata={
+                "provider": provider,
+                "count_30m": len(retained_entries),
+                "requested_model": str(event.get('requested_model') or ''),
+                "failed_model": str(event.get('failed_model') or ''),
+                "fallback_model": str(event.get('fallback_model') or ''),
+                "reason": str(event.get('reason') or ''),
+            },
+        )
+        await self.structured_store.set_preference(alert_key, utc_isoformat(now))
+
     async def _emit_progress_event(
         self,
         payload: dict[str, Any],
         *,
         event_emitter: Any | None = None,
     ) -> None:
+        event = dict(payload)
+        event.setdefault("timestamp", utc_isoformat(utc_now()))
+        if str(event.get("type") or "").strip() == "model_fallback":
+            try:
+                await self._record_model_fallback_observability(event)
+            except _PIPELINE_RECOVERABLE_ERRORS:
+                logger.warning("pipeline.model_fallback_observability_failed", exc_info=True)
         emitter = self._resolve_event_emitter(event_emitter)
         if emitter is None:
             return
-        event = dict(payload)
-        event.setdefault("timestamp", utc_isoformat(utc_now()))
         try:
             result = emitter(event)
             if inspect.isawaitable(result):
@@ -2143,7 +2233,59 @@ class ChatPipeline:
     def _extract_tool_name(self, tool_call: dict[str, Any]) -> str:
         function_payload = tool_call.get("function") or {}
         name = function_payload.get("name")
-        return str(name) if isinstance(name, str) else ""
+        if not isinstance(name, str):
+            return ""
+        return self._remap_legacy_tool_name(name)
+
+    def _remap_legacy_tool_name(self, tool_name: str) -> str:
+        normalized = str(tool_name or "").strip()
+        if not normalized:
+            return ""
+        return LEGACY_TOOL_NAME_REMAP.get(normalized, normalized)
+
+    def _remap_legacy_tool_names_in_messages(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        remapped: list[dict[str, Any]] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                remapped.append(message)
+                continue
+            tool_calls = message.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                remapped.append(message)
+                continue
+            updated_calls: list[Any] = []
+            changed = False
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    updated_calls.append(tool_call)
+                    continue
+                function_payload = tool_call.get("function")
+                if not isinstance(function_payload, dict):
+                    updated_calls.append(tool_call)
+                    continue
+                original_name = str(function_payload.get("name") or "").strip()
+                remapped_name = self._remap_legacy_tool_name(original_name)
+                if remapped_name == original_name or not remapped_name:
+                    updated_calls.append(tool_call)
+                    continue
+                updated_calls.append(
+                    {
+                        **tool_call,
+                        "function": {
+                            **function_payload,
+                            "name": remapped_name,
+                        },
+                    }
+                )
+                changed = True
+            if changed:
+                remapped.append({**message, "tool_calls": updated_calls})
+            else:
+                remapped.append(message)
+        return remapped
 
     def _parse_tool_arguments(self, tool_call: dict[str, Any]) -> dict[str, Any]:
         function_payload = tool_call.get("function") or {}
@@ -2241,7 +2383,7 @@ class ChatPipeline:
                 limit=self.history_window,
             )
             selected_history, history_stats = self._select_history_messages(history)
-            llm_messages.extend(selected_history)
+            llm_messages.extend(self._remap_legacy_tool_names_in_messages(selected_history))
             logger.info(
                 "pipeline.history_window",
                 session_id=inbound.session_id,

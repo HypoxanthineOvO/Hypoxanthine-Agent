@@ -137,6 +137,32 @@ def test_build_default_pipeline_exposes_all_builtin_tools_in_schema(
     ]
 
 
+def test_build_default_pipeline_runs_antigravity_tool_name_audit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    deps = app_module.AppDeps(
+        session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+        structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        semantic_memory=StubSemanticMemory(),
+        skill_manager=SkillManager(),
+    )
+    captured_tool_names: list[str] = []
+
+    monkeypatch.setattr(app_module, "get_memory_dir", lambda: tmp_path / "memory")
+    monkeypatch.setattr(app_module, "load_runtime_model_config", _runtime_config)
+    monkeypatch.setattr(
+        app_module,
+        "log_antigravity_tool_name_audit",
+        lambda tool_names: captured_tool_names.extend(tool_names),
+    )
+
+    app_module._build_default_pipeline(deps)
+
+    assert "search_web" in captured_tool_names
+    assert "web_search" not in captured_tool_names
+
+
 def test_build_default_pipeline_enables_output_compressor_by_default(
     tmp_path: Path,
     monkeypatch,

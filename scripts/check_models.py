@@ -12,6 +12,7 @@ from functools import partial
 from pathlib import Path
 from time import perf_counter
 from typing import Annotated, Any
+import sys
 
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "true")
 os.environ.setdefault("LITELLM_LOG", "ERROR")
@@ -24,6 +25,18 @@ from litellm import acompletion, aembedding
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+SRC_DIR = ROOT_DIR / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from hypo_agent.gateway.app import create_app
+from hypo_agent.models import Message
+from hypo_agent.core.antigravity_compat import (
+    is_antigravity_provider,
+    transform_antigravity_tools,
+)
 
 
 console = Console(width=120)
@@ -50,12 +63,50 @@ PROBE_TOOLS: list[dict[str, Any]] = [
     }
 ]
 
+FULL_TOOL_PROMPT = "Please call the list_directory tool with path '.' and depth 1."
+
 
 def _build_request_kwargs(*, litellm_model: str | None) -> dict[str, Any]:
     model_name = str(litellm_model or "").strip().lower()
     if model_name.startswith("ollama_chat/"):
         return {"think": False}
     return {}
+
+
+def _load_auth_token() -> str:
+    security_path = ROOT_DIR / "config" / "security.yaml"
+    payload = yaml.safe_load(security_path.read_text(encoding="utf-8")) or {}
+    token = payload.get("auth_token")
+    if isinstance(token, str) and token.strip():
+        return token.strip()
+    nested = payload.get("security") or {}
+    nested_token = nested.get("auth_token")
+    if isinstance(nested_token, str) and nested_token.strip():
+        return nested_token.strip()
+    raise ValueError("auth_token not found in config/security.yaml")
+
+
+async def _load_full_probe_tools() -> list[dict[str, Any]]:
+    app = create_app(auth_token=_load_auth_token())
+    pipeline = app.state.pipeline
+    inbound = Message(
+        text="请列出当前目录。",
+        sender="user",
+        session_id="check-models-probe",
+        channel="webui",
+    )
+    candidate_skills = pipeline._match_skill_candidates(inbound)
+    preloaded_skill_names = (
+        pipeline._match_preloaded_skill_names(inbound, candidate_skills=candidate_skills)
+        if pipeline._supports_progressive_tool_disclosure()
+        else set()
+    )
+    tools, _ = pipeline._build_exposed_tools(
+        inbound=inbound,
+        session_id=inbound.session_id,
+        preloaded_skill_names=preloaded_skill_names,
+    )
+    return tools
 
 
 @dataclass(slots=True)
@@ -305,8 +356,13 @@ async def _probe_chat_model(
     *,
     timeout: float,
     tool_call_enabled: bool,
+    probe_tools: list[dict[str, Any]],
+    tool_prompt: str,
 ) -> ProbeResult:
     start = perf_counter()
+    effective_probe_tools = probe_tools
+    if tool_call_enabled and is_antigravity_provider(spec.provider):
+        effective_probe_tools = transform_antigravity_tools(probe_tools).tools
     try:
         with anyio.move_on_after(timeout) as scope:
             if tool_call_enabled:
@@ -314,8 +370,8 @@ async def _probe_chat_model(
                     model=spec.litellm_model,
                     api_base=spec.api_base,
                     api_key=spec.api_key,
-                    messages=[{"role": "user", "content": TOOL_PROMPT}],
-                    tools=PROBE_TOOLS,
+                    messages=[{"role": "user", "content": tool_prompt}],
+                    tools=effective_probe_tools,
                     tool_choice="auto",
                     max_tokens=64,
                     **_build_request_kwargs(litellm_model=spec.litellm_model),
@@ -431,6 +487,8 @@ async def _probe_model(
     *,
     timeout: float,
     tool_call_enabled: bool,
+    probe_tools: list[dict[str, Any]],
+    tool_prompt: str,
 ) -> ProbeResult:
     if spec.skip_reason:
         return ProbeResult(
@@ -459,6 +517,8 @@ async def _probe_model(
             spec,
             timeout=timeout,
             tool_call_enabled=tool_call_enabled,
+            probe_tools=probe_tools,
+            tool_prompt=tool_prompt,
         )
     if spec.route_type == "embedding":
         return await _probe_embedding_model(spec, timeout=timeout)
@@ -480,6 +540,8 @@ async def _probe_models(
     timeout: float,
     tool_call_enabled: bool,
     concurrency: int,
+    probe_tools: list[dict[str, Any]],
+    tool_prompt: str,
 ) -> list[ProbeResult]:
     semaphore = anyio.Semaphore(concurrency)
     results: list[ProbeResult | None] = [None] * len(specs)
@@ -490,6 +552,8 @@ async def _probe_models(
                 spec,
                 timeout=timeout,
                 tool_call_enabled=tool_call_enabled,
+                probe_tools=probe_tools,
+                tool_prompt=tool_prompt,
             )
 
     async with anyio.create_task_group() as task_group:
@@ -556,15 +620,20 @@ async def _run_checks(
     timeout: float,
     tool_call_enabled: bool,
     concurrency: int,
+    minimal: bool,
 ) -> int:
     specs = _load_model_specs(models_path, secrets_path)
     selected_specs = _select_models(specs, models)
+    probe_tools = list(PROBE_TOOLS) if minimal else await _load_full_probe_tools()
+    tool_prompt = TOOL_PROMPT if minimal else FULL_TOOL_PROMPT
     started = perf_counter()
     results = await _probe_models(
         selected_specs,
         timeout=timeout,
         tool_call_enabled=tool_call_enabled,
         concurrency=concurrency,
+        probe_tools=probe_tools,
+        tool_prompt=tool_prompt,
     )
     elapsed_seconds = perf_counter() - started
     _render_results(results, elapsed_seconds=elapsed_seconds)
@@ -597,6 +666,10 @@ def main(
         int,
         typer.Option(help="Maximum number of concurrent model probes.", min=1),
     ] = 4,
+    minimal: Annotated[
+        bool,
+        typer.Option("--minimal", help="Use a single minimal tool instead of the full ToolRegistry tool set."),
+    ] = False,
 ) -> None:
     try:
         exit_code = anyio.run(
@@ -608,6 +681,7 @@ def main(
                 timeout=timeout,
                 tool_call_enabled=tool_call,
                 concurrency=concurrency,
+                minimal=minimal,
             ),
             backend="asyncio",
         )

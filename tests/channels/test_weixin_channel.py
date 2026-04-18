@@ -353,7 +353,7 @@ def test_weixin_emit_callback_suppresses_mechanical_progress_for_heavy_tool() ->
 
         emit = channel._make_emit_callback("alice@im.wechat", context_token="ctx-1")
         await emit({"type": "pipeline_stage", "stage": "preprocessing", "detail": "正在分析你的消息..."})
-        await emit({"type": "tool_call_start", "tool_name": "web_search", "tool_call_id": "call-1"})
+        await emit({"type": "tool_call_start", "tool_name": "search_web", "tool_call_id": "call-1"})
 
         assert client.send_message_calls == []
 

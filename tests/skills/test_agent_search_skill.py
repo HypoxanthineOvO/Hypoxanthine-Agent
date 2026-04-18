@@ -58,7 +58,7 @@ class FakeTavilyClient:
         }
 
 
-def test_agent_search_skill_web_search_returns_normalized_results(tmp_path: Path) -> None:
+def test_agent_search_skill_search_web_returns_normalized_results(tmp_path: Path) -> None:
     secrets_path = tmp_path / "secrets.yaml"
     _write_secrets(secrets_path)
     captured_clients: list[FakeTavilyClient] = []
@@ -75,7 +75,7 @@ def test_agent_search_skill_web_search_returns_normalized_results(tmp_path: Path
 
     output = asyncio.run(
         skill.execute(
-            "web_search",
+            "search_web",
             {"query": "Tavily Python SDK", "max_results": 3},
         )
     )
@@ -149,7 +149,7 @@ def test_agent_search_skill_returns_error_when_tavily_key_missing(tmp_path: Path
         tavily_client_factory=lambda api_key: FakeTavilyClient(api_key),
     )
 
-    output = asyncio.run(skill.execute("web_search", {"query": "latest AI news"}))
+    output = asyncio.run(skill.execute("search_web", {"query": "latest AI news"}))
 
     assert output.status == "error"
     assert "services.tavily.api_key" in output.error_info
@@ -170,7 +170,7 @@ def test_agent_search_skill_rejects_empty_query_without_sdk_call(tmp_path: Path)
         tavily_client_factory=factory,
     )
 
-    output = asyncio.run(skill.execute("web_search", {"query": "   "}))
+    output = asyncio.run(skill.execute("search_web", {"query": "   "}))
 
     assert output.status == "error"
     assert "query is required" in output.error_info

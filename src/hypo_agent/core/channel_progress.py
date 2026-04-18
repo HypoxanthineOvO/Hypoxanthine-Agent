@@ -46,6 +46,11 @@ _TOOL_STATUS_TEMPLATES: dict[str, dict[str, str]] = {
         "ok": "✅ 命令执行完成",
         "fail": "❌ 命令执行失败：{error}",
     },
+    "search_web": {
+        "start": "🔍 正在搜索...",
+        "ok": "🔍 搜索完成",
+        "fail": "❌ 搜索失败：{error}",
+    },
     "web_search": {
         "start": "🔍 正在搜索...",
         "ok": "🔍 搜索完成",
@@ -87,6 +92,9 @@ def summarize_channel_progress_event(
 
     if event_type == "model_fallback_exhausted":
         return "❌ 所有模型均不可用，请稍后再试", False
+
+    if event_type == "model_tool_transform":
+        return None, False
 
     tool_name = str(event.get("tool_name") or event.get("tool") or "").strip()
     templates = _TOOL_STATUS_TEMPLATES.get(tool_name) or _TOOL_STATUS_TEMPLATES["_default"]
