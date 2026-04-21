@@ -154,7 +154,7 @@ TOOL_STATUS_TEMPLATES: dict[str, dict[str, str]] = {
         "fail": "❌ 搜索失败：{error}",
     },
     "_default": {
-        "start": "⏳ 正在处理...",
+        "start": "",
         "ok": "✅ 处理完成",
         "fail": "❌ 处理失败：{error}",
     },
@@ -1849,7 +1849,7 @@ class ChatPipeline:
                             "tool_calls": tool_calls,
                         }
                     )
-                    for tool_call in tool_calls:
+                    for tool_index, tool_call in enumerate(tool_calls, start=1):
                         tool_name = self._extract_tool_name(tool_call)
                         tool_call_id = str(tool_call.get("id") or "")
                         active_skill = self._select_active_skill_manifest(candidate_skills, tool_name)
@@ -1862,10 +1862,19 @@ class ChatPipeline:
                             inbound=inbound,
                             tool_name=tool_name,
                             arguments=arguments,
+                            iteration_number=round_num,
+                            total_tools_called=react_tool_calls_total - len(tool_calls) + tool_index,
                         )
                         if narration_task is not None:
                             narration_tasks.add(narration_task)
                             narration_task.add_done_callback(narration_tasks.discard)
+                        self._record_narration_trace_event(
+                            session_id=inbound.session_id,
+                            event_type="tool_call_start",
+                            tool_name=tool_name,
+                            summary="开始处理",
+                            elapsed_ms=0,
+                        )
                         await self._send_tool_status(
                             tool_name=tool_name,
                             status="start",
@@ -1920,6 +1929,13 @@ class ChatPipeline:
                                 },
                                 event_emitter=event_emitter,
                             )
+                            self._record_narration_trace_event(
+                                session_id=inbound.session_id,
+                                event_type="tool_call_error",
+                                tool_name=tool_name,
+                                summary=str(exc),
+                                elapsed_ms=int(max(0.0, perf_counter() - started_at) * 1000),
+                            )
                             raise
                         finally:
                             self._cancel_fast_qq_narration(
@@ -1961,9 +1977,24 @@ class ChatPipeline:
                                 },
                                 event_emitter=event_emitter,
                             )
+                            self._record_narration_trace_event(
+                                session_id=inbound.session_id,
+                                event_type="tool_call_error",
+                                tool_name=tool_name,
+                                summary=str(output.error_info or output.status),
+                                elapsed_ms=duration_ms,
+                            )
                         serialized_output = json.dumps(output.model_dump(mode="json"), ensure_ascii=False)
                         tool_summary = self._tool_fallback_text(output)
                         last_tool_fallback_text = tool_summary or last_tool_fallback_text
+                        if output.status == "success":
+                            self._record_narration_trace_event(
+                                session_id=inbound.session_id,
+                                event_type="tool_call_result",
+                                tool_name=tool_name,
+                                summary=tool_summary or output.status,
+                                elapsed_ms=duration_ms,
+                            )
                         tool_content = self._tool_content_for_react(
                             output,
                             serialized_output=serialized_output,
@@ -3070,18 +3101,54 @@ class ChatPipeline:
             return True
         if "绑定" in normalized:
             return False
-        lowered = normalized.casefold()
-        has_plan_todo = "计划通" in normalized
-        has_notion = "notion" in lowered
-        has_todo_object = any(token in normalized for token in ("待办", "事项", "任务"))
-        has_query_action = any(
-            token in normalized
-            for token in ("看", "查看", "查", "列", "同步", "汇总", "总结", "刷新", "获取")
-        )
-        has_today = any(token in normalized for token in ("今日", "今天"))
-        if has_plan_todo and (has_todo_object or has_query_action or has_today):
+        if self._has_notion_todo_mutation_intent(normalized):
+            return False
+        if normalized in {"/计划", "/计划通"}:
             return True
-        return has_notion and has_todo_object and (has_query_action or has_today)
+        if normalized.casefold() == "/todo":
+            return True
+        return self._compact_notion_todo_shortcut_text(normalized) in {
+            "今日计划",
+            "列出计划",
+            "查看计划通",
+            "查看一下计划通",
+            "查看今天计划",
+            "查看一下今天计划",
+            "查看今日计划",
+            "查看一下今日计划",
+            "查看今天的计划通待办事项",
+            "查看一下今天的计划通待办事项",
+            "查看今天的计划通事项",
+            "查看一下今天的计划通事项",
+            "今日计划通事项",
+        }
+
+    def _has_notion_todo_mutation_intent(self, text: str) -> bool:
+        normalized = self._compact_notion_todo_shortcut_text(text)
+        return any(
+            token in normalized
+            for token in (
+                "改",
+                "改成",
+                "改到",
+                "删除",
+                "删掉",
+                "删",
+                "推迟",
+                "新增",
+                "取消",
+                "修改",
+                "调整",
+                "挪到",
+                "换到",
+                "添加",
+                "加一条",
+                "创建",
+            )
+        )
+
+    def _compact_notion_todo_shortcut_text(self, text: str) -> str:
+        return re.sub(r"[\s，。！？、,.!?:：;；~～]+", "", str(text or "").strip())
 
     def _is_notion_todo_followup_request(self, inbound: Message, normalized_text: str) -> bool:
         compact = re.sub(r"[\s，。！？、,.!?:：;；~～]+", "", normalized_text)
@@ -3463,6 +3530,8 @@ class ChatPipeline:
         inbound: Message,
         tool_name: str,
         arguments: dict[str, Any],
+        iteration_number: int,
+        total_tools_called: int,
     ) -> asyncio.Task[None] | None:
         if self._broadcast_suppressed():
             return None
@@ -3482,6 +3551,8 @@ class ChatPipeline:
                     tool_args=arguments,
                     user_message_context=user_message,
                     session_id=inbound.session_id,
+                    iteration_number=iteration_number,
+                    total_tools_called=total_tools_called,
                 )
             except asyncio.CancelledError:
                 raise
@@ -3537,6 +3608,35 @@ class ChatPipeline:
                     )
 
         return asyncio.create_task(_runner())
+
+    def _record_narration_trace_event(
+        self,
+        *,
+        session_id: str | None,
+        event_type: str,
+        tool_name: str,
+        summary: str,
+        elapsed_ms: int,
+    ) -> None:
+        observer = self.narration_observer
+        recorder = getattr(observer, "record_trace_event", None)
+        if not callable(recorder):
+            return
+        try:
+            recorder(
+                session_id=session_id,
+                event_type=event_type,
+                tool_name=tool_name,
+                summary=summary,
+                elapsed_ms=elapsed_ms,
+            )
+        except _PIPELINE_RECOVERABLE_ERRORS:
+            logger.exception(
+                "narration.trace_record.failed",
+                session_id=session_id,
+                tool_name=tool_name,
+                event_type=event_type,
+            )
 
     def _cancel_fast_qq_narration(
         self,

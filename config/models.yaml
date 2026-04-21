@@ -1,13 +1,13 @@
-default_model: GPT
+default_model: GenesiQWen35BA3B
 
 task_routing:
-  chat: GeminiPro3_1
-  reasoning: GeminiPro3_1
-  heartbeat: GeminiFlash
-  lightweight: GeminiFlash
-  compression: GeminiFlash
+  chat: GenesiQWen35BA3B
+  reasoning: GenesiQWen35BA3B
+  heartbeat: GenesiQWen35BA3B
+  lightweight: EdenQwen
+  compression: GenesiQWen35BA3B
   embedding: VolcanoEmbedding
-  vision: GeminiPro3_1
+  vision: GPT
 
 models:
   GPT:
@@ -19,6 +19,12 @@ models:
     reasoning_config:
       chat: low
       reasoning: high
+  GPTMini:
+    litellm_model: "openai/gpt-5.4-mini"
+    provider: "VSPLab"
+    supports_tool_calling: true
+    description: "OpenAI ChatGPT"
+    fallback: GeminiFlash
   GeminiPro3_1:
     litellm_model: "anthropic/gemini-3.1-pro-high"
     provider: "VSPLab_Gemini"
@@ -55,6 +61,16 @@ models:
     supports_tool_calling: true
     description: "Genesis local Qwen3.5 122B"
     fallback: CodingPlanAuto
+    reasoning_config:
+      chat: low
+      reasoning: high
+
+  GenesiQWen35BA3B:
+    litellm_model: "openai/qwen3.6-35b"
+    provider: "GenesisLocal"
+    supports_tool_calling: true
+    description: "Local Qwen 3.6 35B-A3B via VLLM"
+    fallback: null
     reasoning_config:
       chat: low
       reasoning: high

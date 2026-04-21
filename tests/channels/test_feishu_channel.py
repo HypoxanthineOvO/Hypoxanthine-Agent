@@ -213,7 +213,7 @@ def test_feishu_channel_skips_ephemeral_tool_status_pushes() -> None:
 
         result = await channel.push_proactive(
             Message(
-                text="⏳ 正在处理...",
+                text="临时状态消息",
                 sender="assistant",
                 session_id="main",
                 channel="system",

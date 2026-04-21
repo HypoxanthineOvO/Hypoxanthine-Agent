@@ -12,6 +12,7 @@ from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import httpx
 import structlog
 import yaml
 
@@ -48,7 +49,7 @@ from hypo_agent.core.heartbeat import HeartbeatService
 from hypo_agent.core.image_renderer import ImageRenderer
 from hypo_agent.core.model_router import ModelRouter
 from hypo_agent.core.antigravity_compat import log_antigravity_tool_name_audit
-from hypo_agent.core.narration_observer import NarrationObserver
+from hypo_agent.core.narration_observer import NarrationObserver, is_local_vllm_model, probe_local_vllm_model
 from hypo_agent.core.output_compressor import OutputCompressor
 from hypo_agent.core.pipeline import ChatPipeline
 from hypo_agent.core.persona import PersonaManager
@@ -116,6 +117,37 @@ from hypo_agent.skills.subscription.manager import SubscriptionManager
 logger = structlog.get_logger("hypo_agent.gateway.app")
 TEST_MODE_BANNER = "⚠️  HYPO_TEST_MODE enabled — data isolated to test/sandbox/"
 FEISHU_CHAT_BINDING_KEY_PREFIX = "feishu.last_chat_id."
+
+
+def check_narration_local_model(
+    observer: NarrationObserver,
+    router: Any,
+    *,
+    transport: httpx.BaseTransport | None = None,
+) -> None:
+    resolved_model = observer._resolve_model_name()
+    runtime_config = getattr(router, "config", None)
+    runtime_models = getattr(runtime_config, "models", {}) if runtime_config is not None else {}
+    model_config = runtime_models.get(resolved_model)
+    if model_config is None:
+        return
+
+    provider = str(getattr(model_config, "provider", "") or "")
+    api_base = str(getattr(model_config, "api_base", "") or "")
+    api_key = str(getattr(model_config, "api_key", "") or "")
+    if not is_local_vllm_model(provider=provider, api_base=api_base):
+        return
+
+    ready = probe_local_vllm_model(api_base=api_base, api_key=api_key, transport=transport)
+    observer.set_llm_ready(ready)
+    if ready:
+        logger.info(f"Narration local model ready: {resolved_model}", model_name=resolved_model, api_base=api_base)
+        return
+    logger.warning(
+        "Narration local model unavailable, LLM narration will be silent",
+        model_name=resolved_model,
+        api_base=api_base,
+    )
 
 
 def _health_payload(app: FastAPI) -> dict[str, Any]:
@@ -1463,6 +1495,7 @@ def create_app(
                 logger.exception("narration.config.load_failed", path=str(config_path))
             else:
                 if candidate.enabled:
+                    check_narration_local_model(candidate, router)
                     observer = candidate
         app.state.narration_observer = observer
         setattr(app.state.pipeline, "narration_observer", observer)

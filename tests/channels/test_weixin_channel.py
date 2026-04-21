@@ -358,3 +358,23 @@ def test_weixin_emit_callback_suppresses_mechanical_progress_for_heavy_tool() ->
         assert client.send_message_calls == []
 
     asyncio.run(_run())
+
+
+def test_weixin_emit_callback_suppresses_mechanical_progress_for_unknown_tool_when_narration_enabled() -> None:
+    async def _run() -> None:
+        queue = QueueStub()
+        client = FakeClient()
+        channel = WeixinChannel(
+            config={"token_path": "memory/weixin_auth.json", "allowed_users": []},
+            message_queue=queue,
+            build_message=Message,
+            client_factory=lambda: client,
+        )
+        channel.client = client
+
+        emit = channel._make_emit_callback("alice@im.wechat", context_token="ctx-1")
+        await emit({"type": "tool_call_start", "tool_name": "mystery_tool", "tool_call_id": "call-1"})
+
+        assert client.send_message_calls == []
+
+    asyncio.run(_run())

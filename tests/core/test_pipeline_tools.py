@@ -4,6 +4,7 @@ import asyncio
 import json
 
 import hypo_agent.core.pipeline as pipeline_module
+import pytest
 from hypo_agent.core.pipeline import ChatPipeline
 from hypo_agent.core.skill_manager import SkillManager
 from hypo_agent.models import CircuitBreakerConfig, Message, SkillOutput
@@ -2147,3 +2148,316 @@ def test_pipeline_stream_shortcuts_notion_todo_followup_after_binding_without_ll
     assert events[0]["text"] == "今日到期未完成：\n- 提交周报"
     assert skill_manager.calls == [("get_notion_todo_snapshot", {}, "s1", "direct")]
     assert memory.appended[-1].text == "今日到期未完成：\n- 提交周报"
+
+
+class ReminderRoutingSkillManager:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict, str | None, str | None]] = []
+
+    def get_tools_schema(self) -> list[dict]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_notion_todo_snapshot",
+                    "parameters": {"type": "object"},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "update_reminder",
+                    "parameters": {"type": "object"},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "delete_reminder",
+                    "parameters": {"type": "object"},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_reminder",
+                    "parameters": {"type": "object"},
+                },
+            },
+        ]
+
+    async def invoke(
+        self,
+        tool_name: str,
+        params: dict,
+        *,
+        session_id: str | None = None,
+        skill_name: str | None = None,
+    ) -> SkillOutput:
+        self.calls.append((tool_name, dict(params), session_id, skill_name))
+        if tool_name == "get_notion_todo_snapshot":
+            return SkillOutput(
+                status="success",
+                result={
+                    "available": True,
+                    "human_summary": "今日到期未完成：\n- 提交周报",
+                },
+            )
+        return SkillOutput(
+            status="success",
+            result={"summary": f"{tool_name} ok"},
+        )
+
+
+class ReminderRoutingRouter:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+        user_message = next(
+            str(message.get("content") or "")
+            for message in reversed(messages)
+            if message.get("role") == "user"
+        )
+        tool_names = [tool["function"]["name"] for tool in tools or []]
+        if len(self.calls) == 0:
+            if user_message == "把普拉提改到下午四点":
+                decision = {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_update",
+                            "type": "function",
+                            "function": {
+                                "name": "update_reminder",
+                                "arguments": json.dumps(
+                                    {
+                                        "title": "普拉提",
+                                        "schedule_value": "2026-04-20T16:00:00+08:00",
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            },
+                        }
+                    ],
+                }
+            elif user_message == "删掉今天的抗焦虑药":
+                decision = {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_delete",
+                            "type": "function",
+                            "function": {
+                                "name": "delete_reminder",
+                                "arguments": json.dumps(
+                                    {"title": "抗焦虑药"},
+                                    ensure_ascii=False,
+                                ),
+                            },
+                        }
+                    ],
+                }
+            elif user_message == "在计划通里把我今天普拉提的时间改成下午四点":
+                decision = {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_update",
+                            "type": "function",
+                            "function": {
+                                "name": "update_reminder",
+                                "arguments": json.dumps(
+                                    {
+                                        "title": "普拉提",
+                                        "schedule_value": "2026-04-20T16:00:00+08:00",
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            },
+                        }
+                    ],
+                }
+            elif user_message == "在计划通里加一条晚上散步":
+                decision = {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_create",
+                            "type": "function",
+                            "function": {
+                                "name": "create_reminder",
+                                "arguments": json.dumps(
+                                    {
+                                        "title": "晚上散步",
+                                        "schedule_type": "daily",
+                                        "schedule_value": "20:00",
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            },
+                        }
+                    ],
+                }
+            else:
+                decision = {"text": "done", "tool_calls": []}
+        else:
+            decision = {"text": "done", "tool_calls": []}
+
+        self.calls.append(
+            {
+                "model_name": model_name,
+                "session_id": session_id,
+                "user_message": user_message,
+                "tool_names": tool_names,
+                "tool_calls": decision.get("tool_calls", []),
+            }
+        )
+        return decision
+
+    async def stream(self, model_name, messages, *, session_id=None, tools=None):
+        del model_name, messages, session_id, tools
+        raise AssertionError("stream should not be called")
+        yield ""  # pragma: no cover
+
+
+@pytest.mark.parametrize("inbound_text", ["今日计划", "/计划"])
+def test_pipeline_stream_shortcuts_explicit_plan_queries_without_llm(inbound_text: str) -> None:
+    memory = StubSessionMemory()
+    skill_manager = ReminderRoutingSkillManager()
+
+    class StubRouter:
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            raise AssertionError("LLM should not be called for explicit plan snapshot queries")
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            del model_name, messages, session_id, tools
+            raise AssertionError("stream should not be called for explicit plan snapshot queries")
+            yield ""  # pragma: no cover
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skill_manager,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text=inbound_text, sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+
+    assert [event["type"] for event in events] == ["assistant_chunk", "assistant_done"]
+    assert events[0]["text"] == "今日到期未完成：\n- 提交周报"
+    assert skill_manager.calls == [("get_notion_todo_snapshot", {}, "s1", "direct")]
+
+
+@pytest.mark.parametrize(
+    ("inbound_text", "expected_tool", "expected_params"),
+    [
+        (
+            "把普拉提改到下午四点",
+            "update_reminder",
+            {"title": "普拉提", "schedule_value": "2026-04-20T16:00:00+08:00"},
+        ),
+        (
+            "删掉今天的抗焦虑药",
+            "delete_reminder",
+            {"title": "抗焦虑药"},
+        ),
+        (
+            "在计划通里加一条晚上散步",
+            "create_reminder",
+            {
+                "title": "晚上散步",
+                "schedule_type": "daily",
+                "schedule_value": "20:00",
+            },
+        ),
+    ],
+)
+def test_pipeline_stream_routes_plan_mutations_through_llm_tools(
+    inbound_text: str,
+    expected_tool: str,
+    expected_params: dict[str, str],
+) -> None:
+    memory = StubSessionMemory()
+    skill_manager = ReminderRoutingSkillManager()
+    router = ReminderRoutingRouter()
+    pipeline = ChatPipeline(
+        router=router,
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skill_manager,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text=inbound_text, sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+
+    assert events[-1]["type"] == "assistant_done"
+    assert len(router.calls) >= 2
+    assert router.calls[0]["user_message"] == inbound_text
+    assert router.calls[0]["tool_calls"] == [
+        {
+            "id": f"call_{expected_tool.split('_')[0]}",
+            "type": "function",
+            "function": {
+                "name": expected_tool,
+                "arguments": json.dumps(expected_params, ensure_ascii=False),
+            },
+        }
+    ]
+    assert skill_manager.calls[0][0] == expected_tool
+    assert skill_manager.calls[0][1] == expected_params
+
+
+def test_pipeline_stream_routes_plan_keyword_mutation_through_llm_tools() -> None:
+    memory = StubSessionMemory()
+    skill_manager = ReminderRoutingSkillManager()
+    router = ReminderRoutingRouter()
+    pipeline = ChatPipeline(
+        router=router,
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skill_manager,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(
+            text="在计划通里把我今天普拉提的时间改成下午四点",
+            sender="user",
+            session_id="s1",
+        )
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+
+    assert events[-1]["type"] == "assistant_done"
+    assert len(router.calls) >= 2
+    assert router.calls[0]["user_message"] == "在计划通里把我今天普拉提的时间改成下午四点"
+    assert router.calls[0]["tool_calls"] == [
+        {
+            "id": "call_update",
+            "type": "function",
+            "function": {
+                "name": "update_reminder",
+                "arguments": json.dumps(
+                    {
+                        "title": "普拉提",
+                        "schedule_value": "2026-04-20T16:00:00+08:00",
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        }
+    ]
+    assert skill_manager.calls[0][0] == "update_reminder"
+    assert skill_manager.calls[0][1] == {
+        "title": "普拉提",
+        "schedule_value": "2026-04-20T16:00:00+08:00",
+    }

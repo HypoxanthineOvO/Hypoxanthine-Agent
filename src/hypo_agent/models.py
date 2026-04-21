@@ -350,12 +350,23 @@ class NarrationToolLevels(BaseModel):
     medium: list[str] = Field(default_factory=list)
 
 
+class NarrationToolConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    template: str
+    fallback: str | None = None
+
+
 class NarrationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
-    model: str = "DeepseekV3_2"
+    model: str = "lightweight"
     tool_levels: NarrationToolLevels = Field(default_factory=NarrationToolLevels)
+    tool_narration: dict[str, NarrationToolConfig] = Field(default_factory=dict)
+    llm_timeout_ms: int = Field(default=500, ge=1)
+    llm_repeat_threshold: int = Field(default=3, ge=1)
+    dedup_max_consecutive: int = Field(default=2, ge=1)
     debounce_seconds: float = Field(default=2.0, ge=0.0)
     max_narration_length: int = Field(default=80, ge=1)
 

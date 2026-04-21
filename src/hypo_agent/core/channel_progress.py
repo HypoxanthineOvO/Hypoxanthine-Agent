@@ -7,6 +7,7 @@ from typing import Any
 import structlog
 
 from hypo_agent.core.config_loader import load_narration_config
+from hypo_agent.core.tool_narration import render_tool_narration
 
 logger = structlog.get_logger("hypo_agent.core.channel_progress")
 
@@ -57,7 +58,7 @@ _TOOL_STATUS_TEMPLATES: dict[str, dict[str, str]] = {
         "fail": "❌ 搜索失败：{error}",
     },
     "_default": {
-        "start": "⏳ 正在处理...",
+        "start": "",
         "ok": "✅ 处理完成",
         "fail": "❌ 处理失败：{error}",
     },
@@ -65,15 +66,13 @@ _TOOL_STATUS_TEMPLATES: dict[str, dict[str, str]] = {
 
 
 @lru_cache(maxsize=1)
-def _narration_enabled_tool_names() -> frozenset[str]:
+def _narration_config():
     try:
         config = load_narration_config(Path("config/narration.yaml"))
     except Exception:
         logger.warning("channel_progress.load_narration_config_failed", exc_info=True)
-        return frozenset()
-    if not config.enabled:
-        return frozenset()
-    return frozenset({*config.tool_levels.heavy, *config.tool_levels.medium})
+        return None
+    return config
 
 
 def summarize_channel_progress_event(
@@ -98,11 +97,19 @@ def summarize_channel_progress_event(
 
     tool_name = str(event.get("tool_name") or event.get("tool") or "").strip()
     templates = _TOOL_STATUS_TEMPLATES.get(tool_name) or _TOOL_STATUS_TEMPLATES["_default"]
-    narration_tools = _narration_enabled_tool_names()
+    narration_config = _narration_config()
 
     if event_type == "tool_call_start":
-        if tool_name in narration_tools:
+        if narration_config is not None and narration_config.enabled:
             return None, False
+        if narration_config is not None:
+            rendered = render_tool_narration(
+                narration_config,
+                tool_name,
+                event.get("arguments", {}),
+            )
+            if rendered:
+                return rendered, False
         return templates["start"], False
 
     if event_type == "tool_call_result":

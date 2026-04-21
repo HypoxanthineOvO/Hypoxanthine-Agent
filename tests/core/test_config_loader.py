@@ -213,31 +213,25 @@ providers:
         load_runtime_model_config(models_yaml, secrets_yaml)
 
 
-def test_repo_models_config_routes_lightweight_and_heartbeat_to_non_coding_models() -> None:
+def test_repo_models_config_routes_local_main_and_local_utility_models() -> None:
     runtime = load_runtime_model_config(
         Path(__file__).resolve().parents[2] / "config" / "models.yaml",
         Path(__file__).resolve().parents[2] / "config" / "secrets.yaml",
     )
 
-    assert runtime.default_model == "GPT"
-    assert runtime.task_routing["chat"] == "GeminiPro3_1"
-    assert runtime.task_routing["reasoning"] == "GeminiPro3_1"
-    assert runtime.task_routing["vision"] == "GeminiPro3_1"
-    assert runtime.task_routing["lightweight"] == "GeminiFlash"
-    assert runtime.task_routing["compression"] == "GeminiFlash"
-    assert runtime.task_routing["heartbeat"] == "GeminiFlash"
+    assert runtime.default_model == "GenesiQWen35BA3B"
+    assert runtime.task_routing["chat"] == "GenesiQWen35BA3B"
+    assert runtime.task_routing["reasoning"] == "GenesiQWen35BA3B"
+    assert runtime.task_routing["lightweight"] == "EdenQwen"
+    assert runtime.task_routing["compression"] == "GenesiQWen35BA3B"
+    assert runtime.task_routing["heartbeat"] == "GenesiQWen35BA3B"
+    assert runtime.task_routing["vision"] == "GPT"
+    assert runtime.models["GenesiQWen35BA3B"].litellm_model == "openai/qwen3.6-35b"
+    assert runtime.models["GenesiQWen35BA3B"].provider == "GenesisLocal"
+    assert runtime.models["GenesiQWen35BA3B"].fallback is None
     assert runtime.models["EdenQwen"].litellm_model == "ollama_chat/qwen3.5:27b"
     assert runtime.models["EdenQwen"].provider == "Eden"
     assert runtime.models["EdenQwen"].fallback == "CodingPlanAuto"
-    assert "Gemini" not in runtime.models
-    assert runtime.models["GeminiPro3_1"].litellm_model == "anthropic/gemini-3.1-pro-high"
-    assert runtime.models["GeminiPro3_1"].provider == "VSPLab_Gemini"
-    assert runtime.models["GeminiPro3_1"].fallback == "GeminiPro3_0"
-    assert runtime.models["GeminiPro3_0"].litellm_model == "anthropic/gemini-3-pro-high"
-    assert runtime.models["GeminiPro3_0"].fallback == "GeminiLow"
-    assert runtime.models["GeminiLow"].litellm_model == "anthropic/gemini-3.1-pro-low"
-    assert runtime.models["GeminiLow"].fallback == "Claude"
-    assert runtime.models["GeminiFlash"].litellm_model == "anthropic/gemini-3-flash"
     assert runtime.models["GeminiFlash"].fallback == "EdenQwen"
     assert runtime.models["Claude"].litellm_model == "anthropic/claude-opus-4-5-thinking"
     assert runtime.models["Claude"].provider == "VSPLab_Claude"
@@ -601,13 +595,20 @@ def test_load_narration_config_accepts_tool_levels(tmp_path: Path) -> None:
     narration_yaml.write_text(
         """
 enabled: true
-model: DeepseekV3_2
+model: GenesiQWen35BA3B
 tool_levels:
   heavy:
     - scan_emails
     - exec_command
   medium:
     - write_file
+tool_narration:
+  update_reminder:
+    template: "⏰ 正在更新提醒「{title}」..."
+    fallback: "⏰ 正在更新提醒..."
+llm_timeout_ms: 800
+llm_repeat_threshold: 3
+dedup_max_consecutive: 2
 debounce_seconds: 2
 max_narration_length: 80
 """.strip(),
@@ -617,8 +618,13 @@ max_narration_length: 80
     config = load_narration_config(narration_yaml)
 
     assert config.enabled is True
-    assert config.model == "DeepseekV3_2"
+    assert config.model == "GenesiQWen35BA3B"
     assert config.tool_levels.heavy == ["scan_emails", "exec_command"]
     assert config.tool_levels.medium == ["write_file"]
+    assert config.tool_narration["update_reminder"].template == "⏰ 正在更新提醒「{title}」..."
+    assert config.tool_narration["update_reminder"].fallback == "⏰ 正在更新提醒..."
+    assert config.llm_timeout_ms == 800
+    assert config.llm_repeat_threshold == 3
+    assert config.dedup_max_consecutive == 2
     assert config.debounce_seconds == 2
     assert config.max_narration_length == 80

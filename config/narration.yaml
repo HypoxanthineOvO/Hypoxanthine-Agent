@@ -1,7 +1,10 @@
 enabled: true
 
 # 轻量模型别名；可改成具体模型名，或使用 lightweight 走 task_routing.lightweight
-model: lightweight
+model: GenesiQWen35BA3B
+llm_timeout_ms: 800
+llm_repeat_threshold: 3
+dedup_max_consecutive: 2
 
 tool_levels:
   heavy:
@@ -13,6 +16,64 @@ tool_levels:
   medium:
     - write_file
     - create_file
+
+tool_narration:
+  get_heartbeat_snapshot:
+    template: "📋 正在读取今日概况..."
+  get_notion_todo_snapshot:
+    template: "📋 正在读取计划通..."
+  search_emails:
+    template: "📧 正在搜索邮件「{query}」..."
+    fallback: "📧 正在搜索邮件..."
+  scan_emails:
+    template: "📧 正在扫描最新邮件..."
+  get_email_detail:
+    template: "📧 正在读取邮件详情..."
+  info_today:
+    template: "📰 正在整理今日信息..."
+  update_reminder:
+    template: "⏰ 正在更新提醒「{title}」..."
+    fallback: "⏰ 正在更新提醒..."
+  create_reminder:
+    template: "➕ 正在新建提醒「{title}」..."
+    fallback: "➕ 正在新建提醒..."
+  delete_reminder:
+    template: "🗑️ 正在删除提醒..."
+  list_reminders:
+    template: "📋 正在查看提醒..."
+  search_web:
+    template: "🔍 正在搜索“{query}”..."
+    fallback: "🔍 正在搜索..."
+  web_search:
+    template: "🔍 正在搜索“{query}”..."
+    fallback: "🔍 正在搜索..."
+  web_read:
+    template: "📖 正在阅读网页..."
+  read_file:
+    template: "📄 正在读取文件 {path}..."
+    fallback: "📄 正在读取文件..."
+  write_file:
+    template: "✏️ 正在写入文件..."
+  exec_command:
+    template: "⚙️ 正在执行命令..."
+  run_code:
+    template: "🔬 正在运行代码..."
+  list_directory:
+    template: "📁 正在查看目录 {path}..."
+    fallback: "📁 正在查看目录..."
+  save_sop:
+    template: "🧭 正在保存流程..."
+  search_sop:
+    template: "🧭 正在查找流程“{query}”..."
+    fallback: "🧭 正在查找流程..."
+  update_persona_memory:
+    template: "🧠 正在更新记忆..."
+  save_preference:
+    template: "💾 正在保存偏好..."
+  get_preference:
+    template: "🪪 正在读取偏好..."
+  snooze_reminder:
+    template: "💤 正在延后提醒..."
 
 debounce_seconds: 2
 max_narration_length: 80

@@ -96,6 +96,8 @@ class StubObserver:
         user_message_context: str,
         *,
         session_id: str | None = None,
+        iteration_number: int = 0,
+        total_tools_called: int = 0,
     ) -> str | None:
         self.calls.append(
             {
@@ -103,6 +105,8 @@ class StubObserver:
                 "tool_args": dict(tool_args),
                 "user_message_context": user_message_context,
                 "session_id": session_id,
+                "iteration_number": iteration_number,
+                "total_tools_called": total_tools_called,
             }
         )
         await asyncio.sleep(self.delay_seconds)
