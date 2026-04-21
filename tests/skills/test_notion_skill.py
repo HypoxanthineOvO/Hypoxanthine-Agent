@@ -268,6 +268,38 @@ def test_update_page_uses_database_schema_to_build_properties() -> None:
     asyncio.run(_run())
 
 
+def test_update_page_normalizes_schema_aliases_and_notion_style_date_payload() -> None:
+    async def _run() -> None:
+        client = FakeNotionClient()
+        client.page_payload["properties"] = {
+            "名称": {"id": "title", "type": "title", "title": []},
+            "日期": {"id": "date", "type": "date", "date": {"start": "2026-04-20"}},
+            "已完成": {"id": "done", "type": "checkbox", "checkbox": False},
+        }
+        client.database_payload["properties"] = {
+            "名称": {"id": "title", "type": "title"},
+            "日期": {"id": "date", "type": "date"},
+            "已完成": {"id": "done", "type": "checkbox"},
+        }
+        skill = NotionSkill(notion_client=client)
+
+        result = await skill.execute(
+            "notion_update_page",
+            {
+                "page_id": "11111111111111111111111111111111",
+                "properties": '{"Name":"新条目","Due Date":{"date":{"start":"2026-04-21T17:00:00+08:00"}},"Done":true}',
+            },
+        )
+
+        assert result.status == "success"
+        props = client.update_calls[0][1]
+        assert props["名称"]["title"][0]["text"]["content"] == "新条目"
+        assert props["日期"] == {"date": {"start": "2026-04-21T17:00:00+08:00"}}
+        assert props["已完成"] == {"checkbox": True}
+
+    asyncio.run(_run())
+
+
 def test_query_db_formats_table() -> None:
     async def _run() -> None:
         client = FakeNotionClient()
@@ -282,6 +314,39 @@ def test_query_db_formats_table() -> None:
         assert "📊 待办数据库（共 1 条）" in result.result
         assert "| 标题 | Status | Tags | 更新时间 |" in result.result
         assert "| 完成测试 | In Progress | QA, Notion | 2026-03-27 |" in result.result
+
+    asyncio.run(_run())
+
+
+def test_query_db_normalizes_filter_and_sort_property_aliases() -> None:
+    async def _run() -> None:
+        client = FakeNotionClient()
+        client.database_payload["properties"] = {
+            "名称": {"id": "title", "type": "title"},
+            "日期": {"id": "date", "type": "date"},
+            "已完成": {"id": "done", "type": "checkbox"},
+        }
+        skill = NotionSkill(notion_client=client)
+
+        result = await skill.execute(
+            "notion_query_db",
+            {
+                "database_id": "22222222222222222222222222222222",
+                "filter": '{"or":[{"property":"Name","title":{"contains":"找娄老师"}},{"property":"Due Date","date":{"on_or_before":"2026-04-22"}}]}',
+                "sorts": '[{"property":"Due Date","direction":"ascending"}]',
+                "limit": 20,
+            },
+        )
+
+        assert result.status == "success"
+        assert client.query_calls
+        assert client.query_calls[0]["filter"] == {
+            "or": [
+                {"property": "名称", "title": {"contains": "找娄老师"}},
+                {"property": "日期", "date": {"on_or_before": "2026-04-22"}},
+            ]
+        }
+        assert client.query_calls[0]["sorts"] == [{"property": "日期", "direction": "ascending"}]
 
     asyncio.run(_run())
 

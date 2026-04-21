@@ -972,9 +972,11 @@ class ModelRouter:
         provider_name = str(provider or "").strip().lower()
         base_url = str(api_base or "").strip().lower()
         return (
-            provider_name == "genesis"
+            provider_name in {"genesis", "genesislocal"}
             or ":8100" in base_url
+            or ":18081" in base_url
             or model_name == "openai/qwen3.5-122b"
+            or model_name == "openai/qwen3.6-35b"
         )
 
     def _build_fc_compatible_tool_call_id(

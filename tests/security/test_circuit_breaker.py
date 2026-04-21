@@ -39,6 +39,24 @@ def test_tool_level_breaker_fuses_tool_for_session() -> None:
 
     allowed_other, _ = breaker.can_execute("exec_command", "s2")
     assert allowed_other is True
+
+
+def test_tool_level_breaker_recovers_after_cooldown() -> None:
+    clock = Clock()
+    breaker = CircuitBreaker(_config(), now_fn=clock.now)
+
+    breaker.record_failure(tool_name="exec_command", session_id="s1")
+    breaker.record_failure(tool_name="exec_command", session_id="s1")
+    breaker.record_failure(tool_name="exec_command", session_id="s1")
+
+    allowed_before, reason_before = breaker.can_execute("exec_command", "s1")
+    assert allowed_before is False
+    assert "disabled" in reason_before.lower()
+
+    clock.advance(11)
+    allowed_after, reason_after = breaker.can_execute("exec_command", "s1")
+    assert allowed_after is True
+    assert reason_after == ""
 def test_session_level_breaker_blocks_all_tools_for_session() -> None:
     clock = Clock()
     breaker = CircuitBreaker(_config(), now_fn=clock.now)
@@ -106,3 +124,30 @@ def test_skill_level_breaker_reset_on_success() -> None:
 
     assert allowed is True
     assert reason == ""
+
+
+def test_skill_level_breaker_recovers_after_cooldown() -> None:
+    clock = Clock()
+    breaker = CircuitBreaker(
+        CircuitBreakerConfig(
+            tool_level_max_failures=5,
+            session_level_max_failures=5,
+            cooldown_seconds=10,
+            global_kill_switch=False,
+            skill_level_enabled=True,
+            skill_level_max_failures=2,
+        ),
+        now_fn=clock.now,
+    )
+
+    breaker.record_failure("exec_command", "s1", "git-workflow")
+    breaker.record_failure("exec_command", "s1", "git-workflow")
+
+    allowed_before, reason_before = breaker.can_execute("exec_command", "s1", "git-workflow")
+    assert allowed_before is False
+    assert "logical skill 'git-workflow'" in reason_before
+
+    clock.advance(11)
+    allowed_after, reason_after = breaker.can_execute("exec_command", "s1", "git-workflow")
+    assert allowed_after is True
+    assert reason_after == ""

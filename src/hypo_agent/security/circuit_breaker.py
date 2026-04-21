@@ -22,8 +22,10 @@ class CircuitBreaker:
 
         self._tool_failures: dict[tuple[str | None, str], int] = {}
         self._tool_fused: set[tuple[str | None, str]] = set()
+        self._tool_fused_until: dict[tuple[str | None, str], datetime] = {}
         self._skill_failures: dict[tuple[str | None, str, str], int] = {}
         self._skill_fused: set[tuple[str | None, str, str]] = set()
+        self._skill_fused_until: dict[tuple[str | None, str, str], datetime] = {}
         self._session_failures: dict[str, int] = {}
         self._session_blocked_until: dict[str, datetime] = {}
         self._global_kill_switch = bool(config.global_kill_switch)
@@ -53,25 +55,46 @@ class CircuitBreaker:
 
         tool_key = (session_id, tool_name)
         if tool_key in self._tool_fused:
-            return (
-                False,
-                (
-                    "Tool '{tool_name}' has been disabled after "
-                    f"{self.config.tool_level_max_failures} consecutive failures this session."
-                ).format(tool_name=tool_name),
-            )
+            fused_until = self._tool_fused_until.get(tool_key)
+            if fused_until is not None and now >= fused_until:
+                self._tool_fused.discard(tool_key)
+                self._tool_fused_until.pop(tool_key, None)
+                logger.info(
+                    "circuit_breaker.tool_recovered",
+                    tool_name=tool_name,
+                    session_id=session_id,
+                )
+            else:
+                return (
+                    False,
+                    (
+                        "Tool '{tool_name}' has been disabled after "
+                        f"{self.config.tool_level_max_failures} consecutive failures this session."
+                    ).format(tool_name=tool_name),
+                )
 
         normalized_skill = self._normalize_skill_name(skill_name)
         if self.config.skill_level_enabled and normalized_skill:
             skill_key = (session_id, tool_name, normalized_skill)
             if skill_key in self._skill_fused:
-                return (
-                    False,
-                    (
-                        "Tool '{tool_name}' for logical skill '{skill_name}' has been disabled after "
-                        f"{self._skill_failure_threshold()} consecutive failures this session."
-                    ).format(tool_name=tool_name, skill_name=normalized_skill),
-                )
+                fused_until = self._skill_fused_until.get(skill_key)
+                if fused_until is not None and now >= fused_until:
+                    self._skill_fused.discard(skill_key)
+                    self._skill_fused_until.pop(skill_key, None)
+                    logger.info(
+                        "circuit_breaker.skill_recovered",
+                        tool_name=tool_name,
+                        skill_name=normalized_skill,
+                        session_id=session_id,
+                    )
+                else:
+                    return (
+                        False,
+                        (
+                            "Tool '{tool_name}' for logical skill '{skill_name}' has been disabled after "
+                            f"{self._skill_failure_threshold()} consecutive failures this session."
+                        ).format(tool_name=tool_name, skill_name=normalized_skill),
+                    )
 
         return True, ""
 
@@ -83,9 +106,14 @@ class CircuitBreaker:
     ) -> None:
         tool_key = (session_id, tool_name)
         self._tool_failures[tool_key] = 0
+        self._tool_fused.discard(tool_key)
+        self._tool_fused_until.pop(tool_key, None)
         normalized_skill = self._normalize_skill_name(skill_name)
         if normalized_skill:
-            self._skill_failures[(session_id, tool_name, normalized_skill)] = 0
+            skill_key = (session_id, tool_name, normalized_skill)
+            self._skill_failures[skill_key] = 0
+            self._skill_fused.discard(skill_key)
+            self._skill_fused_until.pop(skill_key, None)
         if session_id:
             self._session_blocked_until.pop(session_id, None)
 
@@ -103,6 +131,7 @@ class CircuitBreaker:
         self._tool_failures[tool_key] = next_tool_count
         if next_tool_count >= self.config.tool_level_max_failures:
             self._tool_fused.add(tool_key)
+            self._tool_fused_until[tool_key] = cooldown_deadline
             self._tool_failures[tool_key] = 0
             logger.warning(
                 "circuit_breaker.tool_fused",
@@ -119,6 +148,7 @@ class CircuitBreaker:
             threshold = self._skill_failure_threshold()
             if next_skill_count >= threshold:
                 self._skill_fused.add(skill_key)
+                self._skill_fused_until[skill_key] = cooldown_deadline
                 self._skill_failures[skill_key] = 0
                 logger.warning(
                     "circuit_breaker.skill_fused",

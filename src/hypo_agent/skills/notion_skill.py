@@ -288,7 +288,15 @@ class NotionSkill(BaseSkill):
         limit: int = 20,
     ) -> str:
         database = await self._client.get_database(database_id)
-        rows = await self._client.query_database(database_id, filter=filter, sorts=sorts, page_size=limit)
+        schema = self._database_schema(database)
+        normalized_filter = self._normalize_query_filter(filter, schema=schema)
+        normalized_sorts = self._normalize_query_sorts(sorts, schema=schema)
+        rows = await self._client.query_database(
+            database_id,
+            filter=normalized_filter,
+            sorts=normalized_sorts,
+            page_size=limit,
+        )
         shown = rows[:limit]
         title = self._extract_database_title(database) or database_id
         lines = [
@@ -540,8 +548,13 @@ class NotionSkill(BaseSkill):
     def _convert_properties(self, payload: dict[str, Any], *, schema: dict[str, str]) -> dict[str, Any]:
         notion_properties: dict[str, Any] = {}
         for name, value in payload.items():
-            prop_type = schema.get(name) or self._infer_property_type(name, value)
-            notion_properties[name] = self._convert_property_value(name, value, prop_type=prop_type)
+            resolved_name = self._resolve_schema_property_name(name, schema=schema)
+            prop_type = schema.get(resolved_name) or self._infer_property_type(resolved_name, value)
+            notion_properties[resolved_name] = self._convert_property_value(
+                resolved_name,
+                value,
+                prop_type=prop_type,
+            )
         return notion_properties
 
     def _convert_property_value(self, name: str, value: Any, *, prop_type: str) -> dict[str, Any]:
@@ -562,6 +575,8 @@ class NotionSkill(BaseSkill):
             return {"checkbox": bool(value)}
         if prop_type == "date":
             if isinstance(value, dict):
+                if isinstance(value.get("date"), dict):
+                    return {"date": dict(value.get("date") or {})}
                 return {"date": value}
             return {"date": {"start": str(value)}}
         if prop_type == "url":
@@ -585,6 +600,94 @@ class NotionSkill(BaseSkill):
         if isinstance(value, list):
             return "multi_select"
         return "rich_text"
+
+    def _resolve_schema_property_name(self, name: str, *, schema: dict[str, str]) -> str:
+        raw_name = str(name or "").strip()
+        if not raw_name:
+            return raw_name
+        if raw_name in schema:
+            return raw_name
+
+        lowered = raw_name.casefold()
+        for candidate in schema:
+            if str(candidate).casefold() == lowered:
+                return str(candidate)
+
+        aliases = (
+            self._property_alias_candidates(raw_name)
+            + self._property_alias_candidates(schema.get(raw_name) or "")
+        )
+        for alias in aliases:
+            for candidate in schema:
+                if str(candidate or "").casefold() == alias.casefold():
+                    return str(candidate)
+        return raw_name
+
+    def _property_alias_candidates(self, name: str) -> list[str]:
+        lowered = str(name or "").strip().casefold()
+        if lowered in {"name", "title", "名称"}:
+            return ["名称", "Name", "Title"]
+        if lowered in {"due date", "due", "deadline", "截止日期", "截至", "日期"}:
+            return ["日期", "Due Date", "Due", "Deadline", "截止日期", "截至"]
+        if lowered in {"done", "completed", "完成", "已完成"}:
+            return ["已完成", "Done", "Completed", "完成"]
+        if lowered in {"status", "状态"}:
+            return ["状态", "Status"]
+        if lowered in {"tags", "tag", "标签"}:
+            return ["标签", "Tags", "Tag"]
+        if lowered in {"priority", "优先级", "优先程度"}:
+            return ["优先级", "优先程度", "Priority"]
+        if lowered in {"description", "描述"}:
+            return ["描述", "Description"]
+        return []
+
+    def _normalize_query_filter(
+        self,
+        payload: dict[str, Any] | None,
+        *,
+        schema: dict[str, str],
+    ) -> dict[str, Any] | None:
+        if payload is None:
+            return None
+        if not isinstance(payload, dict):
+            return payload
+        normalized: dict[str, Any] = {}
+        for key, value in payload.items():
+            if key == "property" and isinstance(value, str):
+                normalized[key] = self._resolve_schema_property_name(value, schema=schema)
+                continue
+            if isinstance(value, dict):
+                normalized[key] = self._normalize_query_filter(value, schema=schema)
+                continue
+            if isinstance(value, list):
+                normalized[key] = [
+                    self._normalize_query_filter(item, schema=schema) if isinstance(item, dict) else item
+                    for item in value
+                ]
+                continue
+            normalized[key] = value
+        return normalized
+
+    def _normalize_query_sorts(
+        self,
+        payload: list[dict[str, Any]] | None,
+        *,
+        schema: dict[str, str],
+    ) -> list[dict[str, Any]] | None:
+        if payload is None:
+            return None
+        normalized: list[dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            updated = dict(item)
+            if isinstance(updated.get("property"), str):
+                updated["property"] = self._resolve_schema_property_name(
+                    str(updated["property"]),
+                    schema=schema,
+                )
+            normalized.append(updated)
+        return normalized
 
     def _extract_title(self, payload: dict[str, Any]) -> str:
         if not isinstance(payload, dict):

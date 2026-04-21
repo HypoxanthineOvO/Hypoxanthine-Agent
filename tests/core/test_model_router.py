@@ -267,6 +267,59 @@ def test_model_router_merges_system_messages_for_genesis_qwen() -> None:
     assert "请简洁回答" in captured[0]["messages"][0]["content"]
 
 
+def test_model_router_merges_system_messages_for_genesis_local_qwen() -> None:
+    captured: list[dict] = []
+    runtime = RuntimeModelConfig.model_validate(
+        {
+            "default_model": "GenesiQWen35BA3B",
+            "task_routing": {"chat": "GenesiQWen35BA3B"},
+            "models": {
+                "GenesiQWen35BA3B": {
+                    "provider": "GenesisLocal",
+                    "litellm_model": "openai/qwen3.6-35b",
+                    "fallback": None,
+                    "api_base": "http://localhost:18081/v1",
+                    "api_key": "genesis-llm-2026",
+                    "supports_tool_calling": True,
+                }
+            },
+        }
+    )
+
+    async def fake_acompletion(**kwargs):
+        captured.append(kwargs)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": "ok",
+                        "tool_calls": [],
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    router = ModelRouter(runtime, acompletion_fn=fake_acompletion)
+    text = asyncio.run(
+        router.call(
+            "GenesiQWen35BA3B",
+            [
+                {"role": "system", "content": "你是助手"},
+                {"role": "system", "content": "请简洁回答"},
+                {"role": "user", "content": "hi"},
+            ],
+            task_type="chat",
+        )
+    )
+
+    assert text == "ok"
+    assert len([m for m in captured[0]["messages"] if m["role"] == "system"]) == 1
+    assert captured[0]["messages"][0]["role"] == "system"
+    assert "你是助手" in captured[0]["messages"][0]["content"]
+    assert "请简洁回答" in captured[0]["messages"][0]["content"]
+
+
 def test_model_router_fallback_on_failure(runtime_config: RuntimeModelConfig) -> None:
     called_models: list[str] = []
 
