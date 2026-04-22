@@ -53,7 +53,6 @@ from hypo_agent.core.narration_observer import NarrationObserver, is_local_vllm_
 from hypo_agent.core.output_compressor import OutputCompressor
 from hypo_agent.core.pipeline import ChatPipeline
 from hypo_agent.core.persona import PersonaManager
-from hypo_agent.core.repair_service import RepairService
 from hypo_agent.core.scheduler import SchedulerService
 from hypo_agent.core.self_restart import (
     DEFAULT_RESTART_LOCK_PATH,
@@ -114,6 +113,13 @@ from hypo_agent.skills import (
     TmuxSkill,
 )
 from hypo_agent.skills.subscription.manager import SubscriptionManager
+
+try:
+    from hypo_agent.core.repair_service import RepairService
+except ModuleNotFoundError as exc:  # pragma: no cover - exercised via subprocess import test
+    if exc.name != "hypo_agent.core.repair_service":
+        raise
+    RepairService = None  # type: ignore[assignment]
 
 logger = structlog.get_logger("hypo_agent.gateway.app")
 TEST_MODE_BANNER = "⚠️  HYPO_TEST_MODE enabled — data isolated to test/sandbox/"
@@ -470,6 +476,24 @@ def _default_security() -> SecurityConfig:
     )
 
 
+def _build_repair_service(
+    *,
+    structured_store: StructuredStore,
+    session_memory: SessionMemory,
+    coder_task_service: CoderTaskService | Any | None,
+    repo_root: Path,
+) -> Any | None:
+    if RepairService is None:
+        logger.warning("repair_service.unavailable", reason="module_missing")
+        return None
+    return RepairService(
+        structured_store=structured_store,
+        session_memory=session_memory,
+        coder_task_service=coder_task_service,
+        repo_root=repo_root,
+    )
+
+
 def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
     resolved_security = security or _default_security()
     structured_store = StructuredStore()
@@ -494,7 +518,7 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
         if coder_client is not None
         else None
     )
-    repair_service = RepairService(
+    repair_service = _build_repair_service(
         structured_store=structured_store,
         session_memory=SessionMemory(buffer_limit=100, active_window_days=30),
         coder_task_service=coder_task_service,
@@ -1065,7 +1089,7 @@ def create_app(
     if resolved_deps.probe_server is None:
         resolved_deps.probe_server = ProbeServer()
     if resolved_deps.repair_service is None:
-        resolved_deps.repair_service = RepairService(
+        resolved_deps.repair_service = _build_repair_service(
             structured_store=resolved_deps.structured_store,
             session_memory=resolved_deps.session_memory,
             coder_task_service=resolved_deps.coder_task_service,
@@ -2120,7 +2144,7 @@ def create_app(
             if deps.coder_client is not None
             else None
         )
-        deps.repair_service = RepairService(
+        deps.repair_service = _build_repair_service(
             structured_store=deps.structured_store,
             session_memory=deps.session_memory,
             coder_task_service=deps.coder_task_service,

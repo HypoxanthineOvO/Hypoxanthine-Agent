@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -120,6 +125,48 @@ def test_create_app_in_test_mode_skips_qq_registration(
         and "test/sandbox" in str(kwargs.get("banner") or "")
         for event, kwargs in recorder.warning_calls
     )
+
+
+def test_create_app_wires_repair_service_into_pipeline(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HYPO_TEST_MODE", "1")
+    deps, pipeline = _test_mode_deps()
+
+    app = create_app(
+        auth_token="test-token",
+        pipeline=pipeline,
+        deps=deps,
+    )
+
+    assert app.state.repair_service is not None
+    assert getattr(app.state.pipeline.slash_commands, "repair_service", None) is app.state.repair_service
+
+
+def test_gateway_app_import_does_not_require_repair_service_file() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    with tempfile.TemporaryDirectory(prefix="hypo-app-import-") as tmpdir:
+        temp_root = Path(tmpdir)
+        shutil.copytree(repo_root / "src", temp_root / "src")
+        repair_service_path = temp_root / "src" / "hypo_agent" / "core" / "repair_service.py"
+        if repair_service_path.exists():
+            repair_service_path.unlink()
+
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(temp_root / "src")
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from hypo_agent.gateway.app import create_app; print('OK')",
+            ],
+            cwd=temp_root,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().endswith("OK")
 
 
 def test_test_mode_websocket_writes_session_and_db_to_sandbox(
