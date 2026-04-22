@@ -355,6 +355,8 @@ def test_secrets_config_accepts_services_qq_bot() -> None:
                     "app_id": "1029384756",
                     "app_secret": "bot-secret-xyz",
                     "enabled": True,
+                    "markdown_mode": "template",
+                    "markdown_template_id": "tpl-001",
                 }
             },
         }
@@ -365,6 +367,8 @@ def test_secrets_config_accepts_services_qq_bot() -> None:
     assert config.services.qq_bot.app_id == "1029384756"
     assert config.services.qq_bot.app_secret == "bot-secret-xyz"
     assert config.services.qq_bot.enabled is True
+    assert config.services.qq_bot.markdown_mode == "template"
+    assert config.services.qq_bot.markdown_template_id == "tpl-001"
 
 
 def test_secrets_config_accepts_services_weixin() -> None:
@@ -376,6 +380,7 @@ def test_secrets_config_accepts_services_weixin() -> None:
                     "enabled": True,
                     "token_path": "memory/weixin_auth.json",
                     "allowed_users": ["alice@im.wechat"],
+                    "markdown_enabled": False,
                 }
             },
         }
@@ -386,6 +391,7 @@ def test_secrets_config_accepts_services_weixin() -> None:
     assert config.services.weixin.enabled is True
     assert config.services.weixin.token_path == "memory/weixin_auth.json"
     assert config.services.weixin.allowed_users == ["alice@im.wechat"]
+    assert config.services.weixin.markdown_enabled is False
 
 
 def test_secrets_config_accepts_services_wewe_rss() -> None:
@@ -527,10 +533,13 @@ def test_secrets_yaml_example_includes_qq_template() -> None:
     assert config.services.qq_bot is not None
     assert config.services.qq_bot.enabled is False
     assert config.services.qq_bot.app_id == ""
+    assert config.services.qq_bot.markdown_mode == "native"
+    assert config.services.qq_bot.markdown_template_id == ""
     assert config.services.weixin is not None
     assert config.services.weixin.enabled is False
     assert config.services.weixin.token_path == "memory/weixin_auth.json"
     assert config.services.weixin.allowed_users == []
+    assert config.services.weixin.markdown_enabled is True
     assert config.services.wewe_rss is not None
     assert config.services.wewe_rss.enabled is False
     assert config.services.wewe_rss.base_url == "http://10.15.88.94:4000"

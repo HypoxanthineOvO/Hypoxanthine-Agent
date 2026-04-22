@@ -366,7 +366,7 @@ def test_weixin_channel_downloads_file_and_video_attachments(tmp_path: Path) -> 
     asyncio.run(_run())
 
 
-def test_weixin_adapter_renders_markdown_block_to_image_and_prefixes_source(tmp_path: Path) -> None:
+def test_weixin_adapter_keeps_markdown_code_block_in_text_item(tmp_path: Path) -> None:
     async def _run() -> None:
         rendered_path = tmp_path / "rendered.png"
         rendered_path.write_bytes(_PNG_1X1)
@@ -389,11 +389,9 @@ def test_weixin_adapter_renders_markdown_block_to_image_and_prefixes_source(tmp_
             )
         )
 
-        assert client.sent_text[0]["text"] == "这里有代码："
-        assert renderer.calls == [("print(1)", "code")]
-        assert client.upload_requests[0]["media_type"] == 1
-        assert client.sent_images[0]["to_user_id"] == "target@im.wechat"
-        assert client.sent_images[0]["encrypt_query_param"] == "download-param-1"
-        assert client.sent_images[0]["encrypted_file_size"] >= len(_PNG_1X1)
+        assert client.sent_text[0]["text"] == "这里有代码：\n\n```python\nprint(1)\n```"
+        assert renderer.calls == []
+        assert client.upload_requests == []
+        assert client.sent_images == []
 
     asyncio.run(_run())

@@ -53,6 +53,7 @@ from hypo_agent.core.narration_observer import NarrationObserver, is_local_vllm_
 from hypo_agent.core.output_compressor import OutputCompressor
 from hypo_agent.core.pipeline import ChatPipeline
 from hypo_agent.core.persona import PersonaManager
+from hypo_agent.core.repair_service import RepairService
 from hypo_agent.core.scheduler import SchedulerService
 from hypo_agent.core.self_restart import (
     DEFAULT_RESTART_LOCK_PATH,
@@ -212,6 +213,7 @@ class AppDeps:
     coder_client: CoderClient | Any | None = None
     coder_task_service: CoderTaskService | Any | None = None
     coder_stream_watcher: CoderStreamWatcher | Any | None = None
+    repair_service: RepairService | Any | None = None
     coder_webhook_secret: str | None = None
     coder_webhook_url: str | None = None
     feishu_channel: FeishuChannel | None = None
@@ -492,6 +494,12 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
         if coder_client is not None
         else None
     )
+    repair_service = RepairService(
+        structured_store=structured_store,
+        session_memory=SessionMemory(buffer_limit=100, active_window_days=30),
+        coder_task_service=coder_task_service,
+        repo_root=get_agent_root(),
+    )
     permission_manager = PermissionManager(resolved_security.directory_whitelist)
     circuit_breaker = CircuitBreaker(resolved_security.circuit_breaker)
     skill_manager = SkillManager(
@@ -514,7 +522,7 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
     )
 
     return AppDeps(
-        session_memory=SessionMemory(buffer_limit=100, active_window_days=30),
+        session_memory=repair_service.session_memory,
         structured_store=structured_store,
         image_renderer=image_renderer,
         event_queue=event_queue,
@@ -524,6 +532,7 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
         coder_task_service=coder_task_service,
         coder_webhook_secret=coder_webhook_secret,
         coder_webhook_url=coder_webhook_url,
+        repair_service=repair_service,
         skill_manager=skill_manager,
         circuit_breaker=circuit_breaker,
         permission_manager=permission_manager,
@@ -670,6 +679,7 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
         circuit_breaker=deps.circuit_breaker,
         skill_manager=deps.skill_manager,
         coder_task_service=deps.coder_task_service,
+        repair_service=deps.repair_service,
         memory_gc=deps.memory_gc,
         repo_root=get_agent_root(),
     )
@@ -979,6 +989,8 @@ def _build_qq_bot_channel_service(
         app_id=qq_bot_cfg.app_id,
         app_secret=qq_bot_cfg.app_secret,
         image_renderer=image_renderer,
+        markdown_mode=qq_bot_cfg.markdown_mode,
+        markdown_template_id=qq_bot_cfg.markdown_template_id,
     )
 
 
@@ -1052,8 +1064,27 @@ def create_app(
         resolved_deps.image_renderer = ImageRenderer()
     if resolved_deps.probe_server is None:
         resolved_deps.probe_server = ProbeServer()
+    if resolved_deps.repair_service is None:
+        resolved_deps.repair_service = RepairService(
+            structured_store=resolved_deps.structured_store,
+            session_memory=resolved_deps.session_memory,
+            coder_task_service=resolved_deps.coder_task_service,
+            repo_root=get_agent_root(),
+        )
 
     pipeline_instance = pipeline or _build_default_pipeline(resolved_deps)
+    if getattr(pipeline_instance, "slash_commands", None) is None and hasattr(pipeline_instance, "router"):
+        pipeline_instance.slash_commands = SlashCommandHandler(
+            router=getattr(pipeline_instance, "router"),
+            session_memory=resolved_deps.session_memory,
+            structured_store=resolved_deps.structured_store,
+            circuit_breaker=resolved_deps.circuit_breaker,
+            skill_manager=resolved_deps.skill_manager,
+            coder_task_service=resolved_deps.coder_task_service,
+            repair_service=resolved_deps.repair_service,
+            memory_gc=resolved_deps.memory_gc,
+            repo_root=get_agent_root(),
+        )
     setattr(pipeline_instance, "wewe_rss_monitor", resolved_deps.wewe_rss_monitor)
     _ensure_pipeline_lifecycle_hooks(pipeline_instance)
     _configure_heartbeat_service_timeout(resolved_deps.heartbeat_service, pipeline_instance)
@@ -1334,6 +1365,7 @@ def create_app(
     app.state.coder_client = resolved_deps.coder_client
     app.state.coder_task_service = resolved_deps.coder_task_service
     app.state.coder_stream_watcher = resolved_deps.coder_stream_watcher
+    app.state.repair_service = resolved_deps.repair_service
     app.state.coder_webhook_secret = resolved_deps.coder_webhook_secret or ""
     app.state.coder_webhook_url = resolved_deps.coder_webhook_url or ""
     app.state.probe_server = resolved_deps.probe_server
@@ -1804,6 +1836,7 @@ def create_app(
             client=client,
             target_user_id="",
             image_renderer=resolved_deps.image_renderer,
+            markdown_enabled=weixin_cfg.markdown_enabled,
             on_message_sent=channel.record_message_sent,
         )
         app.state.weixin_adapter = adapter
@@ -2039,14 +2072,24 @@ def create_app(
     app.state.restart_handler = restart_handler
     app.state.run_post_restart_health_check = run_post_restart_health_check
     setattr(app.state.pipeline, "on_proactive_message", on_proactive_message)
+    if resolved_deps.repair_service is not None:
+        resolved_deps.repair_service.proactive_callback = on_proactive_message
+        resolved_deps.repair_service.restart_handler = restart_handler
+        resolved_deps.repair_service.repo_root = get_agent_root()
     if getattr(app.state.pipeline, "slash_commands", None) is not None:
         app.state.pipeline.slash_commands.restart_handler = restart_handler
         app.state.pipeline.slash_commands.repo_root = get_agent_root()
+        app.state.pipeline.slash_commands.repair_service = resolved_deps.repair_service
     register_restart_builtin_tool()
     if resolved_deps.coder_task_service is not None:
         resolved_deps.coder_stream_watcher = CoderStreamWatcher(
             coder_task_service=resolved_deps.coder_task_service,
             push_callback=on_proactive_message,
+            repair_update_callback=(
+                resolved_deps.repair_service.on_task_update
+                if resolved_deps.repair_service is not None
+                else None
+            ),
             poll_interval_seconds=5.0,
             message_char_limit=800,
         )
@@ -2077,6 +2120,12 @@ def create_app(
             if deps.coder_client is not None
             else None
         )
+        deps.repair_service = RepairService(
+            structured_store=deps.structured_store,
+            session_memory=deps.session_memory,
+            coder_task_service=deps.coder_task_service,
+            repo_root=get_agent_root(),
+        )
         _register_enabled_skills(
             skill_manager=deps.skill_manager,
             permission_manager=deps.permission_manager,
@@ -2099,6 +2148,7 @@ def create_app(
         app.state.skill_manager = deps.skill_manager
         app.state.coder_client = deps.coder_client
         app.state.coder_task_service = deps.coder_task_service
+        app.state.repair_service = deps.repair_service
         app.state.coder_webhook_secret = deps.coder_webhook_secret or ""
         app.state.coder_webhook_url = deps.coder_webhook_url or ""
         app.state.channel_settings = getattr(settings, "channels", ChannelsConfig())
@@ -2107,14 +2157,24 @@ def create_app(
         app.state.persona_manager = deps.persona_manager
         _ensure_pipeline_lifecycle_hooks(app.state.pipeline)
         setattr(app.state.pipeline, "on_proactive_message", on_proactive_message)
+        if deps.repair_service is not None:
+            deps.repair_service.proactive_callback = on_proactive_message
+            deps.repair_service.restart_handler = restart_handler
+            deps.repair_service.repo_root = get_agent_root()
         if getattr(app.state.pipeline, "slash_commands", None) is not None:
             app.state.pipeline.slash_commands.restart_handler = restart_handler
             app.state.pipeline.slash_commands.repo_root = get_agent_root()
+            app.state.pipeline.slash_commands.repair_service = deps.repair_service
         register_restart_builtin_tool()
         if deps.coder_task_service is not None:
             deps.coder_stream_watcher = CoderStreamWatcher(
                 coder_task_service=deps.coder_task_service,
                 push_callback=on_proactive_message,
+                repair_update_callback=(
+                    deps.repair_service.on_task_update
+                    if deps.repair_service is not None
+                    else None
+                ),
                 poll_interval_seconds=5.0,
                 message_char_limit=800,
             )

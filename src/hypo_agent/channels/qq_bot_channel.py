@@ -24,7 +24,10 @@ import structlog
 
 from hypo_agent.core.channel_progress import summarize_channel_progress_event
 from hypo_agent.core.delivery import DeliveryResult
+from hypo_agent.core.markdown_capability import QQ_CAPABILITY
+from hypo_agent.core.markdown_splitter import BlockType, split_markdown
 from hypo_agent.core.qq_renderer import QQRenderer
+from hypo_agent.core.qq_text_renderer import downgrade_headings
 from hypo_agent.core.uploads import build_upload_path
 from hypo_agent.core.time_utils import normalize_utc_datetime, utc_now
 from hypo_agent.core.unified_message import UnifiedMessage, message_from_unified
@@ -46,6 +49,9 @@ _TOKEN_LOCKS: dict[str, asyncio.Lock] = {}
 _MENTION_PREFIX_PATTERN = re.compile(r"^(?:<@!?[^>]+>\s*)+")
 _HTTP_URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
 _DATA_URL_PATTERN = re.compile(r"^data:[^;]+;base64,", re.IGNORECASE)
+_INLINE_MATH_RE = re.compile(r"(?<!\$)\$(?!\$)(?P<expr>.+?)(?<!\$)\$(?!\$)")
+_MARKDOWN_IMAGE_RE = re.compile(r"^\s*!\[[^\]]*\]\((?P<content>[^)\r\n]+)\)\s*$")
+_markdown_available = True
 
 
 def clear_qqbot_token_cache() -> None:
@@ -93,6 +99,40 @@ def _normalize_content(content: str) -> str:
     return normalized.strip()
 
 
+def _extract_markdown_image_ref(markdown_line: str) -> str:
+    match = _MARKDOWN_IMAGE_RE.match(str(markdown_line or "").strip())
+    if not match:
+        return ""
+    content = str(match.group("content") or "").strip()
+    if content.startswith("<") and content.endswith(">"):
+        content = content[1:-1].strip()
+    if " " in content:
+        content = content.split(" ", 1)[0].strip()
+    return content
+
+
+def _is_markdown_send_denied(exc: httpx.HTTPStatusError) -> bool:
+    detail_parts = [str(exc)]
+    response = getattr(exc, "response", None)
+    if response is not None:
+        detail_parts.append(response.text)
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        if isinstance(payload, dict):
+            for key in ("message", "msg", "errmsg", "error"):
+                value = str(payload.get(key) or "").strip()
+                if value:
+                    detail_parts.append(value)
+    detail = " ".join(detail_parts)
+    lowered = detail.lower()
+    return (
+        "markdown" in lowered
+        and ("not allow" in lowered or "not permitted" in lowered or "不允许" in detail or "权限" in detail)
+    )
+
+
 @dataclass(slots=True)
 class QQBotInboundEvent:
     event_type: str
@@ -120,6 +160,8 @@ class QQBotChannelService:
         public_file_token: str = "",
         request_timeout_seconds: float = 15.0,
         image_renderer: Any | None = None,
+        markdown_mode: str = "native",
+        markdown_template_id: str = "",
     ) -> None:
         self.app_id = str(app_id).strip()
         self.app_secret = str(app_secret).strip()
@@ -132,6 +174,10 @@ class QQBotChannelService:
         self.public_base_url = str(public_base_url or "").strip().rstrip("/")
         self.public_file_token = str(public_file_token or "").strip()
         self.request_timeout_seconds = max(1.0, request_timeout_seconds)
+        self.markdown_mode = str(markdown_mode or "native").strip().lower() or "native"
+        self.markdown_template_id = str(markdown_template_id or "").strip()
+        self.capability = QQ_CAPABILITY
+        self.image_renderer = image_renderer
         self.renderer = QQRenderer(image_renderer=image_renderer)
         self._last_message_at: datetime | None = None
         self._messages_received = 0
@@ -258,6 +304,98 @@ class QQBotChannelService:
         return str(payload.get("url") or "").strip()
 
     async def send_message(self, message: Message | UnifiedMessage) -> DeliveryResult:
+        if self._native_markdown_enabled():
+            return await self._send_markdown_message(message)
+        return await self._send_legacy_message(message)
+
+    async def _send_markdown_message(self, message: Message | UnifiedMessage) -> DeliveryResult:
+        message = message_from_unified(message) if isinstance(message, UnifiedMessage) else message
+        qq_meta = message.metadata.get("qq") if isinstance(message.metadata, dict) else {}
+        if not isinstance(qq_meta, Mapping):
+            qq_meta = {}
+
+        openid = await self._resolve_openid(message=message, qq_meta=qq_meta)
+        if not openid:
+            logger.warning("qq_bot.message.skip", reason="missing_openid", session_id=message.session_id)
+            result = DeliveryResult.failed("qq_bot", error="missing_openid")
+            self._last_delivery = result
+            return result
+
+        guild_id = str(qq_meta.get("guild_id") or "").strip() or None
+        msg_id = str(qq_meta.get("msg_id") or "").strip() or None
+        route_kind = "dm" if guild_id else "c2c"
+        pending_text = ""
+        total_segment_count = 0
+
+        try:
+            rendered_segments = await self._render_markdown_segments(message)
+            total_segment_count = len(rendered_segments)
+            for segment in rendered_segments:
+                segment_type = str(segment.get("type") or "").strip().lower()
+                if segment_type == "text":
+                    pending_text = self._join_text_parts(pending_text, str(segment.get("text") or ""))
+                    continue
+                if pending_text:
+                    await self._send_text_with_markdown_fallback(
+                        route_kind=route_kind,
+                        openid=openid,
+                        guild_id=guild_id,
+                        msg_id=msg_id,
+                        text=pending_text,
+                    )
+                    pending_text = ""
+                if segment_type != "image":
+                    continue
+                image_source = str(segment.get("source") or "").strip()
+                if not image_source:
+                    fallback_text = str(segment.get("fallback_text") or "").strip()
+                    if fallback_text:
+                        await self._send_text_with_markdown_fallback(
+                            route_kind=route_kind,
+                            openid=openid,
+                            guild_id=guild_id,
+                            msg_id=msg_id,
+                            text=fallback_text,
+                        )
+                    continue
+                await self._send_image_with_fallback(
+                    route_kind=route_kind,
+                    openid=openid,
+                    guild_id=guild_id,
+                    msg_id=msg_id,
+                    text=None,
+                    image_source=image_source,
+                    fallback_text=self._segment_image_fallback_text(segment),
+                )
+            if pending_text:
+                await self._send_text_with_markdown_fallback(
+                    route_kind=route_kind,
+                    openid=openid,
+                    guild_id=guild_id,
+                    msg_id=msg_id,
+                    text=pending_text,
+                )
+        except _QQ_BOT_DELIVERY_ERRORS as exc:
+            result = DeliveryResult.failed(
+                "qq_bot",
+                segment_count=total_segment_count,
+                failed_segments=max(1, total_segment_count),
+                error=str(exc),
+            )
+            self._last_delivery = result
+            logger.warning(
+                "qq_bot.message.delivery_failed",
+                openid=openid,
+                route_kind=route_kind,
+                error=str(exc),
+            )
+            return result
+
+        result = DeliveryResult.ok("qq_bot", segment_count=total_segment_count)
+        self._last_delivery = result
+        return result
+
+    async def _send_legacy_message(self, message: Message | UnifiedMessage) -> DeliveryResult:
         message = message_from_unified(message) if isinstance(message, UnifiedMessage) else message
         qq_meta = message.metadata.get("qq") if isinstance(message.metadata, dict) else {}
         if not isinstance(qq_meta, Mapping):
@@ -556,6 +694,244 @@ class QQBotChannelService:
             self._last_openid = persisted_openid
             return persisted_openid
         return ""
+
+    async def _render_markdown_segments(self, message: Message) -> list[dict[str, Any]]:
+        segments: list[dict[str, Any]] = []
+        text = self._prepend_tag_emoji(str(message.text or ""), message.message_tag)
+        if text:
+            for block in split_markdown(text):
+                if block.type is BlockType.TEXT:
+                    rendered = downgrade_headings(block.content, max_level=self.capability.heading_max_level)
+                    rendered = _INLINE_MATH_RE.sub(lambda match: f"`{match.group('expr')}`", rendered)
+                    if rendered:
+                        segments.append({"type": "text", "text": rendered})
+                    continue
+                if block.type is BlockType.CODE_BLOCK:
+                    segments.append({"type": "text", "text": block.content})
+                    continue
+                if block.type is BlockType.HORIZONTAL_RULE:
+                    segments.append({"type": "text", "text": block.content})
+                    continue
+                if block.type is BlockType.IMAGE:
+                    image_ref = _extract_markdown_image_ref(block.content)
+                    if image_ref:
+                        segments.append(
+                            {
+                                "type": "image",
+                                "source": image_ref,
+                                "fallback_text": self._image_fallback_text(image_ref),
+                            }
+                        )
+                    continue
+                block_type = "table"
+                if block.type is BlockType.MATH_BLOCK:
+                    block_type = "math"
+                elif block.type is BlockType.MERMAID:
+                    block_type = "mermaid"
+                rendered = await self._render_markdown_block_image(
+                    block.content,
+                    block_type=block_type,
+                )
+                segments.append(rendered)
+
+        for attachment in message.attachments:
+            if attachment.type == "image":
+                segments.append(
+                    {
+                        "type": "image",
+                        "source": str(attachment.url or "").strip(),
+                        "name": attachment.filename,
+                        "fallback_text": self._image_fallback_text(str(attachment.url or "")),
+                    }
+                )
+                continue
+            label = attachment.filename or Path(str(attachment.url or "")).name or attachment.type
+            segments.append({"type": "text", "text": f"[文件] {label}"})
+
+        legacy_image = str(message.image or "").strip()
+        if legacy_image:
+            segments.append(
+                {
+                    "type": "image",
+                    "source": legacy_image,
+                    "fallback_text": self._image_fallback_text(legacy_image),
+                }
+            )
+
+        for label, raw_url in (
+            ("file", str(message.file or "").strip()),
+            ("audio", str(message.audio or "").strip()),
+        ):
+            if raw_url:
+                file_label = Path(raw_url).name or label
+                segments.append({"type": "text", "text": f"[文件] {file_label}"})
+
+        return self._merge_adjacent_text_segments(segments)
+
+    async def _render_markdown_block_image(self, content: str, *, block_type: str) -> dict[str, Any]:
+        if self._image_renderer_available():
+            try:
+                rendered_path = await self.image_renderer.render_to_image(
+                    content,
+                    block_type=block_type,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError):
+                pass
+            else:
+                return {
+                    "type": "image",
+                    "source": rendered_path,
+                    "name": Path(str(rendered_path)).name or None,
+                    "fallback_text": self._fallback_block_text(content, block_type=block_type),
+                }
+        return {"type": "text", "text": self._fallback_block_text(content, block_type=block_type)}
+
+    def _image_renderer_available(self) -> bool:
+        return bool(self.image_renderer is not None and getattr(self.image_renderer, "available", False))
+
+    def _fallback_block_text(self, content: str, *, block_type: str) -> str:
+        if self.image_renderer is not None and hasattr(self.image_renderer, "build_fallback_text"):
+            return str(self.image_renderer.build_fallback_text(content, block_type=block_type))
+        labels = {
+            "table": "表格",
+            "math": "公式",
+            "mermaid": "Mermaid 图",
+        }
+        label = labels.get(block_type, "内容")
+        body = str(content or "").strip() or "[空内容]"
+        return f"[{label}渲染失败，原始内容如下]\n{body}"
+
+    def _merge_adjacent_text_segments(self, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        for segment in segments:
+            if str(segment.get("type") or "").strip().lower() != "text":
+                merged.append(segment)
+                continue
+            text = str(segment.get("text") or "")
+            if not text:
+                continue
+            if merged and str(merged[-1].get("type") or "").strip().lower() == "text":
+                merged[-1] = {
+                    **merged[-1],
+                    "text": f"{str(merged[-1].get('text') or '')}\n{text}".strip(),
+                }
+                continue
+            merged.append({"type": "text", "text": text})
+        return merged
+
+    async def _send_text_with_markdown_fallback(
+        self,
+        *,
+        route_kind: str,
+        openid: str,
+        guild_id: str | None,
+        msg_id: str | None,
+        text: str,
+    ) -> None:
+        if not self._native_markdown_enabled():
+            await self._send_with_retry(
+                route_kind=route_kind,
+                openid=openid,
+                guild_id=guild_id,
+                msg_id=msg_id,
+                text=self.renderer.downgrade_markdown(text),
+            )
+            return
+
+        try:
+            await self._send_markdown_msg(
+                route_kind=route_kind,
+                openid=openid,
+                guild_id=guild_id,
+                msg_id=msg_id,
+                text=text,
+            )
+        except httpx.HTTPStatusError as exc:
+            if not _is_markdown_send_denied(exc):
+                raise
+            global _markdown_available
+            _markdown_available = False
+            self.markdown_mode = "disabled"
+            logger.warning("qq_bot.markdown.disabled_runtime", openid=openid, reason="native_markdown_denied")
+            await self._send_with_retry(
+                route_kind=route_kind,
+                openid=openid,
+                guild_id=guild_id,
+                msg_id=msg_id,
+                text=self.renderer.downgrade_markdown(text),
+            )
+
+    async def _send_markdown_msg(
+        self,
+        *,
+        route_kind: str,
+        openid: str,
+        guild_id: str | None,
+        msg_id: str | None,
+        text: str,
+    ) -> None:
+        for attempt in range(2):
+            try:
+                access_token = await self._get_access_token()
+                if route_kind == "dm" and guild_id:
+                    await self._request_json(
+                        "POST",
+                        f"{self.api_base_url}/dms/{guild_id}/messages",
+                        access_token=access_token,
+                        body={
+                            "content": text,
+                            **({"msg_id": msg_id} if msg_id else {}),
+                        },
+                    )
+                else:
+                    body: dict[str, Any] = {
+                        "msg_type": 2,
+                        "msg_seq": _next_msg_seq(msg_id),
+                        **({"msg_id": msg_id} if msg_id else {}),
+                    }
+                    if self.markdown_mode == "template" and self.markdown_template_id:
+                        body["markdown"] = {
+                            "custom_template_id": self.markdown_template_id,
+                            "params": [],
+                        }
+                    else:
+                        body["markdown"] = {"content": text}
+                    await self._request_json(
+                        "POST",
+                        f"{self.api_base_url}/v2/users/{openid}/messages",
+                        access_token=access_token,
+                        body=body,
+                    )
+                self._messages_sent += 1
+                self._last_message_at = utc_now()
+                if callable(self._on_message_sent):
+                    self._on_message_sent()
+                return
+            except (httpx.HTTPStatusError, httpx.TransportError, httpx.TimeoutException) as exc:
+                if attempt >= 1:
+                    raise
+                logger.warning("qq_bot.message.retry", error=str(exc), openid=openid)
+                self._invalidate_access_token()
+
+    def _native_markdown_enabled(self) -> bool:
+        if self.markdown_mode == "disabled":
+            return False
+        if self.markdown_mode not in {"native", "template"}:
+            return False
+        if self.markdown_mode == "template" and not self.markdown_template_id:
+            return False
+        return _markdown_available
+
+    def _prepend_tag_emoji(self, text: str, message_tag: str | None) -> str:
+        emoji = {
+            "reminder": "🔔",
+            "heartbeat": "💓",
+            "email_scan": "📧",
+            "tool_status": "ℹ️",
+        }.get(str(message_tag or "").strip(), "")
+        if not emoji or not str(text or "").strip():
+            return text
+        return f"{emoji} {text}"
 
     async def _send_image_with_fallback(
         self,

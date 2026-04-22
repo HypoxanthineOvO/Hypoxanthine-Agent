@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from hypo_agent.core.markdown_capability import ChannelMarkdownCapability
+from hypo_agent.core.markdown_splitter import MarkdownBlock, split_markdown
 from hypo_agent.core.rich_response import RichResponse
 from hypo_agent.core.time_utils import utc_isoformat, utc_now
 from hypo_agent.models import Attachment
+
+ChannelMessage = dict[str, Any]
 
 
 def _serialize_attachments(
@@ -106,3 +110,15 @@ class WebUIAdapter:
             return payload
 
         raise ValueError(f"Unsupported event_type '{event_type}'")
+
+
+class BaseChannelAdapter:
+    def __init__(self, capability: ChannelMarkdownCapability) -> None:
+        self.capability = capability
+
+    async def format(self, response: RichResponse) -> list[ChannelMessage]:
+        blocks = split_markdown(str(response.text or ""))
+        return await self.render_blocks(blocks)
+
+    async def render_blocks(self, blocks: list[MarkdownBlock]) -> list[ChannelMessage]:
+        raise NotImplementedError

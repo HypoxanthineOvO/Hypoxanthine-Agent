@@ -118,6 +118,8 @@ class QQBotServiceConfig(BaseModel):
     app_secret: str = ""
     enabled: bool = False
     public_base_url: str = ""
+    markdown_mode: Literal["native", "template", "disabled"] = "native"
+    markdown_template_id: str = ""
 
 
 class WeixinServiceConfig(BaseModel):
@@ -126,6 +128,7 @@ class WeixinServiceConfig(BaseModel):
     enabled: bool = False
     token_path: str = "memory/weixin_auth.json"
     allowed_users: list[str] = Field(default_factory=list)
+    markdown_enabled: bool = True
 
 
 class WeWeRSSServiceConfig(BaseModel):

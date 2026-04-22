@@ -195,7 +195,8 @@ class ILinkClient:
         self,
         *,
         to_user_id: str,
-        text: str,
+        text: str | None = None,
+        item_list: list[dict[str, Any]] | None = None,
         context_token: str | None = "",
         client_id: str | None = None,
         msg_id: str | None = None,
@@ -203,20 +204,23 @@ class ILinkClient:
     ) -> dict[str, Any]:
         self._require_bot_token()
         resolved_client_id = client_id or f"wcb-{uuid4()}"
+        resolved_item_list = list(item_list or [])
+        if not resolved_item_list:
+            resolved_item_list = [
+                {
+                    "type": 1,
+                    "text_item": {
+                        "text": str(text or ""),
+                    },
+                }
+            ]
         message_payload: dict[str, Any] = {
             "from_user_id": "",
             "to_user_id": to_user_id,
             "client_id": resolved_client_id,
             "message_type": 2,
             "message_state": int(message_state),
-            "item_list": [
-                {
-                    "type": 1,
-                    "text_item": {
-                        "text": text,
-                    },
-                }
-            ],
+            "item_list": resolved_item_list,
         }
         if context_token is not None:
             message_payload["context_token"] = context_token

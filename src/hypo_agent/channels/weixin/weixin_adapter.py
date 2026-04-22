@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 from pathlib import Path
+from typing import Any
 from urllib import request as urllib_request
 from urllib.parse import urlparse
 
@@ -17,6 +18,8 @@ from hypo_agent.channels.weixin.crypto import (
 )
 from hypo_agent.channels.weixin.ilink_client import ILinkAPIError, ILinkClient
 from hypo_agent.core.delivery import DeliveryResult
+from hypo_agent.core.markdown_capability import WEIXIN_CAPABILITY
+from hypo_agent.core.markdown_splitter import BlockType, split_markdown
 from hypo_agent.core.platform_message_preparation import prepare_message_for_platform
 from hypo_agent.core.unified_message import UnifiedMessage, message_from_unified
 from hypo_agent.core.weixin_renderer import WeixinRenderer
@@ -50,6 +53,7 @@ class WeixinAdapter:
         image_renderer=None,
         message_limit: int = 2000,
         send_delay_seconds: float = 0.3,
+        markdown_enabled: bool = True,
         on_message_sent=None,
         sleep_func=asyncio.sleep,
     ) -> None:
@@ -57,10 +61,13 @@ class WeixinAdapter:
         self.target_user_id = str(target_user_id or "").strip()
         self.message_limit = max(1, int(message_limit))
         self.send_delay_seconds = max(0.0, float(send_delay_seconds))
+        self.markdown_enabled = bool(markdown_enabled)
+        self.capability = WEIXIN_CAPABILITY
         self._sleep = sleep_func
         self._on_message_sent = on_message_sent
         self._last_context_token = ""
         self._renderer = WeixinRenderer(image_renderer=image_renderer)
+        self._image_renderer = image_renderer
         self._deferred_text_batches: dict[str, list[str]] = {}
         self._last_delivery: DeliveryResult | None = None
 
@@ -106,43 +113,35 @@ class WeixinAdapter:
         error: str | None = None
         total_segments = len(segments)
 
-        for segment_index, segment in enumerate(segments):
-            if segment_index > 0 and self.send_delay_seconds > 0:
-                await self._sleep(self.send_delay_seconds)
-            try:
-                response = await self._send_segment(
-                    segment,
+        try:
+            response = await self._send_segments_batch(
+                segments,
+                target_user_id=target_user_id,
+                context_token=context_token,
+            )
+            logger.info(
+                "weixin.adapter.batch_sent",
+                target_user_id=target_user_id,
+                total_segments=total_segments,
+                ret=response.get("ret") if isinstance(response, dict) else None,
+                errcode=response.get("errcode") if isinstance(response, dict) else None,
+            )
+        except _WEIXIN_ADAPTER_ERRORS as exc:
+            error = str(exc)
+            failed_segments = total_segments
+            logger.warning(
+                "weixin.adapter.batch_failed",
+                target_user_id=target_user_id,
+                total_segments=total_segments,
+                error=error,
+            )
+            deferred_text = self._segments_to_text(segments)
+            if deferred_text:
+                self._queue_deferred_text_batch(
                     target_user_id=target_user_id,
-                    context_token=context_token,
+                    text=deferred_text,
+                    reason=error,
                 )
-                logger.info(
-                    "weixin.adapter.segment_sent",
-                    target_user_id=target_user_id,
-                    segment_index=segment_index + 1,
-                    total_segments=total_segments,
-                    segment_type=str(segment.get("type") or "").strip().lower(),
-                    ret=response.get("ret") if isinstance(response, dict) else None,
-                    errcode=response.get("errcode") if isinstance(response, dict) else None,
-                )
-            except _WEIXIN_ADAPTER_ERRORS as exc:
-                error = str(exc)
-                failed_segments = total_segments - segment_index
-                logger.warning(
-                    "weixin.adapter.segment_failed",
-                    target_user_id=target_user_id,
-                    segment_index=segment_index + 1,
-                    total_segments=total_segments,
-                    segment_type=str(segment.get("type") or "").strip().lower(),
-                    error=error,
-                )
-                deferred_text = self._segments_to_text(segments[segment_index:])
-                if deferred_text:
-                    self._queue_deferred_text_batch(
-                        target_user_id=target_user_id,
-                        text=deferred_text,
-                        reason=error,
-                    )
-                break
 
         if failed_segments:
             result = DeliveryResult.failed(
@@ -685,10 +684,287 @@ class WeixinAdapter:
                     }
                 )
                 continue
-            rendered_segments = await self._renderer.render(prepared_message)
+            rendered_segments = (
+                await self._render_markdown_segments(prepared_message)
+                if self.markdown_enabled
+                else await self._renderer.render(prepared_message)
+            )
             if rendered_segments:
                 segments.extend(rendered_segments)
         return self._merge_adjacent_text_segments(segments)
+
+    async def _render_markdown_segments(self, message: Message) -> list[dict[str, Any]]:
+        segments: list[dict[str, Any]] = []
+        text = self._prepend_tag_emoji(str(message.text or ""), message.message_tag)
+        if text:
+            for block in split_markdown(text):
+                if block.type in {BlockType.TEXT, BlockType.CODE_BLOCK, BlockType.HORIZONTAL_RULE}:
+                    segments.append({"type": "text", "text": block.content})
+                    continue
+                if block.type is BlockType.TABLE:
+                    segments.append({"type": "text", "text": table_to_key_value_text(block.content)})
+                    continue
+                if block.type in {BlockType.MATH_BLOCK, BlockType.MERMAID}:
+                    rendered = await self._render_markdown_block_image(
+                        block.content,
+                        block_type="math" if block.type is BlockType.MATH_BLOCK else "mermaid",
+                    )
+                    segments.append(rendered)
+                    continue
+                if block.type is BlockType.IMAGE:
+                    image_ref = _extract_markdown_image_ref(block.content)
+                    if image_ref:
+                        segments.append(
+                            {
+                                "type": "image",
+                                "source": image_ref,
+                                "fallback_text": self._image_fallback_text(image_ref),
+                            }
+                        )
+
+        for attachment in message.attachments:
+            copied = attachment.model_copy()
+            if copied.type == "image":
+                segments.append(
+                    {
+                        "type": "image",
+                        "source": str(copied.url or "").strip(),
+                        "name": copied.filename,
+                        "fallback_text": self._image_fallback_text(str(copied.url or "")),
+                    }
+                )
+                continue
+            label = copied.filename or Path(str(copied.url or "")).name or copied.type
+            segments.append({"type": "text", "text": f"[文件] {label}"})
+
+        return segments
+
+    async def _render_markdown_block_image(self, content: str, *, block_type: str) -> dict[str, Any]:
+        if self._renderer_available():
+            try:
+                rendered_path = await self._image_renderer.render_to_image(
+                    content,
+                    block_type=block_type,
+                )
+            except (OSError, RuntimeError, TypeError, ValueError):
+                pass
+            else:
+                return {
+                    "type": "image",
+                    "source": rendered_path,
+                    "name": Path(str(rendered_path)).name or None,
+                    "fallback_text": self._fallback_block_text(content, block_type=block_type),
+                }
+        return {"type": "text", "text": self._fallback_block_text(content, block_type=block_type)}
+
+    def _renderer_available(self) -> bool:
+        return bool(self._image_renderer is not None and getattr(self._image_renderer, "available", False))
+
+    def _fallback_block_text(self, content: str, *, block_type: str) -> str:
+        if self._image_renderer is not None and hasattr(self._image_renderer, "build_fallback_text"):
+            return str(self._image_renderer.build_fallback_text(content, block_type=block_type))
+        labels = {
+            "table": "表格",
+            "math": "公式",
+            "mermaid": "Mermaid 图",
+        }
+        label = labels.get(block_type, "内容")
+        body = str(content or "").strip() or "[空内容]"
+        return f"[{label}渲染失败，原始内容如下]\n{body}"
+
+    async def _send_segments_batch(
+        self,
+        segments: list[dict[str, Any]],
+        *,
+        target_user_id: str,
+        context_token: str,
+    ) -> dict[str, object]:
+        item_list = await self._build_item_list(segments, target_user_id=target_user_id)
+        if not item_list:
+            return {"ret": 0}
+
+        try:
+            response = await self._client_send_item_list(
+                target_user_id=target_user_id,
+                item_list=item_list,
+                context_token=context_token or None,
+            )
+        except ILinkAPIError as exc:
+            if not self._is_retryable_send_error(exc):
+                raise
+            response = await self._handle_retryable_item_list_failure(
+                target_user_id=target_user_id,
+                item_list=item_list,
+                context_token=context_token,
+                fallback_text=self._segments_to_text(segments),
+                error=exc,
+            )
+
+        await self._remember_context_token(context_token)
+        self._record_message_sent()
+        return response
+
+    async def _build_item_list(
+        self,
+        segments: list[dict[str, Any]],
+        *,
+        target_user_id: str,
+    ) -> list[dict[str, Any]]:
+        item_list: list[dict[str, Any]] = []
+        for segment in segments:
+            segment_type = str(segment.get("type") or "").strip().lower()
+            if segment_type == "text":
+                text = str(segment.get("text") or "")
+                for chunk in self._split_message(text, limit=self.message_limit):
+                    if chunk.strip():
+                        item_list.append({"type": 1, "text_item": {"text": chunk}})
+                continue
+            if segment_type == "image":
+                raw = str(segment.get("source") or "").strip()
+                if not raw:
+                    fallback_text = str(segment.get("fallback_text") or "").strip()
+                    if fallback_text:
+                        item_list.append({"type": 1, "text_item": {"text": fallback_text}})
+                    continue
+                try:
+                    item_list.append(
+                        await self._build_image_item(
+                            image_ref=raw,
+                            target_user_id=target_user_id,
+                        )
+                    )
+                except _WEIXIN_ADAPTER_ERRORS:
+                    fallback_text = str(segment.get("fallback_text") or "").strip() or self._image_fallback_text(raw)
+                    item_list.append({"type": 1, "text_item": {"text": fallback_text}})
+                continue
+            if segment_type == "file":
+                label = str(segment.get("name") or Path(str(segment.get("source") or "")).name or "file").strip()
+                item_list.append({"type": 1, "text_item": {"text": f"[文件] {label}"}})
+        return item_list
+
+    async def _build_image_item(
+        self,
+        *,
+        image_ref: str,
+        target_user_id: str,
+    ) -> dict[str, Any]:
+        raw = await self._load_image_bytes(image_ref)
+        aes_key = generate_aes_key()
+        encrypted = encrypt_media(raw, aes_key)
+        aes_key_hex = encode_aes_key_hex(aes_key)
+        upload_request = self.client.build_media_upload_payload(
+            to_user_id=target_user_id,
+            media_type=1,
+            plaintext=raw,
+            encrypted_size=len(encrypted),
+            aes_key_hex=aes_key_hex,
+        )
+        upload_payload = await self._retry_image_operation(
+            stage="get_upload_url",
+            target_user_id=target_user_id,
+            image_ref=image_ref,
+            operation=lambda: self.client.get_upload_url(**upload_request),
+        )
+        upload_param = str(upload_payload.get("upload_param") or "").strip()
+        filekey = str(upload_request.get("filekey") or "").strip()
+        if not upload_param or not filekey:
+            raise RuntimeError("weixin upload response missing upload_param or filekey")
+        aes_key_base64 = encode_aes_key_base64hex(aes_key)
+        encrypt_query_param = await self._retry_image_operation(
+            stage="upload_media",
+            target_user_id=target_user_id,
+            image_ref=image_ref,
+            operation=lambda: self.client.upload_media(
+                upload_param=upload_param,
+                filekey=filekey,
+                encrypted_data=encrypted,
+            ),
+        )
+        return {
+            "type": 2,
+            "image_item": {
+                "media": {
+                    "encrypt_query_param": encrypt_query_param,
+                    "aes_key": aes_key_base64,
+                    "encrypt_type": 1,
+                },
+                "mid_size": len(encrypted),
+            },
+        }
+
+    async def _handle_retryable_item_list_failure(
+        self,
+        *,
+        target_user_id: str,
+        item_list: list[dict[str, Any]],
+        context_token: str,
+        fallback_text: str,
+        error: ILinkAPIError,
+    ) -> dict[str, object]:
+        logger.warning(
+            "weixin.adapter.send_retry",
+            strategy="omit_context_token",
+            target_user_id=target_user_id,
+            ret=error.response.get("ret"),
+            errcode=error.response.get("errcode"),
+            item_count=len(item_list),
+        )
+        try:
+            return await self._client_send_item_list(
+                target_user_id=target_user_id,
+                item_list=item_list,
+                context_token=None,
+            )
+        except ILinkAPIError as retry_error:
+            if not self._is_retryable_send_error(retry_error):
+                raise retry_error
+            sanitized = self._sanitize_text_for_retry(fallback_text)
+            return await self._send_split_text_fallback(
+                target_user_id=target_user_id,
+                text=sanitized,
+                error=retry_error,
+            )
+
+    async def _client_send_item_list(
+        self,
+        *,
+        target_user_id: str,
+        item_list: list[dict[str, Any]],
+        context_token: str | None,
+    ) -> dict[str, object]:
+        sender = getattr(self.client, "send_message_raw", None)
+        if callable(sender):
+            try:
+                response = await sender(
+                    to_user_id=target_user_id,
+                    text=None,
+                    item_list=item_list,
+                    context_token=context_token,
+                )
+            except TypeError as exc:
+                if "item_list" not in str(exc):
+                    raise
+                response = await sender(
+                    to_user_id=target_user_id,
+                    text="\n".join(
+                        str(item.get("text_item", {}).get("text") or "")
+                        for item in item_list
+                        if int(item.get("type") or 0) == 1
+                    ),
+                    context_token=context_token,
+                )
+            return response if isinstance(response, dict) else {"ret": 0}
+        text_parts = [
+            str(item.get("text_item", {}).get("text") or "")
+            for item in item_list
+            if int(item.get("type") or 0) == 1
+        ]
+        await self.client.send_message(
+            to_user_id=target_user_id,
+            text="\n".join(part for part in text_parts if part),
+            context_token=context_token,
+        )
+        return {"ret": 0}
 
     def _merge_adjacent_text_segments(self, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
         merged: list[dict[str, Any]] = []
@@ -808,6 +1084,18 @@ class WeixinAdapter:
             return max(1, width), max(1, height)
         return (1, 1)
 
+    def _prepend_tag_emoji(self, text: str, message_tag: str | None) -> str:
+        mapping = {
+            "reminder": "🔔",
+            "heartbeat": "💓",
+            "email_scan": "📧",
+            "tool_status": "ℹ️",
+        }
+        emoji = mapping.get(str(message_tag or "").strip(), "")
+        if not emoji or not str(text or "").strip():
+            return text
+        return f"{emoji} {text}"
+
     def _read_jpeg_size(self, payload: bytes) -> tuple[int, int]:
         index = 2
         length = len(payload)
@@ -832,3 +1120,62 @@ class WeixinAdapter:
                 return width, height
             index += block_len
         return (1, 1)
+
+
+def table_to_key_value_text(table_md: str) -> str:
+    rows = [_split_table_cells(line) for line in str(table_md or "").splitlines() if line.strip()]
+    if len(rows) < 2:
+        return str(table_md or "").strip()
+
+    headers = rows[0]
+    data_rows = [
+        row
+        for row in rows[1:]
+        if not (len(row) >= 2 and all(_is_divider_cell(cell) for cell in row))
+    ]
+    if not headers or not data_rows:
+        return str(table_md or "").strip()
+
+    if len(headers) == 2:
+        rendered = [f"{headers[0]}: {headers[1]}"]
+        for row in data_rows:
+            key = row[0] if len(row) >= 1 else ""
+            value = row[1] if len(row) >= 2 else ""
+            rendered.append(f"{key}: {value}".strip())
+        return "\n".join(line for line in rendered if line.strip())
+
+    rendered_rows: list[str] = []
+    for index, row in enumerate(data_rows, start=1):
+        if rendered_rows:
+            rendered_rows.append("")
+        rendered_rows.append(f"条目 {index}")
+        values = list(row) + [""] * max(0, len(headers) - len(row))
+        for header, value in zip(headers, values, strict=False):
+            rendered_rows.append(f"{header}: {value}".strip())
+    return "\n".join(line for line in rendered_rows if line.strip() or line == "")
+
+
+def _extract_markdown_image_ref(markdown_line: str) -> str:
+    match = re.match(r"^\s*!\[[^\]]*\]\((?P<content>[^)\r\n]+)\)\s*$", str(markdown_line or "").strip())
+    if not match:
+        return ""
+    content = str(match.group("content") or "").strip()
+    if content.startswith("<") and content.endswith(">"):
+        content = content[1:-1].strip()
+    if " " in content:
+        content = content.split(" ", 1)[0].strip()
+    return content
+
+
+def _split_table_cells(line: str) -> list[str]:
+    stripped = str(line or "").strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def _is_divider_cell(value: str) -> bool:
+    stripped = str(value or "").strip()
+    return bool(stripped) and all(char in "-:" for char in stripped) and "-" in stripped

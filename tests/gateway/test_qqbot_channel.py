@@ -241,8 +241,8 @@ def test_qqbot_send_message_fetches_token_and_sends_text(monkeypatch) -> None:
     assert calls[0][1] == "https://bots.qq.com/app/getAppAccessToken"
     assert calls[1][1].endswith("/v2/users/OPENID-C2C-001/messages")
     assert calls[1][2]["msg_id"] == "msg-001"
-    assert calls[1][2]["msg_type"] == 0
-    assert calls[1][2]["content"] == "【测试】"
+    assert calls[1][2]["msg_type"] == 2
+    assert calls[1][2]["markdown"] == {"content": "**测试**"}
 
 
 def test_qqbot_send_message_retries_once_after_token_expiry(monkeypatch) -> None:
@@ -487,15 +487,6 @@ def test_qqbot_send_message_merges_adjacent_text_segments_around_images(tmp_path
     image_calls: list[dict[str, object]] = []
     text_calls: list[dict[str, object]] = []
 
-    class StubRenderer:
-        async def render(self, _message):
-            return [
-                {"type": "text", "text": "前文"},
-                {"type": "image", "source": str(image_path), "name": "table.png"},
-                {"type": "text", "text": "后文一"},
-                {"type": "text", "text": "后文二"},
-            ]
-
     async def fake_resolve_openid(*, message, qq_meta):
         del message, qq_meta
         return "OPENID-C2C-001"
@@ -504,15 +495,23 @@ def test_qqbot_send_message_merges_adjacent_text_segments_around_images(tmp_path
         send_order.append(("image", kwargs))
         image_calls.append(kwargs)
 
-    async def fake_send_with_retry(**kwargs) -> None:
+    async def fake_send_text_with_markdown_fallback(**kwargs) -> None:
         send_order.append(("text", kwargs))
         text_calls.append(kwargs)
 
+    async def fake_render_markdown_segments(_message):
+        return [
+            {"type": "text", "text": "前文"},
+            {"type": "image", "source": str(image_path), "name": "table.png"},
+            {"type": "text", "text": "后文一"},
+            {"type": "text", "text": "后文二"},
+        ]
+
     service = QQBotChannelService(app_id="1029384756", app_secret="bot-secret-xyz")
-    service.renderer = StubRenderer()  # type: ignore[assignment]
     monkeypatch.setattr(service, "_resolve_openid", fake_resolve_openid)
+    monkeypatch.setattr(service, "_render_markdown_segments", fake_render_markdown_segments)
     monkeypatch.setattr(service, "_send_image_with_fallback", fake_send_image_with_fallback)
-    monkeypatch.setattr(service, "_send_with_retry", fake_send_with_retry)
+    monkeypatch.setattr(service, "_send_text_with_markdown_fallback", fake_send_text_with_markdown_fallback)
 
     result = asyncio.run(
         service.send_message(

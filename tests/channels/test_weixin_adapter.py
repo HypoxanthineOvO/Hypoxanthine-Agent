@@ -22,6 +22,7 @@ class DummyClient:
         self.sent: list[tuple[str, str]] = []
         self.sent_context_tokens: list[str | None] = []
         self.sent_images: list[dict] = []
+        self.raw_messages: list[dict] = []
         self.upload_requests: list[dict] = []
         self.uploaded_payloads: list[dict] = []
         self.fail_texts: dict[str, int] = {}
@@ -35,6 +36,58 @@ class DummyClient:
         self.sent.append((to_user_id, text))
         self.sent_context_tokens.append(context_token)
         return f"wcb-{len(self.sent)}"
+
+    async def send_message_raw(
+        self,
+        *,
+        to_user_id: str,
+        text: str | None = None,
+        item_list: list[dict] | None = None,
+        context_token: str | None = "",
+        **kwargs,
+    ) -> dict:
+        del kwargs
+        resolved_item_list = list(item_list or [])
+        if not resolved_item_list:
+            resolved_item_list = [{"type": 1, "text_item": {"text": str(text or "")}}]
+
+        combined_text = "\n".join(
+            str(item.get("text_item", {}).get("text") or "")
+            for item in resolved_item_list
+            if int(item.get("type") or 0) == 1
+        )
+        remaining_failures = self.fail_texts.get(combined_text, 0)
+        if remaining_failures > 0:
+            self.fail_texts[combined_text] = remaining_failures - 1
+            raise ILinkAPIError("/ilink/bot/sendmessage", {"ret": -2})
+
+        self.raw_messages.append(
+            {
+                "to_user_id": to_user_id,
+                "item_list": resolved_item_list,
+                "context_token": context_token,
+            }
+        )
+        for item in resolved_item_list:
+            item_type = int(item.get("type") or 0)
+            if item_type == 1:
+                payload = str(item.get("text_item", {}).get("text") or "")
+                self.sent.append((to_user_id, payload))
+                self.sent_context_tokens.append(context_token)
+                continue
+            if item_type == 2:
+                image_item = item.get("image_item", {})
+                media = image_item.get("media", {}) if isinstance(image_item, dict) else {}
+                self.sent_images.append(
+                    {
+                        "to_user_id": to_user_id,
+                        "encrypt_query_param": media.get("encrypt_query_param"),
+                        "aes_key": media.get("aes_key"),
+                        "encrypted_file_size": image_item.get("mid_size"),
+                        "context_token": context_token,
+                    }
+                )
+        return {"ret": 0}
 
     def remember_user_id(self, user_id: str) -> None:
         self.user_id = user_id
@@ -148,7 +201,7 @@ def test_weixin_adapter_splits_long_messages_and_waits_between_segments() -> Non
             ("user@im.wechat", "1234567890"),
             ("user@im.wechat", "ABCDEFGHIJ"),
         ]
-        assert sleep_calls == [0.3]
+        assert sleep_calls == []
 
     asyncio.run(_run())
 
@@ -471,13 +524,12 @@ def test_weixin_adapter_degrades_mixed_image_message_without_context_token(tmp_p
     asyncio.run(_run())
 
 
-def test_weixin_adapter_flushes_deferred_text_after_partial_failure(tmp_path: Path, monkeypatch) -> None:
+def test_weixin_adapter_flushes_deferred_text_after_failed_mixed_batch(tmp_path: Path, monkeypatch) -> None:
     async def _run() -> None:
         image_path = tmp_path / "table.png"
         image_path.write_bytes(_PNG_1X1)
         client = DummyClient()
         client.last_context_token = "ctx-first"
-        client.fail_texts["文本B"] = 2
         adapter = WeixinAdapter(
             client=client,
             target_user_id="user@im.wechat",
@@ -499,7 +551,18 @@ def test_weixin_adapter_flushes_deferred_text_after_partial_failure(tmp_path: Pa
             del allow_image_upload
             return segments_queue.pop(0)
 
+        async def fake_send_segments_batch(segments, *, target_user_id: str, context_token: str):
+            if any(str(segment.get("text") or "") == "文本B" for segment in segments):
+                raise ILinkAPIError("/ilink/bot/sendmessage", {"ret": -2})
+            item_list = [{"type": 1, "text_item": {"text": str(segment.get("text") or "")}} for segment in segments]
+            return await client.send_message_raw(
+                to_user_id=target_user_id,
+                item_list=item_list,
+                context_token=context_token,
+            )
+
         monkeypatch.setattr(adapter, "_prepare_segments", fake_prepare_segments)
+        monkeypatch.setattr(adapter, "_send_segments_batch", fake_send_segments_batch)
 
         first_result = await adapter.push(
             Message(
@@ -512,11 +575,10 @@ def test_weixin_adapter_flushes_deferred_text_after_partial_failure(tmp_path: Pa
 
         assert first_result.success is False
         assert first_result.segment_count == 3
-        assert first_result.failed_segments == 1
-        assert client.sent == [("user@im.wechat", "文本A")]
-        assert len(client.sent_images) == 1
+        assert first_result.failed_segments == 3
+        assert client.sent == []
+        assert client.sent_images == []
 
-        client.fail_texts.clear()
         second_result = await adapter.push(
             Message(
                 text="第二次发送",
@@ -529,8 +591,7 @@ def test_weixin_adapter_flushes_deferred_text_after_partial_failure(tmp_path: Pa
 
         assert second_result.success is True
         assert client.sent == [
-            ("user@im.wechat", "文本A"),
-            ("user@im.wechat", "文本B"),
+            ("user@im.wechat", "文本A\n[表格渲染失败，原始内容如下]\nA | B\n文本B"),
             ("user@im.wechat", "新的消息"),
         ]
 

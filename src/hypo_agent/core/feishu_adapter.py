@@ -3,20 +3,29 @@ from __future__ import annotations
 import json
 import re
 
+from hypo_agent.core.channel_adapter import BaseChannelAdapter
+from hypo_agent.core.markdown_capability import FEISHU_CAPABILITY
+from hypo_agent.core.markdown_splitter import BlockType, MarkdownBlock
+from hypo_agent.core.qq_text_renderer import downgrade_headings
 from hypo_agent.core.markdown_plaintext import markdown_to_plaintext
 from hypo_agent.core.rich_response import RichResponse
 
 FEISHU_CARD_CHAR_LIMIT = 30000
 
 
-class FeishuAdapter:
+class FeishuAdapter(BaseChannelAdapter):
     _INLINE_MARKDOWN_RE = re.compile(
         r"(\*\*.+?\*\*|(?<!\*)\*(?!\s).+?(?<!\s)\*(?!\*)|~~.+?~~|`[^`\n]+`|\[[^\]]+\]\([^)]+\))"
     )
 
+    def __init__(self) -> None:
+        super().__init__(FEISHU_CAPABILITY)
+
     async def format(self, response: RichResponse) -> list[dict[str, str]]:
-        text = str(response.text or "")
-        elements = self._markdown_to_elements(text)
+        return await super().format(response)
+
+    async def render_blocks(self, blocks: list[MarkdownBlock]) -> list[dict[str, str]]:
+        elements = self._blocks_to_elements(blocks)
         cards = self._pack_elements_into_cards(elements)
         return [{"msg_type": "interactive", "content": card} for card in cards]
 
@@ -106,10 +115,7 @@ class FeishuAdapter:
 
     _TABLE_ALIGN_RE = re.compile(r"^\s*\|?\s*:?[-]{3,}:?\s*(\|\s*:?[-]{3,}:?\s*)+\|?\s*$")
 
-    def _markdown_to_elements(self, text: str) -> list[dict]:
-        # Use card JSON 2.0 markdown rendering for most syntax (inline code, fenced code blocks, lists, etc.).
-        # Convert GitHub-style pipe tables into a dedicated table component for better compatibility.
-        lines = text.splitlines()
+    def _blocks_to_elements(self, blocks: list[MarkdownBlock]) -> list[dict]:
         elements: list[dict] = []
         buffer: list[str] = []
 
@@ -120,33 +126,19 @@ class FeishuAdapter:
             if content.strip():
                 elements.append({"tag": "markdown", "content": content})
 
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            if self._looks_like_table_header(line, next_line=lines[i + 1] if i + 1 < len(lines) else ""):
-                # Consume the full table block.
+        for block in blocks:
+            if block.type is BlockType.TABLE:
                 flush_markdown()
-                header_line = lines[i]
-                align_line = lines[i + 1]
-                i += 2
-                row_lines: list[str] = []
-                while i < len(lines) and self._looks_like_table_row(lines[i]):
-                    row_lines.append(lines[i])
-                    i += 1
-                table_el = self._table_element_from_markdown(
-                    header_line=header_line,
-                    align_line=align_line,
-                    row_lines=row_lines,
-                )
+                table_el = self._table_element_from_block(block.content)
                 if table_el is None:
-                    # Fallback: keep original markdown table block.
-                    buffer.extend([header_line, align_line, *row_lines])
+                    buffer.append(block.content.rstrip("\n"))
                 else:
                     elements.append(table_el)
                 continue
-
-            buffer.append(line)
-            i += 1
+            content = block.content
+            if block.type is BlockType.TEXT:
+                content = downgrade_headings(content, max_level=self.capability.heading_max_level)
+            buffer.append(content.rstrip("\n"))
 
         flush_markdown()
         if not elements:
@@ -158,28 +150,6 @@ class FeishuAdapter:
             elements.pop()
         return elements
 
-    def _looks_like_table_header(self, line: str, *, next_line: str) -> bool:
-        if "|" not in line:
-            return False
-        if "|" not in next_line:
-            return False
-        if not self._TABLE_ALIGN_RE.match(next_line or ""):
-            return False
-        # Avoid matching fenced code blocks accidentally.
-        if line.lstrip().startswith("```") or next_line.lstrip().startswith("```"):
-            return False
-        return True
-
-    def _looks_like_table_row(self, line: str) -> bool:
-        stripped = line.strip()
-        if not stripped:
-            return False
-        if "|" not in stripped:
-            return False
-        if stripped.startswith("```"):
-            return False
-        return True
-
     def _split_table_cells(self, line: str) -> list[str]:
         stripped = line.strip()
         if stripped.startswith("|"):
@@ -188,14 +158,15 @@ class FeishuAdapter:
             stripped = stripped[:-1]
         return [cell.strip() for cell in stripped.split("|")]
 
-    def _table_element_from_markdown(
-        self,
-        *,
-        header_line: str,
-        align_line: str,
-        row_lines: list[str],
-    ) -> dict | None:
-        del align_line  # alignment is ignored in basic conversion
+    def _table_element_from_block(self, markdown: str) -> dict | None:
+        lines = [line for line in str(markdown or "").splitlines() if line.strip()]
+        if len(lines) < 2:
+            return None
+        header_line = lines[0]
+        align_line = lines[1]
+        if not self._TABLE_ALIGN_RE.match(align_line):
+            return None
+        row_lines = lines[2:]
         headers = self._split_table_cells(header_line)
         if not headers:
             return None
