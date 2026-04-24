@@ -16,6 +16,7 @@ from typing import Any, Protocol
 import structlog
 
 from hypo_agent.core.channel_adapter import ChannelAdapter, WebUIAdapter
+from hypo_agent.core.config_loader import get_memory_dir
 from hypo_agent.core.model_runtime_context import build_runtime_model_context
 from hypo_agent.core.notion_todo_binding import (
     confirm_pending_notion_todo_candidate,
@@ -27,7 +28,7 @@ from hypo_agent.core.notion_todo_binding import (
 from hypo_agent.core.rich_response import RichResponse
 from hypo_agent.core.skill_catalog import SkillManifest
 from hypo_agent.core.time_utils import utc_isoformat, utc_now
-from hypo_agent.core.uploads import guess_mime_type
+from hypo_agent.core.uploads import guess_mime_type, sanitize_upload_filename
 from hypo_agent.exceptions import HypoAgentError
 from hypo_agent.memory.semantic_memory import estimate_token_count
 from hypo_agent.memory.session import SessionMemory
@@ -99,13 +100,7 @@ REPLY_BOUNDARY_SYSTEM_PROMPT = (
 
 KILL_SWITCH_MESSAGE = "⚠️ Kill Switch 已激活。所有执行已停止。发送 /resume 恢复。"
 SESSION_FUSED_MESSAGE = "⚠️ 本次对话累计错误过多，已暂停执行。请检查问题后重新发送消息继续。"
-COMPRESSED_MARKER_PREFIX = "[📦 原始输出"
-HEARTBEAT_TOOL_CONTENT_CHAR_LIMIT = 4000
-HEARTBEAT_TOOL_CONTENT_LINE_LIMIT = 80
-HEARTBEAT_TOOL_VALUE_CHAR_LIMIT = 1200
-HEARTBEAT_TOOL_COLLECTION_LIMIT = 8
-HEARTBEAT_TOOL_DEPTH_LIMIT = 3
-HEARTBEAT_TRUNCATION_MARKER = "... [truncated for heartbeat]"
+LONG_OUTPUT_EXPORT_THRESHOLD_CHARS = 20_000
 
 TOOL_STATUS_TEMPLATES: dict[str, dict[str, str]] = {
     "create_reminder": {
@@ -327,6 +322,8 @@ class ChatPipeline:
         heartbeat_allowed_tools: set[str] | None = None,
         slash_commands: SlashCommands | None = None,
         output_compressor: ChatOutputCompressor | None = None,
+        long_output_export_dir: Path | str | None = None,
+        long_output_threshold_chars: int = LONG_OUTPUT_EXPORT_THRESHOLD_CHARS,
         channel_adapter: ChannelAdapter | None = None,
         event_queue: Any | None = None,
         event_emitter: Any | None = None,
@@ -366,6 +363,11 @@ class ChatPipeline:
         self.heartbeat_allowed_tools = set(heartbeat_allowed_tools or set())
         self.slash_commands = slash_commands
         self.output_compressor = output_compressor
+        self.long_output_threshold_chars = max(1, int(long_output_threshold_chars))
+        self.long_output_export_dir = Path(
+            long_output_export_dir or (get_memory_dir() / "exports")
+        ).expanduser().resolve(strict=False)
+        self.long_output_export_dir.mkdir(parents=True, exist_ok=True)
         self.channel_adapter = channel_adapter or WebUIAdapter()
         self.event_queue = event_queue
         self.event_emitter = event_emitter
@@ -1247,7 +1249,7 @@ class ChatPipeline:
             if role == "assistant":
                 text = str(message.get("content") or "").strip()
                 if text:
-                    last_assistant_text = self._truncate_heartbeat_text(text, limit=240)
+                    last_assistant_text = text
                 for tool_call in message.get("tool_calls") or []:
                     tool_call_id = str(tool_call.get("id") or "").strip()
                     tool_name = self._extract_tool_name(tool_call)
@@ -1261,8 +1263,7 @@ class ChatPipeline:
             content = str(message.get("content") or "").strip()
             if not content:
                 continue
-            compact = self._truncate_heartbeat_text(content, limit=220)
-            summaries.append(f"- {tool_name}: {compact}")
+            summaries.append(f"- {tool_name}: {content}")
 
         lines = [
             f"Heartbeat 已达到工具轮次上限（{max_react_rounds} 轮），以下是基于已收集信息的当前总结：",
@@ -1568,7 +1569,6 @@ class ChatPipeline:
             full_text = ""
             killed = False
             session_fused = False
-            last_compressed_meta: dict[str, Any] | None = None
             last_tool_fallback_text: str | None = None
             react_iterations_completed = 0
             react_tool_calls_total = 0
@@ -2007,50 +2007,31 @@ class ChatPipeline:
                             attachment.model_copy()
                             for attachment in output.attachments
                         ]
-                        if tool_attachments_for_event:
-                            collected_attachments.extend(tool_attachments_for_event)
-                        compressed_meta_for_event: dict[str, Any] | None = None
-                        if self.output_compressor is not None:
-                            compression_metadata: dict[str, Any] = {
-                                "session_id": inbound.session_id,
-                                "tool_name": tool_name,
-                                "tool_call_id": tool_call_id,
-                            }
-                            tool_content, was_compressed = await self.output_compressor.compress_if_needed(
-                                tool_content,
-                                compression_metadata,
+                        original_tool_content = tool_content
+                        if self._should_export_long_output(original_tool_content):
+                            exported_attachment = self._export_long_tool_output_attachment(
+                                content=original_tool_content,
+                                tool_name=tool_name,
+                                tool_call_id=tool_call_id,
+                                session_id=inbound.session_id,
+                            )
+                            export_notice = self._externalized_tool_output_notice(
+                                attachment=exported_attachment,
                                 tool_name=tool_name,
                             )
-                            if was_compressed:
-                                tool_result_for_event = tool_content
-                                tool_metadata_for_event["compressed"] = True
-                                tool_metadata_for_event["original_chars"] = len(
-                                    self._tool_content_for_llm(output, serialized_output=serialized_output)
-                                )
-                                tool_metadata_for_event["compressed_chars"] = len(tool_content)
-                                compressed_meta = compression_metadata.get("compressed_meta")
-                                if isinstance(compressed_meta, dict):
-                                    compressed_meta_for_event = dict(compressed_meta)
-                                    last_compressed_meta = dict(compressed_meta)
-                                    await self._persist_tool_invocation_compressed_meta(
-                                        output=output,
-                                        compressed_meta=compressed_meta_for_event,
-                                    )
-                                    await self._emit_progress_event(
-                                        {
-                                            "type": "compression",
-                                            "tool": tool_name,
-                                            "tool_call_id": tool_call_id,
-                                            "original_chars": int(compressed_meta_for_event.get("original_chars") or 0),
-                                            "compressed_chars": int(compressed_meta_for_event.get("compressed_chars") or 0),
-                                            "session_id": inbound.session_id,
-                                        },
-                                        event_emitter=event_emitter,
-                                    )
+                            tool_content = export_notice
+                            tool_result_for_event = export_notice
+                            tool_summary = export_notice
+                            last_tool_fallback_text = export_notice
+                            tool_metadata_for_event["externalized"] = True
+                            tool_metadata_for_event["original_chars"] = len(original_tool_content)
+                            tool_metadata_for_event["externalized_filename"] = exported_attachment.filename
+                            tool_attachments_for_event.append(exported_attachment)
+                        if tool_attachments_for_event:
+                            collected_attachments.extend(tool_attachments_for_event)
                         yield await self._format_event(
                             event_type="tool_call_result",
                             response=RichResponse(
-                                compressed_meta=compressed_meta_for_event,
                                 attachments=tool_attachments_for_event,
                                 tool_calls=[
                                     {
@@ -2206,22 +2187,11 @@ class ChatPipeline:
                 )
                 return
 
-            extra_chunk = self._apply_compression_marker(
-                text=full_text,
-                compressed_meta=last_compressed_meta,
-            )
             if not full_text.strip() and last_tool_fallback_text:
                 full_text = last_tool_fallback_text
                 yield await self._format_event(
                     event_type="assistant_chunk",
                     response=RichResponse(text=full_text),
-                    session_id=inbound.session_id,
-                )
-            if extra_chunk is not None:
-                full_text += extra_chunk
-                yield await self._format_event(
-                    event_type="assistant_chunk",
-                    response=RichResponse(text=extra_chunk),
                     session_id=inbound.session_id,
                 )
 
@@ -2946,37 +2916,6 @@ class ChatPipeline:
         current_time = now.strftime("%Y年%m月%d日 %H:%M (%A)")
         return f"[System Context]\n当前时间: {current_time}\n时区: {tz_name}"
 
-    def _apply_compression_marker(
-        self,
-        *,
-        text: str,
-        compressed_meta: dict[str, Any] | None,
-    ) -> str | None:
-        if not compressed_meta:
-            return None
-        if COMPRESSED_MARKER_PREFIX in text:
-            return None
-        marker = self._format_compression_marker(compressed_meta)
-        if not marker:
-            return None
-        if not text:
-            return marker
-        prefix = "\n" if not text.endswith(("\n", "\r")) else ""
-        return f"{prefix}{marker}"
-
-    def _format_compression_marker(self, compressed_meta: dict[str, Any]) -> str | None:
-        try:
-            original_chars = int(compressed_meta.get("original_chars"))
-            compressed_chars = int(compressed_meta.get("compressed_chars"))
-        except (TypeError, ValueError):
-            return None
-        if original_chars <= 0 or compressed_chars <= 0:
-            return None
-        return (
-            f'[📦 原始输出 {original_chars} 字符，已压缩至 {compressed_chars} 字符。'
-            '如需查看原文请说"给我看原始输出"]'
-        )
-
     def _tool_fallback_text(self, output: SkillOutput) -> str:
         result = output.result
         if isinstance(result, dict):
@@ -3222,34 +3161,6 @@ class ChatPipeline:
         self._last_activity_monotonic = perf_counter()
         self._last_activity_at = utc_isoformat(utc_now())
 
-    async def _persist_tool_invocation_compressed_meta(
-        self,
-        *,
-        output: SkillOutput,
-        compressed_meta: dict[str, Any],
-    ) -> None:
-        if self.skill_manager is None:
-            return
-
-        raw_invocation_id = output.metadata.get("invocation_id")
-        try:
-            invocation_id = int(raw_invocation_id)
-        except (TypeError, ValueError):
-            return
-        if invocation_id <= 0:
-            return
-
-        updater = getattr(self.skill_manager, "attach_invocation_compressed_meta", None)
-        if updater is None:
-            return
-
-        result = updater(
-            invocation_id=invocation_id,
-            compressed_meta=compressed_meta,
-        )
-        if inspect.isawaitable(result):
-            await result
-
     def _tool_content_for_llm(
         self,
         output: SkillOutput,
@@ -3270,10 +3181,45 @@ class ChatPipeline:
         serialized_output: str,
         inbound: Message | None,
     ) -> str:
-        content = self._tool_content_for_llm(output, serialized_output=serialized_output)
-        if not self._is_heartbeat_request(inbound):
-            return content
-        return self._compact_tool_content_for_heartbeat(output, fallback_content=content)
+        del inbound
+        return self._tool_content_for_llm(output, serialized_output=serialized_output)
+
+    def _should_export_long_output(self, content: str) -> bool:
+        return len(str(content or "")) > self.long_output_threshold_chars
+
+    def _externalized_tool_output_notice(
+        self,
+        *,
+        attachment: Attachment,
+        tool_name: str,
+    ) -> str:
+        normalized_tool = str(tool_name or "").strip() or "tool"
+        return (
+            f"{normalized_tool} 输出过长，已导出为 Markdown 文件附件："
+            f"{attachment.filename or Path(attachment.url).name}"
+        )
+
+    def _export_long_tool_output_attachment(
+        self,
+        *,
+        content: str,
+        tool_name: str,
+        tool_call_id: str,
+        session_id: str,
+    ) -> Attachment:
+        stem = sanitize_upload_filename(
+            f"tool-output-{session_id}-{tool_name or 'tool'}-{tool_call_id or 'call'}"
+        )
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        target_path = (self.long_output_export_dir / f"{timestamp}_{Path(stem).stem}.md").resolve(strict=False)
+        target_path.write_text(str(content or "") + "\n", encoding="utf-8")
+        return Attachment(
+            type="file",
+            url=str(target_path),
+            filename=target_path.name,
+            mime_type="text/markdown",
+            size_bytes=target_path.stat().st_size,
+        )
 
     def _tool_is_retryable(self, tool_name: str) -> bool:
         return tool_name in _RETRYABLE_TOOLS
@@ -3329,144 +3275,6 @@ class ChatPipeline:
             )
         assert last_output is not None
         return last_output
-
-    def _compact_tool_content_for_heartbeat(
-        self,
-        output: SkillOutput,
-        *,
-        fallback_content: str,
-    ) -> str:
-        if self._heartbeat_tool_content_is_small_enough(fallback_content):
-            return fallback_content
-
-        result = output.result
-        if output.status == "success" and isinstance(result, str):
-            return self._truncate_heartbeat_text(result)
-
-        payload: dict[str, Any] = {"status": output.status}
-        if result not in (None, "", [], {}):
-            payload["result"] = self._compact_heartbeat_value(result, depth=0)
-        if output.error_info:
-            payload["error_info"] = self._truncate_heartbeat_text(
-                output.error_info,
-                limit=min(HEARTBEAT_TOOL_VALUE_CHAR_LIMIT, HEARTBEAT_TOOL_CONTENT_CHAR_LIMIT),
-            )
-        if output.metadata:
-            payload["metadata"] = self._compact_heartbeat_value(output.metadata, depth=0)
-        if output.attachments:
-            payload["attachment_count"] = len(output.attachments)
-
-        compact = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        if self._heartbeat_tool_content_is_small_enough(compact):
-            return compact
-        return self._truncate_heartbeat_text(compact)
-
-    def _heartbeat_tool_content_is_small_enough(self, content: str) -> bool:
-        return (
-            len(content) <= HEARTBEAT_TOOL_CONTENT_CHAR_LIMIT
-            and content.count("\n") + 1 <= HEARTBEAT_TOOL_CONTENT_LINE_LIMIT
-        )
-
-    def _compact_heartbeat_value(self, value: Any, *, depth: int) -> Any:
-        if isinstance(value, str):
-            return self._truncate_heartbeat_text(value, limit=HEARTBEAT_TOOL_VALUE_CHAR_LIMIT)
-
-        if depth >= HEARTBEAT_TOOL_DEPTH_LIMIT:
-            return self._summarize_heartbeat_value(value)
-
-        if isinstance(value, dict):
-            compact: dict[str, Any] = {}
-            ordered_items = list(self._iter_heartbeat_dict_items(value))
-            for key, item in ordered_items[:HEARTBEAT_TOOL_COLLECTION_LIMIT]:
-                compact[str(key)] = self._compact_heartbeat_value(item, depth=depth + 1)
-            truncated_keys = len(ordered_items) - HEARTBEAT_TOOL_COLLECTION_LIMIT
-            if truncated_keys > 0:
-                compact["_truncated_keys"] = truncated_keys
-            return compact
-
-        if isinstance(value, list):
-            compact_items = [
-                self._compact_heartbeat_value(item, depth=depth + 1)
-                for item in value[:HEARTBEAT_TOOL_COLLECTION_LIMIT]
-            ]
-            truncated_items = len(value) - HEARTBEAT_TOOL_COLLECTION_LIMIT
-            if truncated_items > 0:
-                compact_items.append(f"... ({truncated_items} more items truncated for heartbeat)")
-            return compact_items
-
-        if isinstance(value, tuple):
-            return self._compact_heartbeat_value(list(value), depth=depth)
-
-        if isinstance(value, set):
-            return self._compact_heartbeat_value(sorted(value, key=str), depth=depth)
-
-        if value is None or isinstance(value, (bool, int, float)):
-            return value
-
-        return self._truncate_heartbeat_text(str(value), limit=HEARTBEAT_TOOL_VALUE_CHAR_LIMIT)
-
-    def _iter_heartbeat_dict_items(self, value: dict[Any, Any]) -> list[tuple[Any, Any]]:
-        priority_keys = (
-            "status",
-            "exit_code",
-            "code",
-            "ok",
-            "success",
-            "error",
-            "error_info",
-            "message",
-            "summary",
-            "text",
-            "stdout",
-            "stderr",
-            "output",
-            "content",
-        )
-        seen: set[Any] = set()
-        ordered: list[tuple[Any, Any]] = []
-        for key in priority_keys:
-            if key in value:
-                ordered.append((key, value[key]))
-                seen.add(key)
-        for key, item in value.items():
-            if key in seen:
-                continue
-            ordered.append((key, item))
-        return ordered
-
-    def _summarize_heartbeat_value(self, value: Any) -> str:
-        if isinstance(value, dict):
-            return f"<dict with {len(value)} keys truncated for heartbeat>"
-        if isinstance(value, (list, tuple, set)):
-            return f"<{type(value).__name__} with {len(value)} items truncated for heartbeat>"
-        return self._truncate_heartbeat_text(str(value), limit=HEARTBEAT_TOOL_VALUE_CHAR_LIMIT)
-
-    def _truncate_heartbeat_text(
-        self,
-        text: Any,
-        *,
-        limit: int = HEARTBEAT_TOOL_CONTENT_CHAR_LIMIT,
-    ) -> str:
-        normalized = str(text).strip()
-        if not normalized:
-            return ""
-
-        if normalized.count("\n") + 1 > HEARTBEAT_TOOL_CONTENT_LINE_LIMIT:
-            lines = normalized.splitlines()
-            head_count = max(1, HEARTBEAT_TOOL_CONTENT_LINE_LIMIT // 2)
-            tail_count = max(1, HEARTBEAT_TOOL_CONTENT_LINE_LIMIT // 4)
-            omitted = max(0, len(lines) - head_count - tail_count)
-            selected = lines[:head_count]
-            if omitted > 0:
-                selected.append(f"... [{omitted} lines truncated for heartbeat]")
-            selected.extend(lines[-tail_count:])
-            normalized = "\n".join(selected)
-
-        if len(normalized) <= limit:
-            return normalized
-
-        body_budget = max(0, limit - len(HEARTBEAT_TRUNCATION_MARKER))
-        return f"{normalized[:body_budget]}{HEARTBEAT_TRUNCATION_MARKER}"
 
     async def _send_tool_status(
         self,

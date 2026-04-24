@@ -163,7 +163,7 @@ def test_build_default_pipeline_runs_antigravity_tool_name_audit(
     assert "web_search" not in captured_tool_names
 
 
-def test_build_default_pipeline_enables_output_compressor_by_default(
+def test_build_default_pipeline_disables_output_compressor_by_default(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -179,6 +179,5 @@ def test_build_default_pipeline_enables_output_compressor_by_default(
 
     pipeline = app_module._build_default_pipeline(deps)
 
-    assert deps.output_compressor is not None
-    assert pipeline.output_compressor is deps.output_compressor
-    assert deps.output_compressor.router is pipeline.router
+    assert deps.output_compressor is None
+    assert pipeline.output_compressor is None

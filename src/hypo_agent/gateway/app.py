@@ -843,14 +843,6 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
-    if deps.output_compressor is None:
-        deps.output_compressor = OutputCompressor(
-            router=router,
-            threshold_chars=20000,
-            target_chars=8000,
-            hard_threshold_chars=64000,
-            structured_passthrough_chars=20000,
-        )
     if deps.skill_manager is not None:
         tool_names = [
             str(tool.get("function", {}).get("name") or "").strip()

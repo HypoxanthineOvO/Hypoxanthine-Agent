@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import hypo_agent.core.pipeline as pipeline_module
 import pytest
@@ -974,7 +975,9 @@ def test_pipeline_stream_reply_uses_heartbeat_specific_round_limit() -> None:
     assert all(history is not None for history in router.tools_history)
 
 
-def test_pipeline_heartbeat_compacts_tool_output_for_followup_round() -> None:
+def test_pipeline_heartbeat_exports_long_tool_output_for_followup_round(
+    tmp_path: Path,
+) -> None:
     memory = StubSessionMemory()
     huge_stdout = "\n".join(f"line {index}: {'x' * 80}" for index in range(240))
     skills = StubSkillManager(
@@ -1031,6 +1034,8 @@ def test_pipeline_heartbeat_compacts_tool_output_for_followup_round() -> None:
         skill_manager=skills,
         heartbeat_allowed_tools={"exec_command"},
         heartbeat_model_timeout_seconds=60,
+        long_output_export_dir=tmp_path / "exports",
+        long_output_threshold_chars=2000,
     )
 
     async def _collect() -> list[dict]:
@@ -1049,9 +1054,9 @@ def test_pipeline_heartbeat_compacts_tool_output_for_followup_round() -> None:
     tool_messages = [message for message in router.last_messages if message.get("role") == "tool"]
     assert len(tool_messages) == 1
     tool_content = str(tool_messages[0]["content"])
-    assert len(tool_content) < 2500
-    assert "truncated for heartbeat" in tool_content
-    assert "exit_code" in tool_content
+    assert "Markdown 文件附件" in tool_content
+    assert "truncated for heartbeat" not in tool_content
+    assert events[1]["attachments"][0]["filename"].endswith(".md")
 
 
 def test_pipeline_queued_heartbeat_event_forces_skip_memory_and_timeout() -> None:
@@ -1217,7 +1222,7 @@ def test_pipeline_stream_reply_short_circuits_slash_command() -> None:
     assert memory.appended == []
 
 
-def test_pipeline_stream_reply_compresses_tool_output_before_tool_message() -> None:
+def test_pipeline_stream_reply_exports_long_tool_output_before_tool_message(tmp_path: Path) -> None:
     memory = StubSessionMemory()
     skills = StubSkillManager(
         output=SkillOutput(
@@ -1225,30 +1230,6 @@ def test_pipeline_stream_reply_compresses_tool_output_before_tool_message() -> N
             result={"stdout": "a" * 5000, "stderr": "", "exit_code": 0},
         )
     )
-
-    class StubOutputCompressor:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, dict, str | None]] = []
-
-        async def compress_if_needed(
-            self,
-            output: str,
-            metadata: dict,
-            *,
-            tool_name: str | None = None,
-        ) -> tuple[str, bool]:
-            self.calls.append((output, metadata, tool_name))
-            metadata["compressed_meta"] = {
-                "cache_id": "cache_1",
-                "original_chars": 5000,
-                "compressed_chars": 120,
-            }
-            return (
-                "compressed\n"
-                '[📦 原始输出 5000 字符，已压缩至 120 字符。如需查看原文请说"给我看原始输出"]'
-            ), True
-
-    compressor = StubOutputCompressor()
 
     class StubRouter:
         def __init__(self) -> None:
@@ -1286,7 +1267,8 @@ def test_pipeline_stream_reply_compresses_tool_output_before_tool_message() -> N
         chat_model="Gemini3Pro",
         session_memory=memory,
         skill_manager=skills,
-        output_compressor=compressor,
+        long_output_export_dir=tmp_path / "exports",
+        long_output_threshold_chars=2000,
     )
 
     async def _collect() -> list[dict]:
@@ -1294,18 +1276,13 @@ def test_pipeline_stream_reply_compresses_tool_output_before_tool_message() -> N
         return [event async for event in pipeline.stream_reply(inbound)]
 
     events = asyncio.run(_collect())
-    assert compressor.calls
-    assert compressor.calls[0][2] == "exec_command"
     assert events[1]["type"] == "tool_call_result"
-    assert str(events[1]["result"]).endswith('如需查看原文请说"给我看原始输出"]')
-    assert events[1]["compressed_meta"] == {
-        "cache_id": "cache_1",
-        "original_chars": 5000,
-        "compressed_chars": 120,
-    }
+    assert "Markdown 文件附件" in str(events[1]["result"])
+    assert "compressed_meta" not in events[1]
+    assert events[1]["attachments"][0]["filename"].endswith(".md")
     tool_messages = [m for m in router.last_messages if m.get("role") == "tool"]
     assert tool_messages
-    assert str(tool_messages[-1]["content"]).endswith('如需查看原文请说"给我看原始输出"]')
+    assert "Markdown 文件附件" in str(tool_messages[-1]["content"])
 
 
 def test_pipeline_stream_reply_keeps_tool_output_uncompressed_when_compressor_disabled() -> None:
@@ -1571,7 +1548,7 @@ def test_pipeline_emits_progress_events_via_event_emitter() -> None:
     assert any(item.get("type") == "react_complete" and item.get("total_tool_calls") == 1 for item in emitted)
 
 
-def test_pipeline_emits_compression_event_via_event_emitter() -> None:
+def test_pipeline_does_not_emit_compression_event_when_long_output_is_exported(tmp_path: Path) -> None:
     memory = StubSessionMemory()
     emitted: list[dict[str, object]] = []
 
@@ -1584,22 +1561,6 @@ def test_pipeline_emits_compression_event_via_event_emitter() -> None:
             result={"stdout": "a" * 5000, "stderr": "", "exit_code": 0},
         )
     )
-
-    class StubOutputCompressor:
-        async def compress_if_needed(
-            self,
-            output: str,
-            metadata: dict,
-            *,
-            tool_name: str | None = None,
-        ) -> tuple[str, bool]:
-            del output, tool_name
-            metadata["compressed_meta"] = {
-                "cache_id": "cache_progress",
-                "original_chars": 5000,
-                "compressed_chars": 120,
-            }
-            return "compressed output", True
 
     class StubRouter:
         def __init__(self) -> None:
@@ -1634,8 +1595,9 @@ def test_pipeline_emits_compression_event_via_event_emitter() -> None:
         chat_model="Gemini3Pro",
         session_memory=memory,
         skill_manager=skills,
-        output_compressor=StubOutputCompressor(),
         event_emitter=event_emitter,
+        long_output_export_dir=tmp_path / "exports",
+        long_output_threshold_chars=2000,
     )
 
     async def _collect() -> None:
@@ -1645,15 +1607,12 @@ def test_pipeline_emits_compression_event_via_event_emitter() -> None:
 
     asyncio.run(_collect())
 
-    assert any(
-        item.get("type") == "compression"
-        and item.get("original_chars") == 5000
-        and item.get("compressed_chars") == 120
-        for item in emitted
-    )
+    assert not any(item.get("type") == "compression" for item in emitted)
 
 
-def test_pipeline_stream_reply_persists_compressed_meta_with_invocation_id() -> None:
+def test_pipeline_stream_reply_does_not_persist_compressed_meta_when_long_output_is_exported(
+    tmp_path: Path,
+) -> None:
     memory = StubSessionMemory()
 
     class RecordingSkillManager(StubSkillManager):
@@ -1677,25 +1636,6 @@ def test_pipeline_stream_reply_persists_compressed_meta_with_invocation_id() -> 
 
     skills = RecordingSkillManager()
 
-    class StubOutputCompressor:
-        async def compress_if_needed(
-            self,
-            output: str,
-            metadata: dict,
-            *,
-            tool_name: str | None = None,
-        ) -> tuple[str, bool]:
-            del output, tool_name
-            metadata["compressed_meta"] = {
-                "cache_id": "cache_2",
-                "original_chars": 5000,
-                "compressed_chars": 120,
-            }
-            return (
-                "compressed\n"
-                '[📦 原始输出 5000 字符，已压缩至 120 字符。如需查看原文请说"给我看原始输出"]'
-            ), True
-
     class StubRouter:
         def __init__(self) -> None:
             self.calls = 0
@@ -1729,7 +1669,8 @@ def test_pipeline_stream_reply_persists_compressed_meta_with_invocation_id() -> 
         chat_model="Gemini3Pro",
         session_memory=memory,
         skill_manager=skills,
-        output_compressor=StubOutputCompressor(),
+        long_output_export_dir=tmp_path / "exports",
+        long_output_threshold_chars=2000,
     )
 
     async def _collect() -> list[dict]:
@@ -1738,19 +1679,11 @@ def test_pipeline_stream_reply_persists_compressed_meta_with_invocation_id() -> 
 
     events = asyncio.run(_collect())
     assert events[1]["type"] == "tool_call_result"
-    assert skills.compressed_meta_calls == [
-        (
-            42,
-            {
-                "cache_id": "cache_2",
-                "original_chars": 5000,
-                "compressed_chars": 120,
-            },
-        )
-    ]
+    assert "Markdown 文件附件" in str(events[1]["result"])
+    assert skills.compressed_meta_calls == []
 
 
-def test_pipeline_appends_compression_marker_when_missing_from_llm_reply() -> None:
+def test_pipeline_does_not_append_compression_marker_to_llm_reply(tmp_path: Path) -> None:
     memory = StubSessionMemory()
     skills = StubSkillManager(
         output=SkillOutput(
@@ -1758,26 +1691,6 @@ def test_pipeline_appends_compression_marker_when_missing_from_llm_reply() -> No
             result={"stdout": "a" * 5000, "stderr": "", "exit_code": 0},
         )
     )
-
-    marker = (
-        '[📦 原始输出 5000 字符，已压缩至 120 字符。如需查看原文请说"给我看原始输出"]'
-    )
-
-    class StubOutputCompressor:
-        async def compress_if_needed(
-            self,
-            output: str,
-            metadata: dict,
-            *,
-            tool_name: str | None = None,
-        ) -> tuple[str, bool]:
-            del output, tool_name
-            metadata["compressed_meta"] = {
-                "cache_id": "cache_3",
-                "original_chars": 5000,
-                "compressed_chars": 120,
-            }
-            return f"compressed\n{marker}", True
 
     class StubRouter:
         def __init__(self) -> None:
@@ -1812,7 +1725,8 @@ def test_pipeline_appends_compression_marker_when_missing_from_llm_reply() -> No
         chat_model="Gemini3Pro",
         session_memory=memory,
         skill_manager=skills,
-        output_compressor=StubOutputCompressor(),
+        long_output_export_dir=tmp_path / "exports",
+        long_output_threshold_chars=2000,
     )
 
     async def _collect() -> list[dict]:
@@ -1823,7 +1737,7 @@ def test_pipeline_appends_compression_marker_when_missing_from_llm_reply() -> No
     combined = "".join(event.get("text", "") for event in events if event.get("type") == "assistant_chunk")
 
     assert combined.startswith("done")
-    assert combined.endswith(marker)
+    assert '[📦 原始输出 ' not in combined
 
 class FailingSkill(BaseSkill):
     name = "fail_skill"
