@@ -11,6 +11,8 @@ import structlog
 
 from hypo_agent.channels.notion import NotionClient, NotionUnavailableError, blocks_to_markdown, markdown_to_blocks
 from hypo_agent.core.config_loader import load_secrets_config
+from hypo_agent.core.uploads import sanitize_upload_filename
+from hypo_agent.models import Attachment
 from hypo_agent.core.notion_todo_binding import discover_notion_todo_candidate, get_bound_notion_todo_database_id
 from hypo_agent.models import SkillOutput
 from hypo_agent.skills.base import BaseSkill
@@ -37,9 +39,12 @@ class NotionSkill(BaseSkill):
         heartbeat_service: Any | None = None,
         now_fn: Callable[[], datetime] | None = None,
         today_match_mode: str = _DEFAULT_TODO_TODAY_MATCH_MODE,
+        exports_dir: Path | str = "memory/exports",
     ) -> None:
         self.secrets_path = Path(secrets_path)
         self.now_fn = now_fn or datetime.now
+        self._exports_dir = Path(exports_dir).expanduser().resolve(strict=False)
+        self._exports_dir.mkdir(parents=True, exist_ok=True)
         self._todo_today_match_mode = self._normalize_today_match_mode(today_match_mode)
         self._client = notion_client or self._build_client_from_config()
         self._todo_database_id: str | None = self._load_todo_database_id()
@@ -82,6 +87,21 @@ class NotionSkill(BaseSkill):
                     "parameters": {
                         "type": "object",
                         "properties": {"page_id": {"type": "string"}},
+                        "required": ["page_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "notion_export_page_markdown",
+                    "description": "Read a Notion page and export it as a Markdown file attachment.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "page_id": {"type": "string"},
+                            "filename": {"type": "string"},
+                        },
                         "required": ["page_id"],
                     },
                 },
@@ -179,6 +199,10 @@ class NotionSkill(BaseSkill):
             if tool_name == "notion_read_page":
                 page_id = self._normalize_page_id(params.get("page_id"))
                 return SkillOutput(status="success", result=await self.notion_read_page(page_id))
+            if tool_name == "notion_export_page_markdown":
+                page_id = self._normalize_page_id(params.get("page_id"))
+                filename = str(params.get("filename") or "")
+                return await self.notion_export_page_markdown(page_id, filename=filename)
             if tool_name == "notion_write_page":
                 page_id = self._normalize_page_id(params.get("page_id"))
                 content = str(params.get("content") or "")
@@ -252,6 +276,19 @@ class NotionSkill(BaseSkill):
         if content:
             parts.extend(["", content])
         return "\n".join(parts).strip()
+
+    async def notion_export_page_markdown(self, page_id: str, *, filename: str = "") -> SkillOutput:
+        markdown = await self.notion_read_page(page_id)
+        safe_stem = self._safe_export_stem(filename or page_id)
+        target_path = self._build_export_path(safe_stem, ".md")
+        target_path.write_text(markdown + "\n", encoding="utf-8")
+        attachment = self._build_attachment(target_path, mime_type="text/markdown")
+        return SkillOutput(
+            status="success",
+            result=str(target_path),
+            metadata={"format": "markdown", "page_id": page_id},
+            attachments=[attachment],
+        )
 
     async def notion_write_page(self, page_id: str, *, content: str, mode: str = "append") -> str:
         blocks = markdown_to_blocks(content)
@@ -469,7 +506,11 @@ class NotionSkill(BaseSkill):
             raise ValueError(
                 "Missing Notion config: config/secrets.yaml -> services.notion.integration_secret"
             )
-        return NotionClient(integration_secret=integration_secret)
+        proxy_url = str(notion_cfg.proxy_url).strip() if notion_cfg is not None else ""
+        return NotionClient(
+            integration_secret=integration_secret,
+            proxy_url=proxy_url or None,
+        )
 
     def _load_todo_database_id(self) -> str | None:
         try:
@@ -508,6 +549,25 @@ class NotionSkill(BaseSkill):
             return None
         payload = self._parse_json_object(text, field_name="filter")
         return payload or None
+
+    def _safe_export_stem(self, filename: str) -> str:
+        cleaned = sanitize_upload_filename(filename or "notion-export")
+        stem = Path(cleaned).stem.strip() or "notion-export"
+        return stem
+
+    def _build_export_path(self, stem: str, suffix: str) -> Path:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return (self._exports_dir / f"{stamp}_{stem}{suffix}").resolve(strict=False)
+
+    def _build_attachment(self, path: Path, *, mime_type: str) -> Attachment:
+        resolved = path.expanduser().resolve(strict=False)
+        return Attachment(
+            type="file",
+            url=str(resolved),
+            filename=resolved.name,
+            mime_type=mime_type,
+            size_bytes=resolved.stat().st_size,
+        )
 
     def _parse_optional_json_list(self, raw: Any) -> list[dict[str, Any]] | None:
         text = str(raw or "").strip()

@@ -207,6 +207,7 @@ class NotionServiceConfig(BaseModel):
     integration_secret: str
     default_workspace: str = ""
     todo_database_id: str = ""
+    proxy_url: str = ""
 
 
 class ServicesConfig(BaseModel):

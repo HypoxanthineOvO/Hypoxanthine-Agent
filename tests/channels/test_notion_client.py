@@ -59,3 +59,20 @@ def test_api_timeout(monkeypatch) -> None:
 
     with pytest.raises(NotionTimeoutError, match="超时"):
         asyncio.run(client.get_database("db-test"))
+
+
+def test_notion_client_passes_proxy_url_to_httpx(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+    real_async_client = httpx.AsyncClient
+
+    class RecordingAsyncClient(real_async_client):
+        def __init__(self, *args, **kwargs):
+            captured["proxy"] = kwargs.get("proxy")
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("hypo_agent.channels.notion.notion_client.httpx.AsyncClient", RecordingAsyncClient)
+
+    client = NotionClient("ntn_test_secret", proxy_url="http://127.0.0.1:7890")
+
+    assert captured["proxy"] == "http://127.0.0.1:7890"
+    asyncio.run(client.client.client.aclose())

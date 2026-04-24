@@ -197,6 +197,32 @@ def test_read_page_formats_title_properties_and_markdown() -> None:
     asyncio.run(_run())
 
 
+def test_export_page_markdown_returns_md_attachment(tmp_path: Path) -> None:
+    async def _run() -> None:
+        skill = NotionSkill(notion_client=FakeNotionClient(), exports_dir=tmp_path / "exports")
+
+        result = await skill.execute(
+            "notion_export_page_markdown",
+            {
+                "page_id": "11111111111111111111111111111111",
+                "filename": "dev-plan",
+            },
+        )
+
+        assert result.status == "success"
+        assert result.attachments
+        attachment = result.attachments[0]
+        assert attachment.type == "file"
+        assert attachment.mime_type == "text/markdown"
+        assert attachment.filename is not None
+        assert attachment.filename.endswith(".md")
+        exported = Path(str(result.result))
+        assert exported.exists() is True
+        assert exported.read_text(encoding="utf-8").startswith("📄 开发计划")
+
+    asyncio.run(_run())
+
+
 def test_write_page_append_calls_append_blocks() -> None:
     async def _run() -> None:
         client = FakeNotionClient()
@@ -748,3 +774,30 @@ services:
         assert "查询失败" in result["human_summary"]
 
     asyncio.run(_run())
+
+
+def test_build_client_from_config_passes_proxy_url(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    class RecordingNotionClient:
+        def __init__(self, integration_secret: str, **kwargs) -> None:
+            captured["integration_secret"] = integration_secret
+            captured["proxy_url"] = str(kwargs.get("proxy_url") or "")
+
+    secrets_path = tmp_path / "secrets.yaml"
+    secrets_path.write_text(
+        """
+providers: {}
+services:
+  notion:
+    integration_secret: "secret_xxx"
+    proxy_url: "http://127.0.0.1:7890"
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("hypo_agent.skills.notion_skill.NotionClient", RecordingNotionClient)
+
+    NotionSkill(secrets_path=secrets_path)
+
+    assert captured["integration_secret"] == "secret_xxx"
+    assert captured["proxy_url"] == "http://127.0.0.1:7890"

@@ -28,16 +28,20 @@ class NotionClient:
         timeout_ms: int = 30_000,
         api_timeout_seconds: float = 10.0,
         max_retries: int = 3,
+        proxy_url: str | None = None,
     ) -> None:
         self.integration_secret = integration_secret
         self.api_timeout_seconds = max(0.01, float(api_timeout_seconds))
         self.max_retries = max(1, int(max_retries))
+        normalized_proxy_url = str(proxy_url or "").strip() or None
+        transport_client = httpx.AsyncClient(proxy=normalized_proxy_url)
         self.client = AsyncClient(
             options={
                 "auth": integration_secret,
                 "timeout_ms": timeout_ms,
                 "notion_version": notion_version,
             },
+            client=transport_client,
         )
 
     async def get_page(self, page_id: str) -> dict[str, Any]:

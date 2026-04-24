@@ -376,6 +376,7 @@ services:
     integration_secret: secret_xxx
     default_workspace: Hypo
     todo_database_id: todo-db
+    proxy_url: http://127.0.0.1:7890
 """.strip(),
         encoding="utf-8",
     )
@@ -387,6 +388,7 @@ services:
     assert secrets.services.notion.integration_secret == "secret_xxx"
     assert secrets.services.notion.default_workspace == "Hypo"
     assert secrets.services.notion.todo_database_id == "todo-db"
+    assert secrets.services.notion.proxy_url == "http://127.0.0.1:7890"
 
 
 def test_load_secrets_config_accepts_weibo_and_zhihu_services(tmp_path: Path) -> None:
