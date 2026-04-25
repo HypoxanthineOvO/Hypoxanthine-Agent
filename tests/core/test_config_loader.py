@@ -220,10 +220,10 @@ def test_repo_models_config_routes_local_main_and_local_utility_models() -> None
     )
 
     assert runtime.default_model == "GenesiQWen35BA3B"
-    assert runtime.task_routing["chat"] == "DeepSeekV4"
-    assert runtime.task_routing["reasoning"] == "DeepSeekV4"
-    assert runtime.task_routing["lightweight"] == "EdenQwen"
-    assert runtime.task_routing["compression"] == "DeepSeekV4"
+    assert runtime.task_routing["chat"] == "GenesiQWen35BA3B"
+    assert runtime.task_routing["reasoning"] == "GenesiQWen35BA3B"
+    assert runtime.task_routing["lightweight"] == "GenesiQWen35BA3B"
+    assert runtime.task_routing["compression"] == "GenesiQWen35BA3B"
     assert runtime.task_routing["heartbeat"] == "GenesiQWen35BA3B"
     assert runtime.task_routing["vision"] == "GPT"
     assert runtime.models["DeepSeekV4"].litellm_model == "deepseek/deepseek-v4-flash"
