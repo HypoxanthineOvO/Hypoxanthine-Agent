@@ -194,6 +194,14 @@ class HypoCoderConfig(BaseModel):
     incremental_output_enabled: bool = False
 
 
+class CodexServiceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model: str = "gpt-5.4"
+    reasoning_effort: str = "high"
+    codex_bin: str = ""
+
+
 class ProbeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -213,6 +221,7 @@ class NotionServiceConfig(BaseModel):
 class ServicesConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    codex: CodexServiceConfig | None = None
     bilibili: BilibiliServiceConfig | None = None
     email: EmailServiceConfig | None = None
     feishu: FeishuServiceConfig | None = None

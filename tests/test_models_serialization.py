@@ -512,6 +512,27 @@ def test_secrets_config_accepts_services_hypo_coder() -> None:
     assert config.services.hypo_coder.webhook_url == "http://localhost:8765/api/coder/webhook"
 
 
+def test_secrets_config_accepts_services_codex() -> None:
+    config = SecretsConfig.model_validate(
+        {
+            "providers": {},
+            "services": {
+                "codex": {
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "high",
+                    "codex_bin": "/usr/local/bin/codex",
+                }
+            },
+        }
+    )
+
+    assert config.services is not None
+    assert config.services.codex is not None
+    assert config.services.codex.model == "gpt-5.4"
+    assert config.services.codex.reasoning_effort == "high"
+    assert config.services.codex.codex_bin == "/usr/local/bin/codex"
+
+
 def test_secrets_yaml_example_includes_qq_template() -> None:
     example_path = Path(__file__).resolve().parents[1] / "config" / "secrets.yaml.example"
     payload = yaml.safe_load(example_path.read_text(encoding="utf-8"))
@@ -552,6 +573,9 @@ def test_secrets_yaml_example_includes_qq_template() -> None:
     assert config.services.hypo_coder.base_url == "http://localhost:11451"
     assert config.services.hypo_coder.agent_token == "your-coder-agent-token-here"
     assert config.services.hypo_coder.webhook_secret == "your-webhook-secret"
+    assert config.services.codex is not None
+    assert config.services.codex.model == "gpt-5.4"
+    assert config.services.codex.reasoning_effort == "high"
 
 
 def test_security_config_whitelist_and_circuit_breaker():

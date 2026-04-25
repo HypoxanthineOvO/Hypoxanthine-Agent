@@ -306,6 +306,23 @@ wheels = [
 ]
 
 [[package]]
+name = "codex-app-server-sdk"
+version = "0.2.0"
+source = { editable = "../openai-codex/sdk/python" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "datamodel-code-generator", marker = "extra == 'dev'", specifier = "==0.31.2" },
+    { name = "pydantic", specifier = ">=2.12" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11" },
+]
+provides-extras = ["dev"]
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -787,6 +804,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "apscheduler" },
+    { name = "codex-app-server-sdk" },
     { name = "cr-mb-weather-cli" },
     { name = "cryptography" },
     { name = "fastapi" },
@@ -821,6 +839,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20.0,<1.0.0" },
     { name = "apscheduler", specifier = ">=3.10.0,<4.0.0" },
+    { name = "codex-app-server-sdk", editable = "../openai-codex/sdk/python" },
     { name = "cr-mb-weather-cli", specifier = ">=1.0.0" },
     { name = "cryptography", specifier = ">=44.0.0,<46.0.0" },
     { name = "fastapi", specifier = ">=0.115.0,<1.0.0" },
