@@ -231,6 +231,15 @@ class ModelRouter:
                     tool_calls,
                     reverse_tool_name_map,
                 )
+                reasoning_content = self._extract_reasoning_content(response)
+                assistant_message: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": text,
+                }
+                if tool_calls:
+                    assistant_message["tool_calls"] = tool_calls
+                if reasoning_content:
+                    assistant_message["reasoning_content"] = reasoning_content
                 usage = self._extract_usage(response)
                 self.logger.info(
                     "model_call_success",
@@ -255,6 +264,7 @@ class ModelRouter:
                 return {
                     "text": text,
                     "tool_calls": tool_calls,
+                    "assistant_message": assistant_message,
                     "resolved_model": candidate,
                     "model_id": cfg.litellm_model,
                 }
@@ -764,6 +774,28 @@ class ModelRouter:
         if isinstance(content, str):
             return self._extract_text_embedded_tool_calls(content)
         return normalized
+
+    def _extract_reasoning_content(self, payload: Any) -> str:
+        choices = self._read_field(payload, "choices") or []
+        if not choices:
+            return ""
+
+        first_choice = choices[0]
+        message = self._read_field(first_choice, "message")
+        if message is None:
+            return ""
+
+        reasoning = self._read_field(message, "reasoning_content")
+        if isinstance(reasoning, str) and reasoning:
+            return reasoning
+
+        provider_fields = self._read_field(message, "provider_specific_fields")
+        if isinstance(provider_fields, dict):
+            for key in ("reasoning_content", "reasoning"):
+                value = provider_fields.get(key)
+                if isinstance(value, str) and value:
+                    return value
+        return ""
 
     def _extract_embeddings(self, payload: Any) -> list[list[float]]:
         data = self._read_field(payload, "data") or []

@@ -903,6 +903,83 @@ def test_model_router_call_with_tools_extracts_tool_calls(
     assert payload["tool_calls"][0]["function"]["name"] == "exec_command"
 
 
+def test_model_router_call_with_tools_preserves_reasoning_content() -> None:
+    runtime = RuntimeModelConfig.model_validate(
+        {
+            "default_model": "DeepSeekV4",
+            "task_routing": {"reasoning": "DeepSeekV4"},
+            "models": {
+                "DeepSeekV4": {
+                    "provider": "Deepseek",
+                    "litellm_model": "deepseek/deepseek-v4-flash",
+                    "fallback": None,
+                    "api_base": "https://api.deepseek.com",
+                    "api_key": "sk-deepseek",
+                    "supports_tool_calling": True,
+                }
+            },
+        }
+    )
+
+    async def fake_acompletion(**kwargs):
+        del kwargs
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": "",
+                        "reasoning_content": "Need to call the tool first.",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_command",
+                                    "arguments": "{\"command\": \"echo hi\"}",
+                                },
+                            }
+                        ],
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    router = ModelRouter(runtime, acompletion_fn=fake_acompletion)
+    payload = asyncio.run(
+        router.call_with_tools(
+            "DeepSeekV4",
+            [{"role": "user", "content": "hi"}],
+            task_type="reasoning",
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "exec_command",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+        )
+    )
+
+    assert payload["assistant_message"] == {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "Need to call the tool first.",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "exec_command",
+                    "arguments": "{\"command\": \"echo hi\"}",
+                },
+            }
+        ],
+    }
+
+
 def test_model_router_call_with_tools_extracts_legacy_function_call(
     runtime_config: RuntimeModelConfig,
 ) -> None:

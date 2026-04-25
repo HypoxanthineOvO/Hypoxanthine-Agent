@@ -562,6 +562,84 @@ def test_pipeline_invokes_tools_with_direct_skill_name() -> None:
     assert skills.calls == [("echo", {"text": "hello"}, "s1", "direct")]
 
 
+def test_pipeline_preserves_reasoning_content_for_follow_up_tool_rounds() -> None:
+    memory = StubSessionMemory()
+    captured_messages: list[list[dict[str, object]]] = []
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.called = 0
+
+        async def call(self, model_name, messages, **kwargs):
+            del model_name, messages, kwargs
+            return "unused"
+
+        async def call_with_tools(
+            self,
+            model_name,
+            messages,
+            *,
+            tools=None,
+            session_id=None,
+            **kwargs,
+        ):
+            del model_name, tools, session_id, kwargs
+            self.called += 1
+            captured_messages.append(messages)
+            if self.called == 1:
+                tool_calls = [
+                    {
+                        "id": "call_echo",
+                        "function": {
+                            "name": "echo",
+                            "arguments": "{\"text\":\"hello\"}",
+                        },
+                    }
+                ]
+                return {
+                    "text": "",
+                    "tool_calls": tool_calls,
+                    "assistant_message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": "Need to call echo before answering.",
+                        "tool_calls": tool_calls,
+                    },
+                }
+            assistant_messages = [
+                message for message in messages if message.get("role") == "assistant"
+            ]
+            assert assistant_messages[-1]["reasoning_content"] == "Need to call echo before answering."
+            return {"text": "done", "tool_calls": []}
+
+    class RecordingSkillManager:
+        def get_tools_schema(self):
+            return [{"type": "function", "function": {"name": "echo"}}]
+
+        async def invoke(self, tool_name, params, *, session_id=None, skill_name=None):
+            del session_id, skill_name
+            assert tool_name == "echo"
+            return SkillOutput(status="success", result={"echo": params["text"]})
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="DeepSeekV4",
+        session_memory=memory,
+        history_window=20,
+        skill_manager=RecordingSkillManager(),
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="say hello", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+
+    assert any(event["type"] == "assistant_chunk" and event.get("text") == "done" for event in events)
+    assert any(event["type"] == "assistant_done" for event in events)
+    assert len(captured_messages) == 2
+
+
 def test_pipeline_injects_skill_instructions_and_exec_profile() -> None:
     memory = StubSessionMemory()
 

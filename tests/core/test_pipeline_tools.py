@@ -1479,8 +1479,8 @@ def test_pipeline_retries_retryable_tool_once_after_failure() -> None:
 
     assert events[-1]["type"] == "assistant_done"
     assert skills.calls == [
-        ("web_search", {"query": "hypo agent"}),
-        ("web_search", {"query": "hypo agent"}),
+        ("search_web", {"query": "hypo agent"}),
+        ("search_web", {"query": "hypo agent"}),
     ]
 
 
@@ -1945,6 +1945,219 @@ def test_pipeline_falls_back_to_tool_human_summary_when_model_returns_empty_afte
     assert memory.appended[-1].text
 
 
+def test_pipeline_prefers_successful_tool_summary_over_false_access_denied_reply() -> None:
+    memory = StubSessionMemory()
+
+    class StubSkillManager:
+        def get_tools_schema(self) -> list[dict]:
+            return [{"type": "function", "function": {"name": "read_file"}}]
+
+        async def invoke(
+            self,
+            tool_name: str,
+            params: dict,
+            *,
+            session_id: str | None = None,
+            skill_name: str | None = None,
+        ) -> SkillOutput:
+            del params, session_id, skill_name
+            assert tool_name == "read_file"
+            return SkillOutput(
+                status="success",
+                result={
+                    "path": "/tmp/a.txt",
+                    "human_summary": "文件可访问，内容如下：hello world",
+                },
+            )
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": json.dumps({"path": "/tmp/a.txt"}, ensure_ascii=False),
+                            },
+                        }
+                    ],
+                }
+            return {"text": "抱歉，我无法访问该文件。", "tool_calls": []}
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            raise AssertionError("stream() should not be called when decision text exists")
+            yield ""  # pragma: no cover
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=StubSkillManager(),
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="读一下 /tmp/a.txt", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+    combined = "".join(event.get("text", "") for event in events if event.get("type") == "assistant_chunk")
+
+    assert "文件可访问，内容如下：hello world" in combined
+    assert "无法访问" not in combined
+    assert memory.appended[-1].text == "文件可访问，内容如下：hello world"
+
+
+def test_pipeline_prefers_successful_tool_summary_over_false_access_denied_stream_reply() -> None:
+    memory = StubSessionMemory()
+
+    class StubSkillManager:
+        def get_tools_schema(self) -> list[dict]:
+            return [{"type": "function", "function": {"name": "read_file"}}]
+
+        async def invoke(
+            self,
+            tool_name: str,
+            params: dict,
+            *,
+            session_id: str | None = None,
+            skill_name: str | None = None,
+        ) -> SkillOutput:
+            del params, session_id, skill_name
+            assert tool_name == "read_file"
+            return SkillOutput(
+                status="success",
+                result={
+                    "path": "/tmp/a.txt",
+                    "human_summary": "文件可访问，内容如下：hello world",
+                },
+            )
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": json.dumps({"path": "/tmp/a.txt"}, ensure_ascii=False),
+                            },
+                        }
+                    ],
+                }
+            return {"text": "", "tool_calls": []}
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            del model_name, messages, session_id, tools
+            yield "抱歉，"
+            yield "我无法访问该文件。"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=StubSkillManager(),
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="读一下 /tmp/a.txt", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+    combined = "".join(event.get("text", "") for event in events if event.get("type") == "assistant_chunk")
+
+    assert combined == "文件可访问，内容如下：hello world"
+    assert memory.appended[-1].text == "文件可访问，内容如下：hello world"
+
+
+def test_pipeline_prefers_successful_string_tool_result_over_false_access_denied_reply() -> None:
+    memory = StubSessionMemory()
+
+    class StubSkillManager:
+        def get_tools_schema(self) -> list[dict]:
+            return [{"type": "function", "function": {"name": "read_file"}}]
+
+        async def invoke(
+            self,
+            tool_name: str,
+            params: dict,
+            *,
+            session_id: str | None = None,
+            skill_name: str | None = None,
+        ) -> SkillOutput:
+            del params, session_id, skill_name
+            assert tool_name == "read_file"
+            return SkillOutput(
+                status="success",
+                result="alpha\nbeta",
+                metadata={
+                    "path": "/tmp/a.txt",
+                    "format": "text",
+                },
+            )
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": json.dumps({"path": "/tmp/a.txt"}, ensure_ascii=False),
+                            },
+                        }
+                    ],
+                }
+            return {"text": "抱歉，我无法访问该文件。", "tool_calls": []}
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            raise AssertionError("stream() should not be called when decision text exists")
+            yield ""  # pragma: no cover
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=StubSkillManager(),
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="读一下 /tmp/a.txt", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+    combined = "".join(event.get("text", "") for event in events if event.get("type") == "assistant_chunk")
+
+    assert combined == "alpha\nbeta"
+    assert memory.appended[-1].text == "alpha\nbeta"
+
+
 def test_pipeline_stream_shortcuts_notion_todo_request_without_llm() -> None:
     memory = StubSessionMemory()
 
@@ -2235,7 +2448,14 @@ class ReminderRoutingRouter:
         yield ""  # pragma: no cover
 
 
-@pytest.mark.parametrize("inbound_text", ["今日计划", "/计划"])
+@pytest.mark.parametrize(
+    "inbound_text",
+    [
+        "今日计划",
+        "/计划",
+        "看一下今天的 TODO，今天应该有更新了",
+    ],
+)
 def test_pipeline_stream_shortcuts_explicit_plan_queries_without_llm(inbound_text: str) -> None:
     memory = StubSessionMemory()
     skill_manager = ReminderRoutingSkillManager()

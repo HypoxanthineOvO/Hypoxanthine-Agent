@@ -212,6 +212,15 @@ LEGACY_TOOL_NAME_REMAP = {
     "web_search": "search_web",
 }
 
+_ACCESS_DENIED_REPLY_PATTERNS = (
+    "无法访问",
+    "无法读取",
+    "没有权限",
+    "access denied",
+    "cannot access",
+    "permission denied",
+)
+
 
 def _error_fields(exc: Exception) -> dict[str, str]:
     message = str(exc).strip()
@@ -1109,6 +1118,32 @@ class ChatPipeline:
             kwargs["event_emitter"] = resolved_event_emitter
         return await self.router.call_with_tools(model_name, messages, **kwargs)
 
+    def _assistant_message_from_decision(
+        self,
+        decision: dict[str, Any],
+        *,
+        tool_calls: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        raw_assistant_message = decision.get("assistant_message")
+        if isinstance(raw_assistant_message, dict):
+            assistant_message = dict(raw_assistant_message)
+            assistant_message["role"] = "assistant"
+            assistant_message["content"] = str(assistant_message.get("content") or "")
+            if tool_calls:
+                assistant_message["tool_calls"] = tool_calls
+            return assistant_message
+
+        assistant_message: dict[str, Any] = {
+            "role": "assistant",
+            "content": str(decision.get("text") or ""),
+        }
+        if tool_calls:
+            assistant_message["tool_calls"] = tool_calls
+        reasoning_content = decision.get("reasoning_content")
+        if isinstance(reasoning_content, str) and reasoning_content:
+            assistant_message["reasoning_content"] = reasoning_content
+        return assistant_message
+
     async def _router_stream(
         self,
         model_name: str,
@@ -1729,11 +1764,10 @@ class ChatPipeline:
 
                         tool_calls = [missing_tool_call]
                         react_messages.append(
-                            {
-                                "role": "assistant",
-                                "content": decision.get("text", ""),
-                                "tool_calls": tool_calls,
-                            }
+                            self._assistant_message_from_decision(
+                                decision,
+                                tool_calls=tool_calls,
+                            )
                         )
                         tool_name = missing_tool_name
                         tool_call_id = str(missing_tool_call.get("id") or "")
@@ -1804,6 +1838,11 @@ class ChatPipeline:
                         reached_round_limit = False
                         text = str(decision.get("text") or "")
                         if text:
+                            text = self._sanitize_false_access_denied_reply(
+                                text=text,
+                                fallback_text=last_tool_fallback_text,
+                                session_id=inbound.session_id,
+                            )
                             full_text = text
                             yield await self._format_event(
                                 event_type="assistant_chunk",
@@ -1811,6 +1850,11 @@ class ChatPipeline:
                                 session_id=inbound.session_id,
                             )
                         else:
+                            stream_chunks: list[str] | None = (
+                                []
+                                if str(last_tool_fallback_text or "").strip()
+                                else None
+                            )
                             async for chunk in self._router_stream(
                                 model_name,
                                 react_messages,
@@ -1832,22 +1876,37 @@ class ChatPipeline:
                                     break
                                 if not chunk:
                                     continue
+                                if stream_chunks is not None:
+                                    stream_chunks.append(chunk)
+                                    continue
                                 full_text += chunk
                                 yield await self._format_event(
                                     event_type="assistant_chunk",
                                     response=RichResponse(text=chunk),
                                     session_id=inbound.session_id,
                                 )
+                            if stream_chunks is not None and not killed:
+                                streamed_text = "".join(stream_chunks)
+                                full_text = self._sanitize_false_access_denied_reply(
+                                    text=streamed_text,
+                                    fallback_text=last_tool_fallback_text,
+                                    session_id=inbound.session_id,
+                                )
+                                if full_text:
+                                    yield await self._format_event(
+                                        event_type="assistant_chunk",
+                                        response=RichResponse(text=full_text),
+                                        session_id=inbound.session_id,
+                                    )
                             if killed:
                                 break
                         break
 
                     react_messages.append(
-                        {
-                            "role": "assistant",
-                            "content": decision.get("text", ""),
-                            "tool_calls": tool_calls,
-                        }
+                        self._assistant_message_from_decision(
+                            decision,
+                            tool_calls=tool_calls,
+                        )
                     )
                     for tool_index, tool_call in enumerate(tool_calls, start=1):
                         tool_name = self._extract_tool_name(tool_call)
@@ -2925,10 +2984,41 @@ class ChatPipeline:
             summary = str(result.get("summary") or "").strip()
             if summary:
                 return summary
+        if output.status == "success" and isinstance(result, str):
+            content = result.strip()
+            if content:
+                return content
         error_text = str(output.error_info or "").strip()
         if error_text:
             return error_text
         return ""
+
+    def _sanitize_false_access_denied_reply(
+        self,
+        *,
+        text: str,
+        fallback_text: str | None,
+        session_id: str | None,
+    ) -> str:
+        normalized_text = str(text or "").strip()
+        normalized_fallback = str(fallback_text or "").strip()
+        if not normalized_text or not normalized_fallback:
+            return text
+        if not self._contains_access_denied_reply(normalized_text):
+            return text
+        if self._contains_access_denied_reply(normalized_fallback):
+            return text
+        logger.warning(
+            "pipeline.false_access_denied_reply_overridden",
+            session_id=session_id,
+            reply=normalized_text,
+            fallback=normalized_fallback,
+        )
+        return normalized_fallback
+
+    def _contains_access_denied_reply(self, text: str) -> bool:
+        lowered = str(text or "").casefold()
+        return any(pattern in lowered for pattern in _ACCESS_DENIED_REPLY_PATTERNS)
 
     def _kill_switch_active(self) -> bool:
         return bool(
@@ -3046,7 +3136,8 @@ class ChatPipeline:
             return True
         if normalized.casefold() == "/todo":
             return True
-        return self._compact_notion_todo_shortcut_text(normalized) in {
+        compact = self._compact_notion_todo_shortcut_text(normalized)
+        if compact in {
             "今日计划",
             "列出计划",
             "查看计划通",
@@ -3060,7 +3151,15 @@ class ChatPipeline:
             "查看今天的计划通事项",
             "查看一下今天的计划通事项",
             "今日计划通事项",
-        }
+        }:
+            return True
+        compact_casefold = compact.casefold()
+        mentions_todo = any(token in compact for token in ("计划通", "待办")) or "todo" in compact_casefold
+        if not mentions_todo:
+            return False
+        has_view_intent = any(token in compact for token in ("看", "查看", "看看", "列出", "读", "读取", "显示"))
+        has_day_hint = any(token in compact for token in ("今日", "今天"))
+        return has_view_intent or has_day_hint
 
     def _has_notion_todo_mutation_intent(self, text: str) -> bool:
         normalized = self._compact_notion_todo_shortcut_text(text)
