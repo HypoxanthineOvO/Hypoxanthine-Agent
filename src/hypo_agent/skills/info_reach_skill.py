@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -18,6 +19,7 @@ from hypo_agent.core.config_loader import load_secrets_config
 from hypo_agent.exceptions import ExternalServiceError
 from hypo_agent.models import SkillOutput
 from hypo_agent.skills.base import BaseSkill
+from hypo_agent.skills.info_payload_utils import coerce_text, first_text_from_paths
 from hypo_agent.utils.timeutil import localize_iso
 
 _LOG = logging.getLogger(__name__)
@@ -130,12 +132,16 @@ class InfoReachSkill(BaseSkill):
         model_router: Any | None = None,
         permission_manager: Any | None = None,
         output_root: Any | None = None,
+        research_skill: Any | None = None,
     ) -> None:
         self.message_queue = message_queue
         self.default_session_id = default_session_id
         self.now_fn = now_fn or (lambda: datetime.now(UTC))
         self._db_path = Path(db_path) if db_path else None
         self.secrets_path = Path(secrets_path)
+        self.model_router = model_router
+        self.research_skill = research_skill
+        self._research_skill_load_attempted = False
         resolved_base_url = self._resolve_base_url(base_url)
         self._client = HypoInfoClient(resolved_base_url, transport=transport)
         self._subscription_table_ready = False
@@ -330,13 +336,17 @@ class InfoReachSkill(BaseSkill):
             return "暂无相关文章。"
         lines: list[str] = []
         for art in articles:
-            lines.append(f"【{art.get('title', '')}】")
-            if art.get("summary"):
-                lines.append(f"  摘要：{art['summary']}")
-            lines.append(f"  重要性：{art.get('importance', '')}")
-            lines.append(f"  来源：{art.get('source_name', '')}")
-            if art.get("url"):
-                lines.append(f"  链接：{art['url']}")
+            normalized = self._normalize_article(art)
+            title = normalized["title"] or "未命名文章"
+            lines.append(f"【{title}】")
+            if normalized["summary"]:
+                lines.append(f"  摘要：{normalized['summary']}")
+            if normalized["importance"]:
+                lines.append(f"  重要性：{normalized['importance']}")
+            if normalized["source"]:
+                lines.append(f"  来源：{normalized['source']}")
+            if normalized["url"]:
+                lines.append(f"  链接：{normalized['url']}")
         return "\n".join(lines)
 
     async def info_summary(self, *, time_range: str = "today") -> str:
@@ -545,22 +555,33 @@ class InfoReachSkill(BaseSkill):
 
     async def _build_scheduled_summary_text(self, *, time_range: str) -> str:
         digest_payload = await self._client.digest(time_range=time_range)
+        digest_articles = self._extract_digest_articles(digest_payload)
         digest_text = self._format_digest_payload(digest_payload)
         if digest_text:
-            return digest_text
+            return self._prepend_brief(
+                await self._build_one_line_brief(digest_articles),
+                digest_text,
+            )
 
         summary_payload = await self._client.summary(time_range=time_range)
+        summary_articles = self._extract_summary_articles(summary_payload)
         summary_text = self._format_summary_payload(summary_payload)
         if summary_text:
-            return summary_text
+            return self._prepend_brief(
+                await self._build_one_line_brief(summary_articles),
+                summary_text,
+            )
 
         query_payload = await self._client.query(time_range=time_range, limit=20)
         articles = query_payload.get("articles") if isinstance(query_payload, dict) else None
         normalized_articles = [item for item in articles if isinstance(item, dict)] if isinstance(articles, list) else []
         if normalized_articles:
-            return self._format_query_fallback_articles(
-                normalized_articles,
-                total=int(query_payload.get("total") or len(normalized_articles)),
+            return self._prepend_brief(
+                await self._build_one_line_brief(normalized_articles),
+                self._format_query_fallback_articles(
+                    normalized_articles,
+                    total=int(query_payload.get("total") or len(normalized_articles)),
+                ),
             )
         return "📰 今日暂无新资讯。"
 
@@ -628,27 +649,14 @@ class InfoReachSkill(BaseSkill):
             text = item.strip()
             return [f"  - {text}"] if text else []
         if not isinstance(item, dict):
-            text = str(item).strip()
+            text = coerce_text(item)
             return [f"  - {text}"] if text else []
 
-        title = self._first_non_empty(
-            item.get("title"),
-            item.get("headline"),
-            item.get("name"),
-        )
-        summary = self._first_non_empty(
-            item.get("summary"),
-            item.get("digest"),
-            item.get("description"),
-        )
-        source = self._first_non_empty(
-            item.get("source_name"),
-            item.get("source"),
-        )
-        url = self._first_non_empty(
-            item.get("url"),
-            item.get("link"),
-        )
+        normalized = self._normalize_article(item)
+        title = normalized["title"]
+        summary = normalized["summary"]
+        source = normalized["source"]
+        url = normalized["url"]
 
         lines: list[str] = []
         if title:
@@ -662,8 +670,8 @@ class InfoReachSkill(BaseSkill):
         if lines:
             return lines
 
-        fallback = json.dumps(item, ensure_ascii=False, sort_keys=True)
-        return [f"  - {fallback}"]
+        fallback = coerce_text(item)
+        return [f"  - {fallback}"] if fallback else []
 
     def _format_digest_payload(self, data: dict[str, Any]) -> str:
         lines: list[str] = []
@@ -721,15 +729,289 @@ class InfoReachSkill(BaseSkill):
     def _format_query_fallback_articles(self, articles: list[dict[str, Any]], *, total: int) -> str:
         lines = [f"📰 今日资讯（共 {max(total, len(articles))} 条）："]
         for article in articles[:5]:
-            title = self._first_non_empty(article.get("title"), article.get("headline"), "未命名文章")
-            summary = self._first_non_empty(article.get("summary"), article.get("digest"), article.get("description"))
-            url = self._first_non_empty(article.get("url"), article.get("link"))
+            normalized = self._normalize_article(article)
+            title = normalized["title"] or "未命名文章"
+            summary = normalized["summary"]
+            url = normalized["url"]
             lines.append(f"- {title}")
             if summary:
                 lines.append(f"  摘要：{summary}")
             if url:
                 lines.append(f"  链接：{url}")
         return "\n".join(lines).strip()
+
+    def _normalize_article(self, item: dict[str, Any]) -> dict[str, str]:
+        return {
+            "title": first_text_from_paths(
+                item,
+                ("title",),
+                ("headline",),
+                ("name",),
+                ("article", "title"),
+                ("article", "headline"),
+                ("item", "title"),
+            ),
+            "summary": first_text_from_paths(
+                item,
+                ("summary",),
+                ("digest",),
+                ("description",),
+                ("excerpt",),
+                ("content",),
+                ("article", "summary"),
+                ("article", "digest"),
+                ("article", "description"),
+                ("article", "excerpt"),
+            ),
+            "source": first_text_from_paths(
+                item,
+                ("source_name",),
+                ("source",),
+                ("source", "name"),
+                ("source", "title"),
+                ("provider",),
+                ("publisher",),
+                ("origin",),
+                ("article", "source_name"),
+                ("article", "source"),
+            ),
+            "url": first_text_from_paths(
+                item,
+                ("url",),
+                ("link",),
+                ("href",),
+                ("article", "url"),
+                ("article", "link"),
+                ("article", "href"),
+            ),
+            "category": first_text_from_paths(
+                item,
+                ("category",),
+                ("category_l1",),
+                ("category_l2",),
+                ("section",),
+                ("section", "name"),
+                ("article", "category"),
+            ),
+            "importance": first_text_from_paths(
+                item,
+                ("importance",),
+                ("score",),
+                ("rating",),
+                ("hot",),
+            ),
+        }
+
+    def _extract_digest_articles(self, payload: dict[str, Any]) -> list[dict[str, str]]:
+        articles: list[dict[str, str]] = []
+        for section in payload.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            section_name = self._first_non_empty(section.get("category"))
+            for raw_item in section.get("items") or []:
+                if isinstance(raw_item, str):
+                    title = raw_item.strip()
+                    if title:
+                        articles.append({"title": title, "summary": "", "source": "", "url": "", "category": section_name, "importance": ""})
+                    continue
+                if not isinstance(raw_item, dict):
+                    continue
+                normalized = self._normalize_article(raw_item)
+                if section_name and not normalized["category"]:
+                    normalized["category"] = section_name
+                if any(normalized.values()):
+                    articles.append(normalized)
+        return articles
+
+    def _extract_summary_articles(self, payload: dict[str, Any]) -> list[dict[str, str]]:
+        articles: list[dict[str, str]] = []
+        for section in payload.get("categories") or []:
+            if not isinstance(section, dict):
+                continue
+            section_name = self._first_non_empty(
+                section.get("category"),
+                section.get("category_l1"),
+                section.get("name"),
+            )
+            raw_items = section.get("top_articles") or section.get("items") or []
+            for raw_item in raw_items[:5] if isinstance(raw_items, list) else []:
+                if isinstance(raw_item, str):
+                    title = raw_item.strip()
+                    if title:
+                        articles.append({"title": title, "summary": "", "source": "", "url": "", "category": section_name, "importance": ""})
+                    continue
+                if not isinstance(raw_item, dict):
+                    continue
+                normalized = self._normalize_article(raw_item)
+                if section_name and not normalized["category"]:
+                    normalized["category"] = section_name
+                if any(normalized.values()):
+                    articles.append(normalized)
+        return articles
+
+    def _prepend_brief(self, brief: str, body: str) -> str:
+        cleaned_brief = str(brief or "").strip()
+        cleaned_body = str(body or "").strip()
+        if not cleaned_brief:
+            return cleaned_body
+        if not cleaned_body:
+            return cleaned_brief
+        if cleaned_body.startswith(cleaned_brief):
+            return cleaned_body
+        return f"{cleaned_brief}\n\n{cleaned_body}"
+
+    async def _build_one_line_brief(self, articles: list[dict[str, Any]]) -> str:
+        normalized_articles = [
+            self._normalize_article(item)
+            for item in articles[:3]
+            if isinstance(item, dict)
+        ]
+        normalized_articles = [item for item in normalized_articles if item.get("title") or item.get("summary")]
+        if not normalized_articles:
+            return ""
+
+        research_notes = await self._collect_research_notes(normalized_articles)
+        generated = await self._generate_brief_with_model(normalized_articles, research_notes)
+        if generated:
+            return generated
+        return self._fallback_brief(normalized_articles, research_notes)
+
+    async def _generate_brief_with_model(
+        self,
+        articles: list[dict[str, str]],
+        research_notes: list[str],
+    ) -> str:
+        if self.model_router is None or not hasattr(self.model_router, "call"):
+            return ""
+        messages = [
+            {
+                "role": "user",
+                "content": self._build_brief_prompt(articles, research_notes),
+            }
+        ]
+        model_name = "lightweight"
+        if hasattr(self.model_router, "get_model_for_task"):
+            try:
+                model_name = str(self.model_router.get_model_for_task("lightweight") or "lightweight")
+            except (OSError, RuntimeError, TypeError, ValueError):
+                model_name = "lightweight"
+        try:
+            result = await asyncio.wait_for(
+                self.model_router.call(
+                    model_name,
+                    messages,
+                    session_id=self.default_session_id,
+                ),
+                timeout=15,
+            )
+        except (TimeoutError, asyncio.TimeoutError, OSError, RuntimeError, TypeError, ValueError):
+            return ""
+        return self._clean_brief_text(result)
+
+    def _build_brief_prompt(
+        self,
+        articles: list[dict[str, str]],
+        research_notes: list[str],
+    ) -> str:
+        lines = [
+            "请根据下面资讯生成一句中文简报。",
+            "要求：",
+            "- 只输出一句自然语言，不要项目符号，不要 JSON，不要换行。",
+            "- 优先概括今天最值得关注的共同信号，而不是机械罗列标题。",
+            "- 长度控制在 35~70 个中文字符。",
+            "",
+            "资讯：",
+        ]
+        for index, article in enumerate(articles, start=1):
+            lines.append(
+                f"{index}. 标题：{article.get('title') or '未命名'}；"
+                f"摘要：{article.get('summary') or '无'}；"
+                f"来源：{article.get('source') or '未知来源'}"
+            )
+        if research_notes:
+            lines.extend(["", "补充线索："])
+            for note in research_notes:
+                lines.append(f"- {note}")
+        return "\n".join(lines)
+
+    def _clean_brief_text(self, value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        text = text.splitlines()[0].strip().lstrip("- ").strip("“”\"")
+        if not text:
+            return ""
+        if text.startswith("{") or text.startswith("[") or "\":" in text:
+            return ""
+        if text[-1] not in "。！？":
+            text = f"{text}。"
+        return text
+
+    async def _collect_research_notes(self, articles: list[dict[str, str]]) -> list[str]:
+        skill = self._get_research_skill()
+        if skill is None:
+            return []
+        notes: list[str] = []
+        for article in articles[:2]:
+            query = " ".join(
+                part
+                for part in (article.get("title", "").strip(), article.get("source", "").strip())
+                if part
+            ).strip()
+            if not query:
+                continue
+            result = await self._search_web(skill, query=query)
+            snippets = result.get("results") if isinstance(result, dict) else None
+            if not isinstance(snippets, list):
+                continue
+            for item in snippets[:2]:
+                if not isinstance(item, dict):
+                    continue
+                snippet = first_text_from_paths(item, ("content",), ("summary",), ("title",))
+                if snippet:
+                    notes.append(snippet)
+        return notes[:4]
+
+    async def _search_web(self, skill: Any, *, query: str) -> dict[str, Any]:
+        try:
+            if callable(getattr(skill, "search_web", None)):
+                return await skill.search_web(query, max_results=2)
+            if callable(getattr(skill, "execute", None)):
+                result = await skill.execute("search_web", {"query": query, "max_results": 2})
+                if getattr(result, "status", "") == "success":
+                    return result.result if isinstance(result.result, dict) else {}
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return {}
+        return {}
+
+    def _get_research_skill(self) -> Any | None:
+        if self.research_skill is not None:
+            return self.research_skill
+        if self._research_skill_load_attempted:
+            return None
+        self._research_skill_load_attempted = True
+        try:
+            from hypo_agent.skills.agent_search_skill import AgentSearchSkill
+            self.research_skill = AgentSearchSkill(secrets_path=self.secrets_path)
+        except Exception:
+            self.research_skill = None
+        return self.research_skill
+
+    def _fallback_brief(self, articles: list[dict[str, str]], research_notes: list[str]) -> str:
+        titles = [item.get("title", "").strip() for item in articles if item.get("title")]
+        headline = "、".join(titles[:2]) or "今日资讯"
+        signal = ""
+        for candidate in [
+            *[item.get("summary", "").strip() for item in articles],
+            *research_notes,
+        ]:
+            if candidate:
+                signal = candidate
+                break
+        signal = signal[:36].rstrip("，。； ")
+        if signal:
+            return f"今日简报：{headline}，焦点集中在{signal}。"
+        return f"今日简报：{headline}值得关注。"
 
     def _first_non_empty(self, *values: Any) -> str:
         for value in values:

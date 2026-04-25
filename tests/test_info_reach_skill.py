@@ -33,6 +33,8 @@ def _build_skill(
     transport: httpx.MockTransport | None = None,
     heartbeat_service: DummyHeartbeatService | None = None,
     db_path: Path | None = None,
+    model_router: Any | None = None,
+    research_skill: Any | None = None,
 ) -> InfoReachSkill:
     queue = DummyQueue()
     skill = InfoReachSkill(
@@ -41,8 +43,62 @@ def _build_skill(
         db_path=db_path or (tmp_path / "hypo.db"),
         base_url="http://localhost:8200",
         transport=transport,
+        model_router=model_router,
+        research_skill=research_skill,
     )
     return skill
+
+
+class StubModelRouter:
+    def __init__(self, response: str) -> None:
+        self.response = response
+        self.calls: list[dict[str, Any]] = []
+
+    def get_model_for_task(self, task_type: str) -> str:
+        return f"model:{task_type}"
+
+    async def call(
+        self,
+        model_name: str,
+        messages: list[dict[str, Any]],
+        *,
+        session_id: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        timeout_seconds: float | None = None,
+        task_type: str | None = None,
+        event_emitter: Any | None = None,
+    ) -> str:
+        del tools, timeout_seconds, task_type, event_emitter
+        self.calls.append(
+            {
+                "model_name": model_name,
+                "messages": messages,
+                "session_id": session_id,
+            }
+        )
+        return self.response
+
+
+class StubResearchSkill:
+    def __init__(self) -> None:
+        self.queries: list[tuple[str, int]] = []
+
+    async def search_web(self, query: str, max_results: int = 5) -> dict[str, Any]:
+        self.queries.append((query, max_results))
+        return {
+            "results": [
+                {
+                    "title": "外部跟进 1",
+                    "url": "https://example.com/research-1",
+                    "content": "市场关注推理吞吐与单位成本改善。",
+                },
+                {
+                    "title": "外部跟进 2",
+                    "url": "https://example.com/research-2",
+                    "content": "产业链判断这会加速企业级 Agent 落地。",
+                },
+            ]
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +196,45 @@ def test_info_summary_formats_object_items_without_dumping_json(tmp_path: Path) 
     assert "OpenAI" in text
     assert "https://example.com/query" in text
     assert "{'title':" not in text
+
+
+def test_info_summary_formats_nested_article_fields_without_dumping_json(tmp_path: Path) -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            json={
+                "highlight": "今天重点围绕推理与 Agent。",
+                "sections": [
+                    {
+                        "category": "AI",
+                        "items": [
+                            {
+                                "article": {
+                                    "title": "OpenAI 推理栈更新",
+                                    "url": "https://example.com/nested",
+                                },
+                                "summary": {
+                                    "brief": "吞吐提升，单位成本继续下降。",
+                                },
+                                "source": {"name": "OpenAI Blog"},
+                            }
+                        ],
+                    }
+                ],
+                "stats": {"total_articles": 1},
+            },
+        )
+    )
+    skill = _build_skill(tmp_path=tmp_path, transport=transport)
+
+    text = asyncio.run(skill.info_summary(time_range="today"))
+
+    assert "OpenAI 推理栈更新" in text
+    assert "吞吐提升，单位成本继续下降。" in text
+    assert "OpenAI Blog" in text
+    assert "https://example.com/nested" in text
+    assert '"article"' not in text
+    assert "{'article':" not in text
 
 
 @pytest.mark.parametrize("exc", [httpx.ConnectError("boom"), httpx.ReadTimeout("slow")])
@@ -339,6 +434,57 @@ def test_info_reach_execute_returns_rendered_text_for_query_and_summary(tmp_path
     assert isinstance(summary_output.result, str)
     assert "今天 AI 新闻偏多" in summary_output.result
     assert summary_output.metadata == {"rendered": True}
+
+
+def test_run_scheduled_summary_prepends_researched_one_line_brief(tmp_path: Path) -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/agent/digest":
+            return httpx.Response(
+                200,
+                json={
+                    "highlight": "",
+                    "sections": [
+                        {
+                            "category": "AI",
+                            "items": [
+                                {
+                                    "title": "OpenAI 推理模型发布",
+                                    "summary": "主打推理吞吐和成本下降。",
+                                    "source_name": "OpenAI",
+                                    "url": "https://example.com/openai",
+                                },
+                                {
+                                    "title": "Anthropic 更新 Agent 工具链",
+                                    "summary": "强调代码执行与长上下文配合。",
+                                    "source_name": "Anthropic",
+                                    "url": "https://example.com/anthropic",
+                                },
+                            ],
+                        }
+                    ],
+                    "stats": {"total_articles": 2},
+                },
+            )
+        raise AssertionError(f"unexpected path: {request.url.path}")
+
+    router = StubModelRouter("今日简报：推理成本继续下探，Agent 工具链在同步成熟。")
+    research_skill = StubResearchSkill()
+    skill = _build_skill(
+        tmp_path=tmp_path,
+        transport=httpx.MockTransport(_handler),
+        model_router=router,
+        research_skill=research_skill,
+    )
+
+    result = asyncio.run(skill.run_scheduled_summary())
+
+    assert result["summary_pushed"] is True
+    assert skill.message_queue is not None
+    summary = str(skill.message_queue.events[0]["summary"])
+    assert summary.startswith("今日简报：推理成本继续下探，Agent 工具链在同步成熟。")
+    assert "【AI】" in summary
+    assert research_skill.queries[0][0] == "OpenAI 推理模型发布 OpenAI"
+    assert router.calls[0]["model_name"] == "model:lightweight"
 
 
 # ---------------------------------------------------------------------------

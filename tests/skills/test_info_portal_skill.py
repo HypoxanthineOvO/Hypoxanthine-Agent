@@ -250,6 +250,42 @@ def test_info_today_truncates_long_results() -> None:
     asyncio.run(_run())
 
 
+def test_info_today_formats_nested_fields_without_dumping_json() -> None:
+    async def _run() -> None:
+        client = FakeInfoClient()
+        client.homepage_payload = {
+            "today": [
+                {
+                    "article": {
+                        "title": "OpenAI 推理栈更新",
+                        "url": "https://example.com/nested-openai",
+                    },
+                    "source": {"name": "OpenAI Blog"},
+                    "section": {"name": "AI"},
+                    "score": 9.1,
+                    "summary": {"brief": "吞吐和成本曲线继续改善。"},
+                }
+            ]
+        }
+        skill = InfoPortalSkill(
+            info_client=client,
+            now_fn=lambda: datetime(2026, 3, 26, 8, 0, 0, tzinfo=UTC),
+        )
+
+        output = await skill.execute("info_today", {})
+
+        assert output.status == "success"
+        assert "OpenAI 推理栈更新" in output.result
+        assert "OpenAI Blog" in output.result
+        assert "AI" in output.result
+        assert "吞吐和成本曲线继续改善。" in output.result
+        assert "https://example.com/nested-openai" in output.result
+        assert '"article"' not in output.result
+        assert "{'article':" not in output.result
+
+    asyncio.run(_run())
+
+
 def test_info_search_filters_articles_by_query() -> None:
     async def _run() -> None:
         client = FakeInfoClient()

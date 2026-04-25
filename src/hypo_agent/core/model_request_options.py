@@ -202,6 +202,19 @@ def _genesis_qwen_overrides(task_type: str) -> dict[str, Any]:
     }
 
 
+def _deepseek_overrides(level: str) -> dict[str, Any]:
+    # DeepSeek's OpenAI-compatible API expects `thinking` inside `extra_body`.
+    # In practice, our low/medium/high abstraction maps cleanly to:
+    # - low: disable thinking
+    # - medium/high: enable thinking and request DeepSeek's supported `high` effort
+    if level == "low":
+        return {"extra_body": {"thinking": {"type": "disabled"}}}
+    return {
+        "reasoning_effort": "high",
+        "extra_body": {"thinking": {"type": "enabled"}},
+    }
+
+
 def get_request_options(
     *,
     model_config: Any = None,
@@ -261,9 +274,7 @@ def get_request_options(
         overrides["reasoning_effort"] = reasoning_level
         return overrides
     if provider_type == "deepseek":
-        if reasoning_level in {"medium", "high"} or from_override:
-            overrides["thinking"] = {"type": "enabled"}
-        return overrides
+        return _deepseek_overrides(reasoning_level)
     if provider_type == "moonshot":
         return overrides
     if provider_type == "volcengine":

@@ -182,3 +182,38 @@ def test_volcengine_coding_route_does_not_get_reasoning_injection() -> None:
     )
 
     assert kwargs == {}
+
+
+def test_deepseek_chat_disables_thinking_for_low_reasoning() -> None:
+    config = _resolved_model(
+        provider="Deepseek",
+        litellm_model="deepseek/deepseek-v4-flash",
+        api_base="https://api.deepseek.com",
+    )
+
+    kwargs = build_model_request_kwargs(
+        model_config=config,
+        litellm_model=config.litellm_model,
+        task_type="chat",
+    )
+
+    assert kwargs == {"extra_body": {"thinking": {"type": "disabled"}}}
+
+
+def test_deepseek_reasoning_enables_thinking_and_reasoning_effort() -> None:
+    config = _resolved_model(
+        provider="Deepseek",
+        litellm_model="deepseek/deepseek-v4-flash",
+        api_base="https://api.deepseek.com",
+    )
+
+    kwargs = build_model_request_kwargs(
+        model_config=config,
+        litellm_model=config.litellm_model,
+        task_type="reasoning",
+    )
+
+    assert kwargs == {
+        "reasoning_effort": "high",
+        "extra_body": {"thinking": {"type": "enabled"}},
+    }

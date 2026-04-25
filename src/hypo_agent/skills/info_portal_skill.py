@@ -11,6 +11,7 @@ from hypo_agent.channels.info import InfoClient, InfoClientUnavailable
 from hypo_agent.core.config_loader import load_secrets_config
 from hypo_agent.models import SkillOutput
 from hypo_agent.skills.base import BaseSkill
+from hypo_agent.skills.info_payload_utils import first_text_from_paths
 
 logger = structlog.get_logger("hypo_agent.skills.info_skill")
 _SERVICE_UNAVAILABLE = "Hypo-Info 当前不可用，请确认服务是否启动"
@@ -345,28 +346,57 @@ class InfoPortalSkill(BaseSkill):
         return f"{'⭐' * star_count}（{score}/10）"
 
     def _extract_title(self, item: dict[str, Any]) -> str:
-        title = str(item.get("title") or item.get("headline") or "未命名文章").strip()
+        title = first_text_from_paths(
+            item,
+            ("title",),
+            ("headline",),
+            ("name",),
+            ("article", "title"),
+            ("article", "headline"),
+        )
+        if not title:
+            title = "未命名文章"
         return title or "未命名文章"
 
     def _extract_summary(self, item: dict[str, Any]) -> str:
-        summary = str(
-            item.get("summary")
-            or item.get("excerpt")
-            or item.get("description")
-            or item.get("content")
-            or ""
-        ).strip()
+        summary = first_text_from_paths(
+            item,
+            ("summary",),
+            ("excerpt",),
+            ("description",),
+            ("content",),
+            ("article", "summary"),
+            ("article", "excerpt"),
+            ("article", "description"),
+        )
         return summary or "暂无摘要"
 
     def _extract_section(self, item: dict[str, Any]) -> str:
-        section = item.get("section")
-        if isinstance(section, dict):
-            section = section.get("name") or section.get("label") or section.get("slug")
-        text = str(section or item.get("category") or item.get("topic") or "未分区").strip()
+        text = first_text_from_paths(
+            item,
+            ("section",),
+            ("section", "name"),
+            ("section", "label"),
+            ("section", "slug"),
+            ("category",),
+            ("topic",),
+            ("category_l1",),
+            ("category_l2",),
+            ("article", "section"),
+            ("article", "category"),
+        )
         return text or "未分区"
 
     def _extract_url(self, item: dict[str, Any]) -> str:
-        url = str(item.get("url") or item.get("link") or item.get("href") or "").strip()
+        url = first_text_from_paths(
+            item,
+            ("url",),
+            ("link",),
+            ("href",),
+            ("article", "url"),
+            ("article", "link"),
+            ("article", "href"),
+        )
         return url or "暂无链接"
 
     def _extract_benchmark_updated_at(self, items: list[dict[str, Any]]) -> str:
@@ -395,23 +425,35 @@ class InfoPortalSkill(BaseSkill):
 
     @staticmethod
     def _extract_source(item: dict[str, Any]) -> str:
-        source = item.get("source")
-        if isinstance(source, dict):
-            source = source.get("name") or source.get("title")
-        source_text = str(source or item.get("publisher") or item.get("origin") or "未知来源").strip()
+        source_text = first_text_from_paths(
+            item,
+            ("source",),
+            ("source", "name"),
+            ("source", "title"),
+            ("publisher",),
+            ("origin",),
+            ("source_name",),
+            ("provider",),
+            ("article", "source"),
+            ("article", "source_name"),
+        )
         return source_text or "未知来源"
 
     @staticmethod
     def _searchable_text(item: dict[str, Any]) -> str:
         fields = [
-            item.get("title"),
-            item.get("headline"),
-            item.get("summary"),
-            item.get("excerpt"),
-            item.get("description"),
-            item.get("content"),
+            first_text_from_paths(item, ("title",), ("headline",), ("name",), ("article", "title")),
+            first_text_from_paths(
+                item,
+                ("summary",),
+                ("excerpt",),
+                ("description",),
+                ("content",),
+                ("article", "summary"),
+                ("article", "description"),
+            ),
         ]
-        return " ".join(str(value or "") for value in fields).strip()
+        return " ".join(value for value in fields if value).strip()
 
     @staticmethod
     def _coerce_items(payload: Any) -> list[dict[str, Any]]:
