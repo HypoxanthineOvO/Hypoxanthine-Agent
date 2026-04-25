@@ -297,6 +297,94 @@ class FakeCoderTaskService:
         return dict(self.output_result)
 
 
+class FakeRepairService:
+    def __init__(self) -> None:
+        self.help_calls = 0
+        self.report_calls: list[dict[str, object]] = []
+        self.start_calls: list[dict[str, object]] = []
+        self.status_calls: list[dict[str, object]] = []
+        self.log_calls: list[dict[str, object]] = []
+        self.abort_calls: list[dict[str, object]] = []
+        self.retry_calls: list[dict[str, object]] = []
+
+    def render_help(self) -> str:
+        self.help_calls += 1
+        return "repair help text"
+
+    async def render_report(
+        self,
+        *,
+        session_id: str,
+        scope: str = "global",
+        hours: int = 24,
+    ) -> str:
+        self.report_calls.append({"session_id": session_id, "scope": scope, "hours": hours})
+        return f"repair report scope={scope} hours={hours}"
+
+    async def start_run(
+        self,
+        *,
+        session_id: str,
+        issue: str,
+        finding_id: str | None = None,
+        verify_commands: list[str] | None = None,
+    ) -> dict[str, object]:
+        self.start_calls.append(
+            {
+                "session_id": session_id,
+                "issue": issue,
+                "finding_id": finding_id,
+                "verify_commands": list(verify_commands or []),
+            }
+        )
+        return {"status": "running", "run_id": "repair-1", "issue_text": issue or finding_id or ""}
+
+    async def render_status(
+        self,
+        *,
+        session_id: str,
+        run_id: str | None = None,
+    ) -> str:
+        self.status_calls.append({"session_id": session_id, "run_id": run_id})
+        return "repair status"
+
+    async def render_logs(
+        self,
+        *,
+        session_id: str,
+        run_id: str | None = None,
+        line_count: int = 30,
+        follow: bool = False,
+    ) -> str:
+        self.log_calls.append(
+            {
+                "session_id": session_id,
+                "run_id": run_id,
+                "line_count": line_count,
+                "follow": follow,
+            }
+        )
+        return "repair logs"
+
+    async def abort_run(
+        self,
+        *,
+        session_id: str,
+        run_id: str | None = None,
+    ) -> dict[str, object]:
+        self.abort_calls.append({"session_id": session_id, "run_id": run_id})
+        return {"status": "aborted", "run_id": run_id or "repair-1"}
+
+    async def retry_run(
+        self,
+        *,
+        session_id: str,
+        run_id: str | None = None,
+    ) -> dict[str, object]:
+        self.retry_calls.append({"session_id": session_id, "run_id": run_id})
+        return {"status": "running", "run_id": "repair-2", "retry_of_run_id": run_id or "repair-1"}
+
+
 async def _build_handler(tmp_path: Path) -> tuple[
     SlashCommandHandler,
     SessionMemory,
@@ -351,6 +439,31 @@ async def _build_handler(tmp_path: Path) -> tuple[
         model_probe_fn=None,
     )
     handler.coder_task_service = coder_task_service
+    return handler, session_memory, store, breaker
+
+
+async def _build_handler_with_repair_service(
+    tmp_path: Path,
+    repair_service: FakeRepairService,
+) -> tuple[
+    SlashCommandHandler,
+    SessionMemory,
+    StructuredStore,
+    CircuitBreaker,
+]:
+    handler, session_memory, store, breaker = await _build_handler(tmp_path)
+    handler = SlashCommandHandler(
+        router=handler.router,
+        session_memory=session_memory,
+        structured_store=store,
+        circuit_breaker=breaker,
+        skill_manager=handler.skill_manager,
+        coder_task_service=handler.coder_task_service,
+        memory_gc=handler.memory_gc,
+        model_probe_fn=None,
+        repair_service=repair_service,
+    )
+    handler.coder_task_service = getattr(handler, "coder_task_service", None)
     return handler, session_memory, store, breaker
 
 
@@ -700,63 +813,108 @@ def test_slash_commands_gc_runs_memory_gc(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
-def test_repair_no_args(tmp_path: Path) -> None:
+def test_repair_help(tmp_path: Path) -> None:
     async def _run() -> None:
-        handler, _, _, _ = await _build_handler(tmp_path)
-        repair_skill = FakeRepairSkill()
-        handler.skill_manager.register(repair_skill)
+        repair_service = FakeRepairService()
+        handler, _, _, _ = await _build_handler_with_repair_service(tmp_path, repair_service)
 
-        text = await handler.try_handle(Message(text="/repair", sender="user", session_id="s1"))
+        text = await handler.try_handle(Message(text="/repair help", sender="user", session_id="s1"))
 
-        assert text is not None
-        assert "诊断摘要" in text
-        assert "web_search" in text
-        assert "tool_failures=3" in text
-        assert repair_skill.calls[0][0] == "get_error_summary"
-        assert repair_skill.calls[0][1]["hours"] == 24
-        assert repair_skill.calls[1][0] == "get_tool_history"
-        assert repair_skill.calls[1][1]["success"] is False
-        assert repair_skill.calls[1][1]["hours"] == 24
-        assert repair_skill.calls[1][1]["limit"] == 10
+        assert text == "repair help text"
+        assert repair_service.help_calls == 1
 
     asyncio.run(_run())
 
 
-def test_repair_with_description(tmp_path: Path) -> None:
+def test_repair_report_and_report_session(tmp_path: Path) -> None:
     async def _run() -> None:
-        handler, _, _, _ = await _build_handler(tmp_path)
-        repair_skill = FakeRepairSkill()
-        coder_skill = FakeCoderSubmitSkill()
-        handler.skill_manager.register(repair_skill)
-        handler.skill_manager.register(coder_skill)
+        repair_service = FakeRepairService()
+        handler, _, _, _ = await _build_handler_with_repair_service(tmp_path, repair_service)
 
-        text = await handler.try_handle(
-            Message(text="/repair web_search 超时", sender="user", session_id="s1")
+        report_text = await handler.try_handle(
+            Message(text="/repair report", sender="user", session_id="s1")
+        )
+        session_text = await handler.try_handle(
+            Message(text="/repair report session --hours 12", sender="user", session_id="s1")
         )
 
-        assert text is not None
-        assert "web_search 超时" in text
-        assert "已自动提交修复任务" in text
-        assert any(call[0] == "get_recent_logs" for call in repair_skill.calls)
-        assert coder_skill.calls[0]["working_directory"] == str(Path.cwd().resolve())
-        assert "web_search" in str(coder_skill.calls[0]["prompt"])
+        assert report_text == "repair report scope=global hours=24"
+        assert session_text == "repair report scope=session hours=12"
+        assert repair_service.report_calls == [
+            {"session_id": "s1", "scope": "global", "hours": 24},
+            {"session_id": "s1", "scope": "session", "hours": 12},
+        ]
 
     asyncio.run(_run())
 
 
-def test_repair_coder_unavailable(tmp_path: Path) -> None:
+def test_repair_do_status_logs_abort_and_retry(tmp_path: Path) -> None:
     async def _run() -> None:
-        handler, _, _, _ = await _build_handler(tmp_path)
-        repair_skill = FakeRepairSkill()
-        handler.skill_manager.register(repair_skill)
+        repair_service = FakeRepairService()
+        handler, _, _, _ = await _build_handler_with_repair_service(tmp_path, repair_service)
 
-        text = await handler.try_handle(
-            Message(text="/repair web_search 超时", sender="user", session_id="s1")
+        do_text = await handler.try_handle(
+            Message(
+                text='/repair do "Genesis QWen 工具调用后误报无法访问" --verify "pytest tests/core/test_pipeline_tools.py -q"',
+                sender="user",
+                session_id="s1",
+            )
+        )
+        from_text = await handler.try_handle(
+            Message(text="/repair do --from F1", sender="user", session_id="s1")
+        )
+        status_text = await handler.try_handle(
+            Message(text="/repair status", sender="user", session_id="s1")
+        )
+        logs_text = await handler.try_handle(
+            Message(text="/repair logs --run repair-1 -n 10 --follow", sender="user", session_id="s1")
+        )
+        abort_text = await handler.try_handle(
+            Message(text="/repair abort --run repair-1", sender="user", session_id="s1")
+        )
+        retry_text = await handler.try_handle(
+            Message(text="/repair retry repair-1", sender="user", session_id="s1")
         )
 
+        assert do_text is not None and "repair-1" in do_text
+        assert from_text is not None and "repair-1" in from_text
+        assert status_text == "repair status"
+        assert logs_text == "repair logs"
+        assert abort_text is not None and "repair-1" in abort_text
+        assert retry_text is not None and "repair-2" in retry_text
+        assert repair_service.start_calls == [
+            {
+                "session_id": "s1",
+                "issue": "Genesis QWen 工具调用后误报无法访问",
+                "finding_id": None,
+                "verify_commands": ["pytest tests/core/test_pipeline_tools.py -q"],
+            },
+            {
+                "session_id": "s1",
+                "issue": "",
+                "finding_id": "F1",
+                "verify_commands": [],
+            },
+        ]
+        assert repair_service.status_calls == [{"session_id": "s1", "run_id": None}]
+        assert repair_service.log_calls == [
+            {"session_id": "s1", "run_id": "repair-1", "line_count": 10, "follow": True}
+        ]
+        assert repair_service.abort_calls == [{"session_id": "s1", "run_id": "repair-1"}]
+        assert repair_service.retry_calls == [{"session_id": "s1", "run_id": "repair-1"}]
+
+    asyncio.run(_run())
+
+
+def test_repair_invalid_usage(tmp_path: Path) -> None:
+    async def _run() -> None:
+        repair_service = FakeRepairService()
+        handler, _, _, _ = await _build_handler_with_repair_service(tmp_path, repair_service)
+
+        text = await handler.try_handle(Message(text="/repair do", sender="user", session_id="s1"))
+
         assert text is not None
-        assert "CoderSkill 不可用" in text
-        assert "修复建议" in text
+        assert "用法" in text
 
     asyncio.run(_run())
 

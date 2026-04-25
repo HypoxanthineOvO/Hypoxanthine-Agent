@@ -83,6 +83,7 @@ class SlashCommandHandler:
         circuit_breaker: Any | None = None,
         skill_manager: Any | None = None,
         coder_task_service: Any | None = None,
+        repair_service: Any | None = None,
         memory_gc: Any | None = None,
         model_probe_fn: Callable[[str, Any], Awaitable[Any]] | None = None,
         restart_handler: Callable[..., Awaitable[str] | str] | None = None,
@@ -94,6 +95,7 @@ class SlashCommandHandler:
         self.circuit_breaker = circuit_breaker
         self.skill_manager = skill_manager
         self.coder_task_service = coder_task_service
+        self.repair_service = repair_service
         self.memory_gc = memory_gc
         self.model_probe_fn = model_probe_fn
         self.restart_handler = restart_handler
@@ -297,20 +299,29 @@ class SlashCommandHandler:
             ),
             SlashCommandEntry(
                 command="/repair",
-                description="汇总最近错误并在可用时自动提交修复任务",
+                description="repair 工作流入口：报告、修复、状态、日志、重试",
                 handler=self._handle_repair,
                 help=SlashCommandHelp(
                     name="/repair",
-                    brief="汇总近期错误并尝试发起修复任务",
-                    usage="/repair [<issue>]",
+                    brief="查看报告、发起修复、查看状态与重试",
+                    usage=(
+                        "/repair help\n"
+                        "/repair report [session] [--hours N]\n"
+                        "/repair do <issue>\n"
+                        "/repair do --from <finding_id> [--verify \"<cmd>\"]\n"
+                        "/repair status | /repair logs | /repair abort | /repair retry"
+                    ),
                     description=(
-                        "无参数时输出最近 24 小时的错误摘要和失败工具统计。\n"
-                        "带问题描述时，会结合失败工具与近期日志生成修复诊断。\n"
-                        "如果 `coder_submit_task` 可用，会自动提交修复任务；否则只给出人工建议。"
+                        "这是面向用户的 repair workflow 入口，而不是旧的一次性诊断提交。\n"
+                        "支持报告、发起修复、查看状态、查看日志、中止和重试。\n"
+                        "默认采用单 repo 单 active repair run 策略；自动重启只会在验证通过且报告明确要求时触发。"
                     ),
                     examples=[
-                        "/repair",
-                        "/repair web_search 超时",
+                        "/repair help",
+                        "/repair report",
+                        '/repair do "Genesis QWen 工具调用后误报无法访问"',
+                        "/repair do --from F1",
+                        "/repair retry repair-123",
                     ],
                     category="debug",
                 ),
@@ -746,90 +757,182 @@ class SlashCommandHandler:
         return f"Memory GC 完成：processed={processed} skipped={skipped} errors={errors}"
 
     async def _handle_repair(self, inbound: Message) -> str:
+        if self.repair_service is None:
+            return "Repair 不可用。"
+
         payload = (inbound.text or "").strip()[len("/repair") :].strip()
-        hours = 24
-        error_summary = await self._load_error_summary(hours=hours, session_id=inbound.session_id)
-        failed_tools = await self._load_failed_tool_history(hours=hours, session_id=inbound.session_id)
-
         if not payload:
-            return self._format_repair_summary(
-                hours=hours,
-                error_summary=error_summary,
-                failed_tools=failed_tools,
-            )
+            return str(self.repair_service.render_help())
 
-        recent_logs = await self._load_recent_logs(hours=hours, session_id=inbound.session_id)
-        matched_tools = self._filter_repair_tool_matches(failed_tools, payload)
-        matched_logs = self._filter_repair_log_matches(recent_logs, payload)
-        lines = [
-            "## 修复诊断",
-            "",
-            f"问题描述：{payload}",
-            f"过去 {hours}h 诊断摘要："
-            f" logs={int(error_summary.get('counts', {}).get('logs', 0) or 0)}"
-            f" tool_failures={int(error_summary.get('counts', {}).get('tool_failures', 0) or 0)}"
-            f" total={int(error_summary.get('counts', {}).get('total', 0) or 0)}",
-            "",
-            "相关工具失败：",
-        ]
-        if matched_tools:
-            for item in matched_tools[:5]:
-                lines.append(
-                    f"- {self._tool_display_name(item)} | {self._tool_error_text(item)} | "
-                    f"{item.get('created_at') or 'unknown'}"
-                )
-        else:
-            lines.append("- 未发现直接匹配的问题工具记录。")
+        try:
+            tokens = shlex.split(payload)
+        except ValueError:
+            return "用法：/repair help | /repair report | /repair do <issue> | /repair status | /repair logs | /repair abort | /repair retry"
+        if not tokens:
+            return str(self.repair_service.render_help())
 
-        lines.extend(["", "相关日志："])
-        if matched_logs:
-            for item in matched_logs[:5]:
-                lines.append(
-                    f"- {item.get('timestamp') or 'unknown'} | "
-                    f"{item.get('event') or item.get('raw') or 'unknown'}"
-                )
-        else:
-            lines.append("- 未发现直接匹配的错误日志。")
+        command = tokens[0].strip().lower()
+        args = tokens[1:]
 
-        if self._tool_available("coder_submit_task"):
-            submit_result = await self._invoke_tool(
-                "coder_submit_task",
-                {
-                    "prompt": self._build_repair_task_prompt(
-                        issue=payload,
-                        error_summary=error_summary,
-                        failed_tools=matched_tools or failed_tools[:5],
-                        recent_logs=matched_logs,
-                    ),
-                    "working_directory": str(self.repo_root),
-                },
+        if command == "help":
+            return str(self.repair_service.render_help())
+
+        if command == "report":
+            scope = "global"
+            hours = 24
+            idx = 0
+            while idx < len(args):
+                token = args[idx].strip().lower()
+                if token == "session":
+                    scope = "session"
+                elif token == "--hours":
+                    idx += 1
+                    if idx >= len(args):
+                        return "用法：/repair report [session] [--hours N]"
+                    try:
+                        hours = int(args[idx])
+                    except ValueError:
+                        return "用法：/repair report [session] [--hours N]"
+                else:
+                    return "用法：/repair report [session] [--hours N]"
+                idx += 1
+            return await self.repair_service.render_report(
                 session_id=inbound.session_id,
+                scope=scope,
+                hours=hours,
             )
-            if isinstance(submit_result, dict):
-                task_id = str(
-                    submit_result.get("task_id")
-                    or submit_result.get("taskId")
-                    or submit_result.get("status")
-                    or "unknown"
-                ).strip()
-                lines.extend(
-                    [
-                        "",
-                        f"已自动提交修复任务：{task_id}",
-                        "已告知 Coder/Codex 依据诊断继续修复，等待完成后回报结果。",
-                    ]
-                )
-                return "\n".join(lines)
 
-        lines.extend(
-            [
-                "",
-                "CoderSkill 不可用。",
-                "修复建议：",
-                self._build_repair_suggestion(issue=payload, failed_tools=matched_tools, recent_logs=matched_logs),
-            ]
-        )
-        return "\n".join(lines)
+        if command == "do":
+            finding_id: str | None = None
+            verify_commands: list[str] = []
+            issue_tokens: list[str] = []
+            idx = 0
+            while idx < len(args):
+                token = args[idx].strip()
+                lowered = token.lower()
+                if lowered == "--from":
+                    idx += 1
+                    if idx >= len(args):
+                        return "用法：/repair do <issue> | /repair do --from <finding_id> [--verify \"<cmd>\"]"
+                    finding_id = args[idx].strip() or None
+                elif lowered == "--verify":
+                    idx += 1
+                    if idx >= len(args):
+                        return "用法：/repair do <issue> | /repair do --from <finding_id> [--verify \"<cmd>\"]"
+                    verify_commands.append(args[idx].strip())
+                else:
+                    issue_tokens.append(token)
+                idx += 1
+            issue = " ".join(token for token in issue_tokens if token).strip()
+            if not issue and not finding_id:
+                return "用法：/repair do <issue> | /repair do --from <finding_id> [--verify \"<cmd>\"]"
+            result = await self.repair_service.start_run(
+                session_id=inbound.session_id,
+                issue=issue,
+                finding_id=finding_id,
+                verify_commands=verify_commands,
+            )
+            if not isinstance(result, dict):
+                return str(result)
+            status = str(result.get("status") or "unknown")
+            run_id = str(result.get("run_id") or "unknown")
+            if status == "blocked":
+                return f"已有 active repair run：{run_id}\n输入 /repair status 查看当前状态。"
+            if status == "error":
+                return str(result.get("message") or "Repair 启动失败。")
+            return "\n".join(
+                [
+                    "Repair 已提交",
+                    f"run_id={run_id}",
+                    f"status={status}",
+                ]
+            )
+
+        if command == "status":
+            run_id = args[0].strip() if args else None
+            return await self.repair_service.render_status(
+                session_id=inbound.session_id,
+                run_id=run_id or None,
+            )
+
+        if command == "logs":
+            run_id: str | None = None
+            line_count = 30
+            follow = False
+            idx = 0
+            while idx < len(args):
+                token = args[idx].strip()
+                lowered = token.lower()
+                if lowered == "--run":
+                    idx += 1
+                    if idx >= len(args):
+                        return "用法：/repair logs [--run <id>] [-n N] [--follow]"
+                    run_id = args[idx].strip() or None
+                elif lowered == "-n":
+                    idx += 1
+                    if idx >= len(args):
+                        return "用法：/repair logs [--run <id>] [-n N] [--follow]"
+                    try:
+                        line_count = int(args[idx])
+                    except ValueError:
+                        return "用法：/repair logs [--run <id>] [-n N] [--follow]"
+                elif lowered == "--follow":
+                    follow = True
+                else:
+                    return "用法：/repair logs [--run <id>] [-n N] [--follow]"
+                idx += 1
+            return await self.repair_service.render_logs(
+                session_id=inbound.session_id,
+                run_id=run_id,
+                line_count=line_count,
+                follow=follow,
+            )
+
+        if command == "abort":
+            run_id: str | None = None
+            idx = 0
+            while idx < len(args):
+                token = args[idx].strip().lower()
+                if token == "--run":
+                    idx += 1
+                    if idx >= len(args):
+                        return "用法：/repair abort [--run <id>]"
+                    run_id = args[idx].strip() or None
+                else:
+                    return "用法：/repair abort [--run <id>]"
+                idx += 1
+            result = await self.repair_service.abort_run(
+                session_id=inbound.session_id,
+                run_id=run_id,
+            )
+            if not isinstance(result, dict):
+                return str(result)
+            if str(result.get("status") or "") == "error":
+                return str(result.get("message") or "Repair 中止失败。")
+            return f"Repair 已中止：{result.get('run_id', 'unknown')}"
+
+        if command == "retry":
+            run_id = args[0].strip() if args else None
+            result = await self.repair_service.retry_run(
+                session_id=inbound.session_id,
+                run_id=run_id or None,
+            )
+            if not isinstance(result, dict):
+                return str(result)
+            status = str(result.get("status") or "unknown")
+            if status == "blocked":
+                return f"已有 active repair run：{result.get('run_id', 'unknown')}\n输入 /repair status 查看当前状态。"
+            if status == "error":
+                return str(result.get("message") or "Repair 重试失败。")
+            return "\n".join(
+                [
+                    "Repair 已重试提交",
+                    f"run_id={result.get('run_id', 'unknown')}",
+                    f"status={status}",
+                ]
+            )
+
+        return "用法：/repair help | /repair report | /repair do <issue> | /repair status | /repair logs | /repair abort | /repair retry"
 
     async def _handle_restart(self, inbound: Message) -> str:
         payload = (inbound.text or "").strip()[len("/restart") :].strip().lower()

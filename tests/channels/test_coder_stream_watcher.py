@@ -51,7 +51,6 @@ class FakeWatcherService:
             return dict(sequence.pop(0))
         return dict(sequence[0])
 
-
 def test_watcher_starts_once_and_emits_status_transitions() -> None:
     async def _run() -> None:
         pushed: list[Message] = []

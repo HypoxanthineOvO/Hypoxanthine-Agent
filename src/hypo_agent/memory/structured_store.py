@@ -271,6 +271,71 @@ class StructuredStore:
                 )
                 await db.execute(
                     """
+                    CREATE TABLE IF NOT EXISTS repair_runs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT NOT NULL UNIQUE,
+                        session_id TEXT NOT NULL,
+                        coder_task_id TEXT,
+                        codex_thread_id TEXT,
+                        retry_of_run_id TEXT,
+                        issue_text TEXT NOT NULL,
+                        finding_id TEXT,
+                        working_directory TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        verification_state TEXT NOT NULL DEFAULT 'pending',
+                        restart_state TEXT NOT NULL DEFAULT 'not_requested',
+                        diagnostic_snapshot_json TEXT NOT NULL,
+                        verify_commands_json TEXT NOT NULL DEFAULT '[]',
+                        git_status_before TEXT NOT NULL DEFAULT '',
+                        git_status_after TEXT NOT NULL DEFAULT '',
+                        report_markdown TEXT NOT NULL DEFAULT '',
+                        report_json TEXT NOT NULL DEFAULT '{}',
+                        last_error TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        completed_at TEXT
+                    )
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_repair_runs_session
+                    ON repair_runs(session_id, updated_at)
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_repair_runs_status
+                    ON repair_runs(status, updated_at)
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_repair_runs_task
+                    ON repair_runs(coder_task_id)
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS repair_run_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        summary TEXT NOT NULL DEFAULT '',
+                        payload_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_repair_run_events_run
+                    ON repair_run_events(run_id, created_at)
+                    """
+                )
+                await db.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS reminders (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         title TEXT NOT NULL,
@@ -405,6 +470,17 @@ class StructuredStore:
                     await db.execute(
                         "ALTER TABLE reminders ADD COLUMN session_id TEXT NOT NULL DEFAULT 'main'"
                     )
+                async with db.execute("PRAGMA table_info(repair_runs)") as cursor:
+                    repair_columns = await cursor.fetchall()
+                repair_column_names = {str(column[1]) for column in repair_columns}
+                if "codex_thread_id" not in repair_column_names:
+                    await db.execute("ALTER TABLE repair_runs ADD COLUMN codex_thread_id TEXT")
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_repair_runs_thread
+                    ON repair_runs(codex_thread_id)
+                    """
+                )
 
                 # Backfill from legacy columns when they exist.
                 if "params" in tool_column_names:
@@ -1395,9 +1471,454 @@ class StructuredStore:
             )
             await db.commit()
 
+    async def create_repair_run(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        issue_text: str,
+        working_directory: str,
+        status: str,
+        verification_state: str,
+        restart_state: str,
+        diagnostic_snapshot_json: str,
+        codex_thread_id: str | None = None,
+        coder_task_id: str | None = None,
+        retry_of_run_id: str | None = None,
+        finding_id: str | None = None,
+        verify_commands_json: str = "[]",
+        git_status_before: str = "",
+        git_status_after: str = "",
+        report_markdown: str = "",
+        report_json: str = "{}",
+        last_error: str = "",
+        completed_at: str | None = None,
+    ) -> None:
+        await self.init()
+        await self.upsert_session(session_id)
+        now = _now_iso()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO repair_runs(
+                    run_id,
+                    session_id,
+                    coder_task_id,
+                    codex_thread_id,
+                    retry_of_run_id,
+                    issue_text,
+                    finding_id,
+                    working_directory,
+                    status,
+                    verification_state,
+                    restart_state,
+                    diagnostic_snapshot_json,
+                    verify_commands_json,
+                    git_status_before,
+                    git_status_after,
+                    report_markdown,
+                    report_json,
+                    last_error,
+                    created_at,
+                    updated_at,
+                    completed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    session_id=excluded.session_id,
+                    coder_task_id=excluded.coder_task_id,
+                    codex_thread_id=excluded.codex_thread_id,
+                    retry_of_run_id=excluded.retry_of_run_id,
+                    issue_text=excluded.issue_text,
+                    finding_id=excluded.finding_id,
+                    working_directory=excluded.working_directory,
+                    status=excluded.status,
+                    verification_state=excluded.verification_state,
+                    restart_state=excluded.restart_state,
+                    diagnostic_snapshot_json=excluded.diagnostic_snapshot_json,
+                    verify_commands_json=excluded.verify_commands_json,
+                    git_status_before=excluded.git_status_before,
+                    git_status_after=excluded.git_status_after,
+                    report_markdown=excluded.report_markdown,
+                    report_json=excluded.report_json,
+                    last_error=excluded.last_error,
+                    updated_at=excluded.updated_at,
+                    completed_at=excluded.completed_at
+                """,
+                (
+                    run_id,
+                    session_id,
+                    coder_task_id,
+                    codex_thread_id,
+                    retry_of_run_id,
+                    issue_text,
+                    finding_id,
+                    working_directory,
+                    status,
+                    verification_state,
+                    restart_state,
+                    diagnostic_snapshot_json,
+                    verify_commands_json,
+                    git_status_before,
+                    git_status_after,
+                    report_markdown,
+                    report_json,
+                    last_error,
+                    now,
+                    now,
+                    completed_at,
+                ),
+            )
+            await db.commit()
+
+    async def get_repair_run(self, run_id: str) -> dict[str, Any] | None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT
+                    id,
+                    run_id,
+                    session_id,
+                    coder_task_id,
+                    codex_thread_id,
+                    retry_of_run_id,
+                    issue_text,
+                    finding_id,
+                    working_directory,
+                    status,
+                    verification_state,
+                    restart_state,
+                    diagnostic_snapshot_json,
+                    verify_commands_json,
+                    git_status_before,
+                    git_status_after,
+                    report_markdown,
+                    report_json,
+                    last_error,
+                    created_at,
+                    updated_at,
+                    completed_at
+                FROM repair_runs
+                WHERE run_id = ?
+                LIMIT 1
+                """,
+                (run_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def get_repair_run_by_task_id(self, coder_task_id: str) -> dict[str, Any] | None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT
+                    id,
+                    run_id,
+                    session_id,
+                    coder_task_id,
+                    codex_thread_id,
+                    retry_of_run_id,
+                    issue_text,
+                    finding_id,
+                    working_directory,
+                    status,
+                    verification_state,
+                    restart_state,
+                    diagnostic_snapshot_json,
+                    verify_commands_json,
+                    git_status_before,
+                    git_status_after,
+                    report_markdown,
+                    report_json,
+                    last_error,
+                    created_at,
+                    updated_at,
+                    completed_at
+                FROM repair_runs
+                WHERE coder_task_id = ? OR codex_thread_id = ?
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """,
+                (coder_task_id, coder_task_id),
+            ) as cursor:
+                row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def get_repair_run_by_thread_id(self, codex_thread_id: str) -> dict[str, Any] | None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT
+                    id,
+                    run_id,
+                    session_id,
+                    coder_task_id,
+                    codex_thread_id,
+                    retry_of_run_id,
+                    issue_text,
+                    finding_id,
+                    working_directory,
+                    status,
+                    verification_state,
+                    restart_state,
+                    diagnostic_snapshot_json,
+                    verify_commands_json,
+                    git_status_before,
+                    git_status_after,
+                    report_markdown,
+                    report_json,
+                    last_error,
+                    created_at,
+                    updated_at,
+                    completed_at
+                FROM repair_runs
+                WHERE codex_thread_id = ?
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """,
+                (codex_thread_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def get_latest_repair_run_for_session(self, session_id: str) -> dict[str, Any] | None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT
+                    id,
+                    run_id,
+                    session_id,
+                    coder_task_id,
+                    codex_thread_id,
+                    retry_of_run_id,
+                    issue_text,
+                    finding_id,
+                    working_directory,
+                    status,
+                    verification_state,
+                    restart_state,
+                    diagnostic_snapshot_json,
+                    verify_commands_json,
+                    git_status_before,
+                    git_status_after,
+                    report_markdown,
+                    report_json,
+                    last_error,
+                    created_at,
+                    updated_at,
+                    completed_at
+                FROM repair_runs
+                WHERE session_id = ?
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """,
+                (session_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def get_active_repair_run(self) -> dict[str, Any] | None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT
+                    id,
+                    run_id,
+                    session_id,
+                    coder_task_id,
+                    codex_thread_id,
+                    retry_of_run_id,
+                    issue_text,
+                    finding_id,
+                    working_directory,
+                    status,
+                    verification_state,
+                    restart_state,
+                    diagnostic_snapshot_json,
+                    verify_commands_json,
+                    git_status_before,
+                    git_status_after,
+                    report_markdown,
+                    report_json,
+                    last_error,
+                    created_at,
+                    updated_at,
+                    completed_at
+                FROM repair_runs
+                WHERE status IN ('queued', 'running')
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """
+            ) as cursor:
+                row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def list_repair_runs(
+        self,
+        *,
+        session_id: str | None = None,
+        status: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            clauses: list[str] = []
+            params: list[Any] = []
+            if session_id is not None:
+                clauses.append("session_id = ?")
+                params.append(session_id)
+            if status is not None:
+                clauses.append("status = ?")
+                params.append(status)
+
+            query = """
+                SELECT
+                    id,
+                    run_id,
+                    session_id,
+                    coder_task_id,
+                    codex_thread_id,
+                    retry_of_run_id,
+                    issue_text,
+                    finding_id,
+                    working_directory,
+                    status,
+                    verification_state,
+                    restart_state,
+                    diagnostic_snapshot_json,
+                    verify_commands_json,
+                    git_status_before,
+                    git_status_after,
+                    report_markdown,
+                    report_json,
+                    last_error,
+                    created_at,
+                    updated_at,
+                    completed_at
+                FROM repair_runs
+            """
+            if clauses:
+                query += f" WHERE {' AND '.join(clauses)}"
+            query += " ORDER BY updated_at DESC, id DESC"
+            if limit is not None and limit > 0:
+                query += " LIMIT ?"
+                params.append(limit)
+
+            async with db.execute(query, tuple(params)) as cursor:
+                rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def update_repair_run(self, run_id: str, **fields: Any) -> None:
+        await self.init()
+        if not fields:
+            return
+        normalized_fields = dict(fields)
+        if any(key in normalized_fields for key in ("status", "report_markdown", "report_json", "last_error")):
+            normalized_fields.setdefault("updated_at", _now_iso())
+        else:
+            normalized_fields["updated_at"] = _now_iso()
+        if normalized_fields.get("status") in {"completed", "needs_review", "failed", "aborted"}:
+            normalized_fields.setdefault("completed_at", _now_iso())
+
+        clauses = ", ".join(f"{column} = ?" for column in normalized_fields)
+        values = list(normalized_fields.values())
+        values.append(run_id)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                f"""
+                UPDATE repair_runs
+                SET {clauses}
+                WHERE run_id = ?
+                """,
+                tuple(values),
+            )
+            await db.commit()
+
+    async def append_repair_run_event(
+        self,
+        *,
+        run_id: str,
+        event_type: str,
+        source: str,
+        summary: str = "",
+        payload_json: str = "{}",
+    ) -> None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO repair_run_events(
+                    run_id,
+                    event_type,
+                    source,
+                    summary,
+                    payload_json,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, event_type, source, summary, payload_json, _now_iso()),
+            )
+            await db.commit()
+
+    async def list_repair_run_events(
+        self,
+        run_id: str,
+        *,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            query = """
+                SELECT
+                    id,
+                    run_id,
+                    event_type,
+                    source,
+                    summary,
+                    payload_json,
+                    created_at
+                FROM repair_run_events
+                WHERE run_id = ?
+                ORDER BY created_at DESC, id DESC
+            """
+            params: list[Any] = [run_id]
+            if limit is not None and limit > 0:
+                query += " LIMIT ?"
+                params.append(limit)
+            async with db.execute(query, tuple(params)) as cursor:
+                rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
     async def delete_session_data(self, session_id: str) -> None:
         await self.init()
         async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                DELETE FROM repair_run_events
+                WHERE run_id IN (
+                    SELECT run_id FROM repair_runs WHERE session_id = ?
+                )
+                """,
+                (session_id,),
+            )
+            await db.execute(
+                "DELETE FROM repair_runs WHERE session_id = ?",
+                (session_id,),
+            )
             await db.execute(
                 "DELETE FROM tool_invocations WHERE session_id = ?",
                 (session_id,),

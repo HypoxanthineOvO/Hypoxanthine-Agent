@@ -169,6 +169,79 @@ def test_gateway_app_import_does_not_require_repair_service_file() -> None:
     assert result.stdout.strip().endswith("OK")
 
 
+def test_build_repair_service_supports_legacy_codex_bridge_signature(tmp_path: Path, monkeypatch) -> None:
+    import hypo_agent.gateway.app as app_module
+
+    captured: dict[str, object] = {}
+
+    class LegacyRepairService:
+        def __init__(
+            self,
+            *,
+            structured_store,
+            session_memory,
+            codex_bridge,
+            repo_root,
+            proactive_callback=None,
+            restart_handler=None,
+            now_fn=None,
+            finding_ttl_seconds=600,
+        ) -> None:
+            del proactive_callback, restart_handler, now_fn, finding_ttl_seconds
+            captured["structured_store"] = structured_store
+            captured["session_memory"] = session_memory
+            captured["codex_bridge"] = codex_bridge
+            captured["repo_root"] = repo_root
+
+    monkeypatch.setattr(app_module, "RepairService", LegacyRepairService)
+
+    deps, _ = _test_mode_deps()
+    service = app_module._build_repair_service(
+        structured_store=deps.structured_store,
+        session_memory=deps.session_memory,
+        codex_bridge="codex-bridge",
+        repo_root=tmp_path,
+    )
+
+    assert service is not None
+    assert captured["structured_store"] is deps.structured_store
+    assert captured["session_memory"] is deps.session_memory
+    assert captured["codex_bridge"] == "codex-bridge"
+    assert captured["repo_root"] == tmp_path
+
+
+def test_create_app_tolerates_legacy_repair_service_without_on_task_update(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HYPO_TEST_MODE", "1")
+    deps, pipeline = _test_mode_deps()
+
+    class FakeCoderTaskService:
+        def __init__(self) -> None:
+            self.watcher = None
+
+    class LegacyRepairService:
+        def __init__(self) -> None:
+            self.proactive_callback = None
+            self.restart_handler = None
+            self.repo_root = tmp_path
+
+    deps.repair_service = LegacyRepairService()
+    deps.coder_task_service = FakeCoderTaskService()
+
+    app = create_app(
+        auth_token="test-token",
+        pipeline=pipeline,
+        deps=deps,
+    )
+
+    assert app.state.repair_service is deps.repair_service
+    assert app.state.coder_stream_watcher is not None
+    assert deps.coder_task_service.watcher is app.state.coder_stream_watcher
+
+
 def test_test_mode_websocket_writes_session_and_db_to_sandbox(
     tmp_path: Path,
     monkeypatch,

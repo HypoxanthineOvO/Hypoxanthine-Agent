@@ -8,6 +8,7 @@ import inspect
 import os
 from pathlib import Path
 import sqlite3
+import shutil
 from typing import Any
 
 from fastapi import FastAPI
@@ -24,6 +25,7 @@ from hypo_agent.core.config_loader import (
     is_test_mode,
 )
 from hypo_agent.channels.coder import CoderClient, CoderTaskService
+from hypo_agent.channels.codex_bridge import CodexBridge
 from hypo_agent.channels.coder.coder_stream_watcher import CoderStreamWatcher
 from hypo_agent.channels.coder.coder_webhook import router as coder_webhook_router
 from hypo_agent.channels.feishu_channel import FeishuChannel
@@ -216,6 +218,7 @@ class AppDeps:
     heartbeat_service: HeartbeatService | Any | None = None
     wewe_rss_monitor: WeWeRSSMonitorService | Any | None = None
     memory_gc: MemoryGC | Any | None = None
+    codex_bridge: CodexBridge | Any | None = None
     coder_client: CoderClient | Any | None = None
     coder_task_service: CoderTaskService | Any | None = None
     coder_stream_watcher: CoderStreamWatcher | Any | None = None
@@ -480,7 +483,7 @@ def _build_repair_service(
     *,
     structured_store: StructuredStore,
     session_memory: SessionMemory,
-    coder_task_service: CoderTaskService | Any | None,
+    codex_bridge: CodexBridge | Any | None,
     repo_root: Path,
 ) -> Any | None:
     if RepairService is None:
@@ -489,8 +492,29 @@ def _build_repair_service(
     return RepairService(
         structured_store=structured_store,
         session_memory=session_memory,
-        coder_task_service=coder_task_service,
+        codex_bridge=codex_bridge,
         repo_root=repo_root,
+    )
+
+
+def _build_codex_bridge(secrets_path: Path | str = "config/secrets.yaml") -> CodexBridge:
+    model = "gpt-5.4"
+    reasoning_effort = "high"
+    codex_bin = shutil.which("codex") or ""
+    try:
+        secrets = load_secrets_config(secrets_path)
+    except FileNotFoundError:
+        secrets = None
+    services = secrets.services if secrets is not None else None
+    codex_cfg = services.codex if services is not None else None
+    if codex_cfg is not None:
+        model = str(codex_cfg.model or "").strip() or model
+        reasoning_effort = str(codex_cfg.reasoning_effort or "").strip() or reasoning_effort
+        codex_bin = str(codex_cfg.codex_bin or "").strip() or codex_bin
+    return CodexBridge(
+        model=model,
+        reasoning_effort=reasoning_effort,
+        codex_bin=codex_bin or None,
     )
 
 
@@ -508,6 +532,8 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
         scheduler=scheduler,
     )
     probe_server = ProbeServer()
+    session_memory = SessionMemory(buffer_limit=100, active_window_days=30)
+    codex_bridge = _build_codex_bridge()
     coder_client, coder_webhook_secret, coder_webhook_url = _load_hypo_coder_runtime()
     coder_task_service = (
         CoderTaskService(
@@ -520,8 +546,8 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
     )
     repair_service = _build_repair_service(
         structured_store=structured_store,
-        session_memory=SessionMemory(buffer_limit=100, active_window_days=30),
-        coder_task_service=coder_task_service,
+        session_memory=session_memory,
+        codex_bridge=codex_bridge,
         repo_root=get_agent_root(),
     )
     permission_manager = PermissionManager(resolved_security.directory_whitelist)
@@ -546,12 +572,13 @@ def _build_default_deps(security: SecurityConfig | None = None) -> AppDeps:
     )
 
     return AppDeps(
-        session_memory=repair_service.session_memory,
+        session_memory=session_memory,
         structured_store=structured_store,
         image_renderer=image_renderer,
         event_queue=event_queue,
         scheduler=scheduler,
         heartbeat_service=heartbeat_service,
+        codex_bridge=codex_bridge,
         coder_client=coder_client,
         coder_task_service=coder_task_service,
         coder_webhook_secret=coder_webhook_secret,
@@ -1080,11 +1107,13 @@ def create_app(
         resolved_deps.image_renderer = ImageRenderer()
     if resolved_deps.probe_server is None:
         resolved_deps.probe_server = ProbeServer()
+    if resolved_deps.codex_bridge is None:
+        resolved_deps.codex_bridge = _build_codex_bridge()
     if resolved_deps.repair_service is None:
         resolved_deps.repair_service = _build_repair_service(
             structured_store=resolved_deps.structured_store,
             session_memory=resolved_deps.session_memory,
-            coder_task_service=resolved_deps.coder_task_service,
+            codex_bridge=resolved_deps.codex_bridge,
             repo_root=get_agent_root(),
         )
 
@@ -1108,6 +1137,10 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await resolved_deps.structured_store.init()
+        if resolved_deps.codex_bridge is not None:
+            started = await resolved_deps.codex_bridge.start()
+            if not started:
+                logger.warning("codex_bridge.start_failed")
         image_renderer = resolved_deps.image_renderer
         if image_renderer is not None and callable(getattr(image_renderer, "initialize", None)):
             try:
@@ -1285,6 +1318,8 @@ def create_app(
                     resolved_deps.memory_gc.run,
                 )
         await app.state.pipeline.start_event_consumer()
+        if resolved_deps.repair_service is not None:
+            await resolved_deps.repair_service.recover_running_runs()
         await start_feishu_channel()
         await start_weixin_channel()
         await restart_qq_ws_client()
@@ -1320,6 +1355,8 @@ def create_app(
             await stop_feishu_channel()
             await stop_weixin_channel()
             await app.state.pipeline.stop_event_consumer()
+            if resolved_deps.codex_bridge is not None:
+                await resolved_deps.codex_bridge.stop()
             if resolved_deps.scheduler is not None:
                 await resolved_deps.scheduler.stop()
             wewe_rss_monitor = getattr(app.state, "wewe_rss_monitor", None)
@@ -1378,6 +1415,7 @@ def create_app(
     app.state.wewe_rss_monitor = resolved_deps.wewe_rss_monitor
     app.state.agent_watchdog = None
     app.state.memory_gc = resolved_deps.memory_gc
+    app.state.codex_bridge = resolved_deps.codex_bridge
     app.state.coder_client = resolved_deps.coder_client
     app.state.coder_task_service = resolved_deps.coder_task_service
     app.state.coder_stream_watcher = resolved_deps.coder_stream_watcher
@@ -1848,11 +1886,12 @@ def create_app(
         user_id = str(getattr(client, "user_id", "") or "").strip()
         if client is None or not bot_token:
             return
+        channel_config = getattr(channel, "config", None)
         adapter = WeixinAdapter(
             client=client,
             target_user_id="",
             image_renderer=resolved_deps.image_renderer,
-            markdown_enabled=weixin_cfg.markdown_enabled,
+            markdown_enabled=bool(getattr(channel_config, "markdown_enabled", True)),
             on_message_sent=channel.record_message_sent,
         )
         app.state.weixin_adapter = adapter
@@ -2101,11 +2140,6 @@ def create_app(
         resolved_deps.coder_stream_watcher = CoderStreamWatcher(
             coder_task_service=resolved_deps.coder_task_service,
             push_callback=on_proactive_message,
-            repair_update_callback=(
-                resolved_deps.repair_service.on_task_update
-                if resolved_deps.repair_service is not None
-                else None
-            ),
             poll_interval_seconds=5.0,
             message_char_limit=800,
         )
@@ -2127,6 +2161,7 @@ def create_app(
             structured_store=deps.structured_store,
         )
         deps.coder_client, deps.coder_webhook_secret, deps.coder_webhook_url = _load_hypo_coder_runtime()
+        deps.codex_bridge = _build_codex_bridge()
         deps.coder_task_service = (
             CoderTaskService(
                 coder_client=deps.coder_client,
@@ -2139,7 +2174,7 @@ def create_app(
         deps.repair_service = _build_repair_service(
             structured_store=deps.structured_store,
             session_memory=deps.session_memory,
-            coder_task_service=deps.coder_task_service,
+            codex_bridge=deps.codex_bridge,
             repo_root=get_agent_root(),
         )
         _register_enabled_skills(
@@ -2163,6 +2198,7 @@ def create_app(
         app.state.circuit_breaker = deps.circuit_breaker
         app.state.skill_manager = deps.skill_manager
         app.state.coder_client = deps.coder_client
+        app.state.codex_bridge = deps.codex_bridge
         app.state.coder_task_service = deps.coder_task_service
         app.state.repair_service = deps.repair_service
         app.state.coder_webhook_secret = deps.coder_webhook_secret or ""
@@ -2186,17 +2222,16 @@ def create_app(
             deps.coder_stream_watcher = CoderStreamWatcher(
                 coder_task_service=deps.coder_task_service,
                 push_callback=on_proactive_message,
-                repair_update_callback=(
-                    deps.repair_service.on_task_update
-                    if deps.repair_service is not None
-                    else None
-                ),
                 poll_interval_seconds=5.0,
                 message_char_limit=800,
             )
             deps.coder_task_service.watcher = deps.coder_stream_watcher
         else:
             deps.coder_stream_watcher = None
+        if deps.codex_bridge is not None:
+            await deps.codex_bridge.start()
+        if deps.repair_service is not None:
+            await deps.repair_service.recover_running_runs()
         app.state.coder_stream_watcher = deps.coder_stream_watcher
         app.state.output_compressor = deps.output_compressor
         refresh_narration_observer()
