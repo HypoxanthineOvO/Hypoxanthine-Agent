@@ -377,6 +377,61 @@ def test_query_db_normalizes_filter_and_sort_property_aliases() -> None:
     asyncio.run(_run())
 
 
+def test_query_db_normalizes_time_sort_alias_to_date_property() -> None:
+    async def _run() -> None:
+        client = FakeNotionClient()
+        client.database_payload["properties"] = {
+            "名称": {"id": "title", "type": "title"},
+            "日期": {"id": "date", "type": "date"},
+        }
+        skill = NotionSkill(notion_client=client)
+
+        result = await skill.execute(
+            "notion_query_db",
+            {
+                "database_id": "22222222222222222222222222222222",
+                "sorts": '[{"property":"时间","direction":"ascending"}]',
+                "limit": 20,
+            },
+        )
+
+        assert result.status == "success"
+        assert client.query_calls
+        assert client.query_calls[0]["sorts"] == [{"property": "日期", "direction": "ascending"}]
+
+    asyncio.run(_run())
+
+
+def test_query_db_normalizes_generic_date_aliases_to_only_date_property() -> None:
+    async def _run() -> None:
+        client = FakeNotionClient()
+        client.database_payload["properties"] = {
+            "Task": {"id": "title", "type": "title"},
+            "Date": {"id": "when", "type": "date"},
+        }
+        skill = NotionSkill(notion_client=client)
+
+        result = await skill.execute(
+            "notion_query_db",
+            {
+                "database_id": "22222222222222222222222222222222",
+                "filter": '{"property":"日期","date":{"on_or_after":"2026-04-22"}}',
+                "sorts": '[{"property":"时间","direction":"ascending"}]',
+                "limit": 20,
+            },
+        )
+
+        assert result.status == "success"
+        assert client.query_calls
+        assert client.query_calls[0]["filter"] == {
+            "property": "Date",
+            "date": {"on_or_after": "2026-04-22"},
+        }
+        assert client.query_calls[0]["sorts"] == [{"property": "Date", "direction": "ascending"}]
+
+    asyncio.run(_run())
+
+
 def test_create_entry_constructs_parent_properties_and_children() -> None:
     async def _run() -> None:
         client = FakeNotionClient()

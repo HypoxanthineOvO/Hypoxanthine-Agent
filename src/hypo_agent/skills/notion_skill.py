@@ -681,14 +681,18 @@ class NotionSkill(BaseSkill):
             for candidate in schema:
                 if str(candidate or "").casefold() == alias.casefold():
                     return str(candidate)
+
+        inferred = self._infer_schema_property_name(raw_name, schema=schema)
+        if inferred:
+            return inferred
         return raw_name
 
     def _property_alias_candidates(self, name: str) -> list[str]:
         lowered = str(name or "").strip().casefold()
         if lowered in {"name", "title", "名称"}:
             return ["名称", "Name", "Title"]
-        if lowered in {"due date", "due", "deadline", "截止日期", "截至", "日期"}:
-            return ["日期", "Due Date", "Due", "Deadline", "截止日期", "截至"]
+        if lowered in {"due date", "due", "deadline", "截止日期", "截至", "日期", "time", "时间"}:
+            return ["日期", "Date", "Due Date", "Due", "Deadline", "截止日期", "截至", "When"]
         if lowered in {"done", "completed", "完成", "已完成"}:
             return ["已完成", "Done", "Completed", "完成"]
         if lowered in {"status", "状态"}:
@@ -700,6 +704,18 @@ class NotionSkill(BaseSkill):
         if lowered in {"description", "描述"}:
             return ["描述", "Description"]
         return []
+
+    def _infer_schema_property_name(self, name: str, *, schema: dict[str, str]) -> str:
+        lowered = str(name or "").strip().casefold()
+        if lowered in {"due date", "due", "deadline", "截止日期", "截至", "日期", "date", "time", "时间", "when"}:
+            return self._unique_schema_property_by_type(schema, "date")
+        return ""
+
+    def _unique_schema_property_by_type(self, schema: dict[str, str], *property_types: str) -> str:
+        matches = [name for name, prop_type in schema.items() if prop_type in property_types]
+        if len(matches) == 1:
+            return str(matches[0])
+        return ""
 
     def _normalize_query_filter(
         self,
