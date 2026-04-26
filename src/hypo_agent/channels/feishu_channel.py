@@ -28,6 +28,8 @@ _FEISHU_RUNTIME_ERRORS = (OSError, RuntimeError, TypeError, ValueError)
 try:  # pragma: no cover - optional dependency during tests
     import lark_oapi as lark
     from lark_oapi.api.im.v1 import (
+        CreateFileRequest,
+        CreateFileRequestBody,
         CreateImageRequest,
         CreateImageRequestBody,
         CreateMessageRequest,
@@ -37,6 +39,8 @@ except ModuleNotFoundError:  # pragma: no cover - exercised via lazy startup pat
     lark = None
     CreateImageRequest = None
     CreateImageRequestBody = None
+    CreateFileRequest = None
+    CreateFileRequestBody = None
     CreateMessageRequest = None
     CreateMessageRequestBody = None
 
@@ -105,6 +109,34 @@ class _LarkMessageClient:
         if not image_key:
             raise FeishuAPIError("feishu image upload missing image_key")
         return image_key
+
+    def upload_file(self, payload: bytes, filename: str, file_type: str = "stream") -> str:
+        if CreateFileRequest is None or CreateFileRequestBody is None:
+            raise RuntimeError("lark-oapi file upload support is unavailable")
+
+        file_obj = io.BytesIO(payload)
+        file_obj.name = filename
+        req = (
+            CreateFileRequest.builder()
+            .request_body(
+                CreateFileRequestBody.builder()
+                .file_type(file_type)
+                .file_name(filename)
+                .file(file_obj)
+                .build()
+            )
+            .build()
+        )
+        resp = self.client.im.v1.file.create(req)
+        if not resp.success():
+            raise FeishuAPIError(
+                str(getattr(resp, "msg", "") or "feishu file upload failed"),
+                code=getattr(resp, "code", None),
+            )
+        file_key = str(getattr(getattr(resp, "data", None), "file_key", "") or "").strip()
+        if not file_key:
+            raise FeishuAPIError("feishu file upload missing file_key")
+        return file_key
 
 
 class FeishuChannel:
@@ -380,8 +412,7 @@ class FeishuChannel:
             if attachment is None:
                 continue
             if attachment.type != "image":
-                label = attachment.filename or Path(str(attachment.url or "")).name or attachment.type
-                payloads.extend(await self._adapter.format(RichResponse(text=f"[文件] {label}")))
+                payloads.append(await self._build_file_payload(attachment))
                 continue
             payloads.append(await self._build_image_payload(attachment))
 
@@ -422,6 +453,31 @@ class FeishuChannel:
             "content": json.dumps({"image_key": image_key}, ensure_ascii=False, separators=(",", ":")),
         }
 
+    async def _build_file_payload(self, attachment: Attachment) -> dict[str, str]:
+        try:
+            payload = self._load_attachment_bytes(str(getattr(attachment, "url", "") or "").strip())
+            file_key = await self._upload_file_bytes(
+                payload,
+                filename=self._attachment_filename(attachment),
+                file_type=self._feishu_file_type(attachment),
+            )
+        except FeishuAPIError:
+            raise
+        except _FEISHU_RUNTIME_ERRORS as exc:
+            logger.warning(
+                "feishu.file.upload_failed",
+                attachment_url=str(getattr(attachment, "url", "") or ""),
+                error=str(exc),
+            )
+            label = self._attachment_filename(attachment)
+            cards = await self._adapter.format(RichResponse(text=f"[文件] {label}"))
+            return cards[0]
+
+        return {
+            "msg_type": "file",
+            "content": json.dumps({"file_key": file_key}, ensure_ascii=False, separators=(",", ":")),
+        }
+
     async def _upload_image_bytes(self, payload: bytes, *, filename: str) -> str:
         uploader = self._ensure_api_client().upload_image
         try:
@@ -431,6 +487,31 @@ class FeishuChannel:
             if "positional argument" not in message and "keyword argument" not in message:
                 raise
             return await asyncio.to_thread(uploader, payload)
+
+    async def _upload_file_bytes(self, payload: bytes, *, filename: str, file_type: str) -> str:
+        uploader = getattr(self._ensure_api_client(), "upload_file", None)
+        if not callable(uploader):
+            raise RuntimeError("feishu file upload support is unavailable")
+        try:
+            return await asyncio.to_thread(uploader, payload, filename, file_type)
+        except TypeError as exc:
+            message = str(exc)
+            if "positional argument" not in message and "keyword argument" not in message:
+                raise
+            try:
+                return await asyncio.to_thread(uploader, payload, filename)
+            except TypeError as fallback_exc:
+                fallback_message = str(fallback_exc)
+                if "positional argument" not in fallback_message and "keyword argument" not in fallback_message:
+                    raise
+                return await asyncio.to_thread(uploader, payload)
+
+    def _feishu_file_type(self, attachment: Attachment) -> str:
+        if attachment.type == "audio":
+            return "audio"
+        if attachment.type == "video":
+            return "mp4"
+        return "stream"
 
     def _attachment_filename(self, attachment: Attachment) -> str:
         filename = str(attachment.filename or "").strip()

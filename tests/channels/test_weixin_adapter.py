@@ -22,6 +22,7 @@ class DummyClient:
         self.sent: list[tuple[str, str]] = []
         self.sent_context_tokens: list[str | None] = []
         self.sent_images: list[dict] = []
+        self.sent_files: list[dict] = []
         self.raw_messages: list[dict] = []
         self.upload_requests: list[dict] = []
         self.uploaded_payloads: list[dict] = []
@@ -84,6 +85,20 @@ class DummyClient:
                         "encrypt_query_param": media.get("encrypt_query_param"),
                         "aes_key": media.get("aes_key"),
                         "encrypted_file_size": image_item.get("mid_size"),
+                        "context_token": context_token,
+                    }
+                )
+                continue
+            if item_type == 4:
+                file_item = item.get("file_item", {})
+                media = file_item.get("media", {}) if isinstance(file_item, dict) else {}
+                self.sent_files.append(
+                    {
+                        "to_user_id": to_user_id,
+                        "encrypt_query_param": media.get("encrypt_query_param"),
+                        "aes_key": media.get("aes_key"),
+                        "encrypted_file_size": file_item.get("file_size"),
+                        "file_name": file_item.get("file_name"),
                         "context_token": context_token,
                     }
                 )
@@ -360,6 +375,45 @@ def test_weixin_adapter_sends_text_plus_image_attachment_for_qr_handoff(tmp_path
         assert len(client.sent_images) == 1
         assert client.sent_images[0]["to_user_id"] == "user@im.wechat"
         assert client.sent_images[0]["encrypt_query_param"] == "download-param-1"
+
+    asyncio.run(_run())
+
+
+def test_weixin_adapter_sends_file_attachment_as_file_item(tmp_path: Path) -> None:
+    async def _run() -> None:
+        export_path = tmp_path / "notion-export.md"
+        export_path.write_text("# Notion Export\n", encoding="utf-8")
+        client = DummyClient()
+        client.last_context_token = "ctx-file"
+        adapter = WeixinAdapter(
+            client=client,
+            target_user_id="user@im.wechat",
+            send_delay_seconds=0,
+        )
+
+        await adapter.push(
+            Message(
+                text="已导出 Notion 文件。",
+                sender="assistant",
+                session_id="main",
+                channel="system",
+                attachments=[
+                    {
+                        "type": "file",
+                        "url": str(export_path),
+                        "filename": "notion-export.md",
+                        "mime_type": "text/markdown",
+                    }
+                ],
+            )
+        )
+
+        assert client.sent == [("user@im.wechat", "已导出 Notion 文件。")]
+        assert len(client.sent_files) == 1
+        assert client.sent_files[0]["to_user_id"] == "user@im.wechat"
+        assert client.sent_files[0]["encrypt_query_param"] == "download-param-1"
+        assert client.sent_files[0]["file_name"] == "notion-export.md"
+        assert client.upload_requests[0]["media_type"] == 4
 
     asyncio.run(_run())
 

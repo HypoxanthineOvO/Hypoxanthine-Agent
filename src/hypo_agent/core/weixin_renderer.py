@@ -85,8 +85,14 @@ class WeixinRenderer:
                 )
                 continue
             if isinstance(block, FileAttachmentBlock):
-                label = block.filename or Path(str(block.url or "")).name or block.attachment_type
-                self._append_text_segment(segments, f"[文件] {label}")
+                segments.append(
+                    {
+                        "type": "file",
+                        "source": block.url,
+                        "name": block.filename or Path(str(block.url or "")).name or block.attachment_type,
+                        "mime_type": block.mime_type,
+                    }
+                )
 
         return self._merge_adjacent_text_segments(segments)
 

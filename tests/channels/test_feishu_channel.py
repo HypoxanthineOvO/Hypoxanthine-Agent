@@ -22,6 +22,7 @@ class ApiClientStub:
         self.reply_calls: list[dict] = []
         self.create_calls: list[dict] = []
         self.upload_image_calls: list[bytes] = []
+        self.upload_file_calls: list[tuple[bytes, str, str]] = []
 
     def reply(self, payload: dict) -> None:
         self.reply_calls.append(payload)
@@ -32,6 +33,10 @@ class ApiClientStub:
     def upload_image(self, payload: bytes) -> str:
         self.upload_image_calls.append(payload)
         return f"img_{len(self.upload_image_calls)}"
+
+    def upload_file(self, payload: bytes, filename: str, file_type: str = "stream") -> str:
+        self.upload_file_calls.append((payload, filename, file_type))
+        return f"file_{len(self.upload_file_calls)}"
 
 
 def _message_event(
@@ -195,6 +200,50 @@ def test_feishu_channel_pushes_image_attachments_for_proactive_message(tmp_path)
         assert api_client.create_calls[0]["msg_type"] == "interactive"
         assert api_client.create_calls[1]["msg_type"] == "image"
         assert json.loads(api_client.create_calls[1]["content"]) == {"image_key": "img_1"}
+
+    asyncio.run(_run())
+
+
+def test_feishu_channel_pushes_file_attachments_for_proactive_message(tmp_path) -> None:
+    async def _run() -> None:
+        queue = QueueStub()
+        api_client = ApiClientStub()
+        export_path = tmp_path / "notion-export.md"
+        export_path.write_text("# Notion Export\n", encoding="utf-8")
+        channel = FeishuChannel(
+            app_id="app-id",
+            app_secret="app-secret",
+            message_queue=queue,
+            api_client=api_client,
+        )
+        channel.bind_chat_session(chat_id="oc_chat_123", session_id="main")
+
+        result = await channel.push_proactive(
+            Message(
+                text="已导出 Notion 文件。",
+                sender="assistant",
+                session_id="main",
+                channel="feishu",
+                attachments=[
+                    {
+                        "type": "file",
+                        "url": str(export_path),
+                        "filename": "notion-export.md",
+                        "mime_type": "text/markdown",
+                    }
+                ],
+                metadata={"feishu": {"chat_id": "oc_chat_123"}},
+            )
+        )
+
+        assert result.success is True
+        assert api_client.upload_file_calls == [
+            (b"# Notion Export\n", "notion-export.md", "stream")
+        ]
+        assert len(api_client.create_calls) == 2
+        assert api_client.create_calls[0]["msg_type"] == "interactive"
+        assert api_client.create_calls[1]["msg_type"] == "file"
+        assert json.loads(api_client.create_calls[1]["content"]) == {"file_key": "file_1"}
 
     asyncio.run(_run())
 

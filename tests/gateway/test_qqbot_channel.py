@@ -478,6 +478,125 @@ def test_qqbot_send_message_uses_public_file_url_for_local_images(tmp_path: Path
     assert "path=" in str(upload_call[2]["url"])
 
 
+def test_qqbot_send_message_uploads_file_attachment(tmp_path: Path, monkeypatch) -> None:
+    from hypo_agent.channels.qq_bot_channel import QQBotChannelService, clear_qqbot_token_cache
+
+    clear_qqbot_token_cache()
+    export_path = tmp_path / "notion-export.md"
+    export_path.write_text("# Notion Export\n", encoding="utf-8")
+    calls: list[tuple[str, str, dict[str, object]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8")) if request.content else {}
+        calls.append((request.method, str(request.url), payload))
+        if request.url.path.endswith("/getAppAccessToken"):
+            return httpx.Response(200, json={"access_token": "token-1", "expires_in": 7200})
+        if request.url.path.endswith("/files"):
+            return httpx.Response(200, json={"file_info": "file-info-1"})
+        if request.url.path.endswith("/messages"):
+            return httpx.Response(200, json={"id": "reply-1", "timestamp": "1711459200"})
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    transport = httpx.MockTransport(handler)
+
+    class MockAsyncClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("hypo_agent.channels.qq_bot_channel.httpx.AsyncClient", MockAsyncClient)
+
+    service = QQBotChannelService(app_id="1029384756", app_secret="bot-secret-xyz")
+    result = asyncio.run(
+        service.send_message(
+            Message(
+                text="已导出 Notion 文件。",
+                sender="assistant",
+                session_id="main",
+                channel="qq",
+                sender_id="OPENID-C2C-001",
+                attachments=[
+                    {
+                        "type": "file",
+                        "url": str(export_path),
+                        "filename": "notion-export.md",
+                        "mime_type": "text/markdown",
+                    }
+                ],
+            )
+        )
+    )
+
+    assert result.success is True
+    upload_call = next(call for call in calls if call[1].endswith("/v2/users/OPENID-C2C-001/files"))
+    assert upload_call[2]["file_type"] == 4
+    assert upload_call[2]["srv_send_msg"] is False
+    assert upload_call[2]["file_data"] == "IyBOb3Rpb24gRXhwb3J0Cg=="
+
+    media_call = calls[-1]
+    assert media_call[1].endswith("/v2/users/OPENID-C2C-001/messages")
+    assert media_call[2]["msg_type"] == 7
+    assert media_call[2]["media"] == {"file_info": "file-info-1"}
+
+
+def test_qqbot_legacy_send_message_uploads_file_attachment(tmp_path: Path, monkeypatch) -> None:
+    from hypo_agent.channels.qq_bot_channel import QQBotChannelService, clear_qqbot_token_cache
+
+    clear_qqbot_token_cache()
+    export_path = tmp_path / "notion-export.md"
+    export_path.write_text("# Notion Export\n", encoding="utf-8")
+    calls: list[tuple[str, str, dict[str, object]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8")) if request.content else {}
+        calls.append((request.method, str(request.url), payload))
+        if request.url.path.endswith("/getAppAccessToken"):
+            return httpx.Response(200, json={"access_token": "token-1", "expires_in": 7200})
+        if request.url.path.endswith("/files"):
+            return httpx.Response(200, json={"file_info": "file-info-1"})
+        if request.url.path.endswith("/messages"):
+            return httpx.Response(200, json={"id": "reply-1", "timestamp": "1711459200"})
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    transport = httpx.MockTransport(handler)
+
+    class MockAsyncClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("hypo_agent.channels.qq_bot_channel.httpx.AsyncClient", MockAsyncClient)
+
+    service = QQBotChannelService(
+        app_id="1029384756",
+        app_secret="bot-secret-xyz",
+        markdown_mode="disabled",
+    )
+    result = asyncio.run(
+        service.send_message(
+            Message(
+                text="已导出 Notion 文件。",
+                sender="assistant",
+                session_id="main",
+                channel="qq",
+                sender_id="OPENID-C2C-001",
+                attachments=[
+                    {
+                        "type": "file",
+                        "url": str(export_path),
+                        "filename": "notion-export.md",
+                    }
+                ],
+            )
+        )
+    )
+
+    assert result.success is True
+    assert any(call[1].endswith("/v2/users/OPENID-C2C-001/files") for call in calls)
+    assert calls[-1][2]["msg_type"] == 7
+    assert calls[-1][2]["media"] == {"file_info": "file-info-1"}
+
+
 def test_qqbot_send_message_merges_adjacent_text_segments_around_images(tmp_path: Path, monkeypatch) -> None:
     from hypo_agent.channels.qq_bot_channel import QQBotChannelService
 

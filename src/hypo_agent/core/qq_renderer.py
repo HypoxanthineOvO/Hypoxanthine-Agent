@@ -89,6 +89,7 @@ class QQRenderer:
                         "source": block.url,
                         "name": block.filename or Path(str(block.url or "")).name or block.attachment_type,
                         "mime_type": block.mime_type,
+                        "attachment_type": block.attachment_type,
                     }
                 )
 

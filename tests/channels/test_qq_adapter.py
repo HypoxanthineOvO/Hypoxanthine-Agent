@@ -181,6 +181,41 @@ def test_qq_adapter_sends_mixed_segments_in_single_napcat_message(monkeypatch) -
     ]
 
 
+def test_qq_adapter_formats_file_attachment_as_file_segment(tmp_path) -> None:
+    export_path = tmp_path / "notion-export.md"
+    export_path.write_text("# Notion Export\n", encoding="utf-8")
+    adapter = QQAdapter(napcat_http_url="http://localhost:3008")
+
+    segments = asyncio.run(
+        adapter.format(
+            Message(
+                text="已导出 Notion 文件。",
+                sender="assistant",
+                session_id="main",
+                attachments=[
+                    {
+                        "type": "file",
+                        "url": str(export_path),
+                        "filename": "notion-export.md",
+                        "mime_type": "text/markdown",
+                    }
+                ],
+            )
+        )
+    )
+
+    assert segments == [
+        {"type": "text", "data": {"text": "已导出 Notion 文件。"}},
+        {
+            "type": "file",
+            "data": {
+                "file": export_path.resolve(strict=False).as_uri(),
+                "name": "notion-export.md",
+            },
+        },
+    ]
+
+
 def test_qq_adapter_send_private_segments_posts_single_mixed_message(monkeypatch) -> None:
     adapter = QQAdapter(napcat_http_url="http://localhost:3008")
     captured: dict[str, object] = {}

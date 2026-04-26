@@ -28,6 +28,8 @@ from hypo_agent.models import Attachment, Message
 logger = structlog.get_logger("hypo_agent.channels.weixin.adapter")
 _WEIXIN_RETRY_SPLIT_BYTES = 96
 _WEIXIN_IMAGE_RETRY_DELAYS = (0.5, 1.0)
+_WEIXIN_FILE_MEDIA_TYPE = 4
+_WEIXIN_FILE_ITEM_TYPE = 4
 _WEIXIN_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _WEIXIN_NON_BMP_RE = re.compile(r"[\U00010000-\U0010FFFF]")
 _WEIXIN_ADAPTER_ERRORS = (
@@ -238,10 +240,15 @@ class WeixinAdapter:
 
         if segment_type == "file":
             label = str(segment.get("name") or Path(str(segment.get("source") or "")).name or "file").strip()
-            return await self._send_text_chunk(
+            item = await self._build_file_item(
+                file_ref=str(segment.get("source") or "").strip(),
+                filename=label,
                 target_user_id=target_user_id,
-                text=f"[文件] {label}",
-                context_token=context_token,
+            )
+            return await self._client_send_item_list(
+                target_user_id=target_user_id,
+                item_list=[item],
+                context_token=context_token or None,
             )
         return {"ret": 0}
 
@@ -735,7 +742,14 @@ class WeixinAdapter:
                 )
                 continue
             label = copied.filename or Path(str(copied.url or "")).name or copied.type
-            segments.append({"type": "text", "text": f"[文件] {label}"})
+            segments.append(
+                {
+                    "type": "file",
+                    "source": str(copied.url or "").strip(),
+                    "name": label,
+                    "mime_type": copied.mime_type,
+                }
+            )
 
         return segments
 
@@ -839,7 +853,16 @@ class WeixinAdapter:
                 continue
             if segment_type == "file":
                 label = str(segment.get("name") or Path(str(segment.get("source") or "")).name or "file").strip()
-                item_list.append({"type": 1, "text_item": {"text": f"[文件] {label}"}})
+                try:
+                    item_list.append(
+                        await self._build_file_item(
+                            file_ref=str(segment.get("source") or "").strip(),
+                            filename=label,
+                            target_user_id=target_user_id,
+                        )
+                    )
+                except _WEIXIN_ADAPTER_ERRORS:
+                    item_list.append({"type": 1, "text_item": {"text": f"[文件] {label}"}})
         return item_list
 
     async def _build_image_item(
@@ -891,6 +914,63 @@ class WeixinAdapter:
                 "mid_size": len(encrypted),
             },
         }
+
+    async def _build_file_item(
+        self,
+        *,
+        file_ref: str,
+        filename: str,
+        target_user_id: str,
+    ) -> dict[str, Any]:
+        raw = await self._load_file_bytes(file_ref)
+        aes_key = generate_aes_key()
+        encrypted = encrypt_media(raw, aes_key)
+        aes_key_hex = encode_aes_key_hex(aes_key)
+        upload_request = self.client.build_media_upload_payload(
+            to_user_id=target_user_id,
+            media_type=_WEIXIN_FILE_MEDIA_TYPE,
+            plaintext=raw,
+            encrypted_size=len(encrypted),
+            aes_key_hex=aes_key_hex,
+        )
+        upload_payload = await self._retry_image_operation(
+            stage="get_upload_url",
+            target_user_id=target_user_id,
+            image_ref=file_ref,
+            operation=lambda: self.client.get_upload_url(**upload_request),
+        )
+        upload_param = str(upload_payload.get("upload_param") or "").strip()
+        filekey = str(upload_request.get("filekey") or "").strip()
+        if not upload_param or not filekey:
+            raise RuntimeError("weixin upload response missing upload_param or filekey")
+        encrypt_query_param = await self._retry_image_operation(
+            stage="upload_media",
+            target_user_id=target_user_id,
+            image_ref=file_ref,
+            operation=lambda: self.client.upload_media(
+                upload_param=upload_param,
+                filekey=filekey,
+                encrypted_data=encrypted,
+            ),
+        )
+        return {
+            "type": _WEIXIN_FILE_ITEM_TYPE,
+            "file_item": {
+                "media": {
+                    "encrypt_query_param": encrypt_query_param,
+                    "aes_key": encode_aes_key_base64hex(aes_key),
+                    "encrypt_type": 1,
+                },
+                "file_name": filename or Path(file_ref).name or "file",
+                "file_size": len(encrypted),
+            },
+        }
+
+    async def _load_file_bytes(self, file_ref: str) -> bytes:
+        raw_ref = str(file_ref or "").strip()
+        if raw_ref.startswith(("http://", "https://")):
+            return await asyncio.to_thread(self._download_remote_image, raw_ref)
+        return self._resolve_local_path(raw_ref).read_bytes()
 
     async def _handle_retryable_item_list_failure(
         self,

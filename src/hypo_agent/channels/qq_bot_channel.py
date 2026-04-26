@@ -51,6 +51,11 @@ _HTTP_URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
 _DATA_URL_PATTERN = re.compile(r"^data:[^;]+;base64,", re.IGNORECASE)
 _INLINE_MATH_RE = re.compile(r"(?<!\$)\$(?!\$)(?P<expr>.+?)(?<!\$)\$(?!\$)")
 _MARKDOWN_IMAGE_RE = re.compile(r"^\s*!\[[^\]]*\]\((?P<content>[^)\r\n]+)\)\s*$")
+_QQ_BOT_ATTACHMENT_FILE_TYPES = {
+    "video": 2,
+    "audio": 3,
+    "file": 4,
+}
 _markdown_available = True
 
 
@@ -344,29 +349,49 @@ class QQBotChannelService:
                         text=pending_text,
                     )
                     pending_text = ""
-                if segment_type != "image":
+                if segment_type == "image":
+                    image_source = str(segment.get("source") or "").strip()
+                    if not image_source:
+                        fallback_text = str(segment.get("fallback_text") or "").strip()
+                        if fallback_text:
+                            await self._send_text_with_markdown_fallback(
+                                route_kind=route_kind,
+                                openid=openid,
+                                guild_id=guild_id,
+                                msg_id=msg_id,
+                                text=fallback_text,
+                            )
+                        continue
+                    await self._send_image_with_fallback(
+                        route_kind=route_kind,
+                        openid=openid,
+                        guild_id=guild_id,
+                        msg_id=msg_id,
+                        text=None,
+                        image_source=image_source,
+                        fallback_text=self._segment_image_fallback_text(segment),
+                    )
                     continue
-                image_source = str(segment.get("source") or "").strip()
-                if not image_source:
-                    fallback_text = str(segment.get("fallback_text") or "").strip()
-                    if fallback_text:
+                if segment_type == "file":
+                    file_source = str(segment.get("source") or "").strip()
+                    if not file_source:
                         await self._send_text_with_markdown_fallback(
                             route_kind=route_kind,
                             openid=openid,
                             guild_id=guild_id,
                             msg_id=msg_id,
-                            text=fallback_text,
+                            text=self._segment_file_fallback_text(segment),
                         )
-                    continue
-                await self._send_image_with_fallback(
-                    route_kind=route_kind,
-                    openid=openid,
-                    guild_id=guild_id,
-                    msg_id=msg_id,
-                    text=None,
-                    image_source=image_source,
-                    fallback_text=self._segment_image_fallback_text(segment),
-                )
+                        continue
+                    await self._send_file_with_fallback(
+                        route_kind=route_kind,
+                        openid=openid,
+                        guild_id=guild_id,
+                        msg_id=msg_id,
+                        file_source=file_source,
+                        file_type=self._segment_file_type(segment),
+                        fallback_text=self._segment_file_fallback_text(segment),
+                    )
             if pending_text:
                 await self._send_text_with_markdown_fallback(
                     route_kind=route_kind,
@@ -428,12 +453,40 @@ class QQBotChannelService:
                         pending_text = self._join_text_parts(pending_text, str(segment.get("text") or ""))
                         pending_segment_count += 1
                         continue
-                    if segment_type == "file":
-                        label = str(segment.get("name") or Path(str(segment.get("source") or "")).name or "file").strip()
-                        pending_text = self._join_text_parts(pending_text, f"[文件] {label}")
-                        pending_segment_count += 1
-                        continue
                     if segment_type != "image":
+                        if segment_type != "file":
+                            continue
+                        if pending_segment_count:
+                            await self._send_with_retry(
+                                route_kind=route_kind,
+                                openid=openid,
+                                guild_id=guild_id,
+                                msg_id=msg_id,
+                                text=pending_text,
+                            )
+                            delivered_segment_count += pending_segment_count
+                            pending_text = ""
+                            pending_segment_count = 0
+                        file_source = str(segment.get("source") or "").strip()
+                        if not file_source:
+                            await self._send_with_retry(
+                                route_kind=route_kind,
+                                openid=openid,
+                                guild_id=guild_id,
+                                msg_id=msg_id,
+                                text=self._segment_file_fallback_text(segment),
+                            )
+                        else:
+                            await self._send_file_with_fallback(
+                                route_kind=route_kind,
+                                openid=openid,
+                                guild_id=guild_id,
+                                msg_id=msg_id,
+                                file_source=file_source,
+                                file_type=self._segment_file_type(segment),
+                                fallback_text=self._segment_file_fallback_text(segment),
+                            )
+                        delivered_segment_count += 1
                         continue
 
                     image_source = str(segment.get("source") or "").strip()
@@ -746,7 +799,15 @@ class QQBotChannelService:
                 )
                 continue
             label = attachment.filename or Path(str(attachment.url or "")).name or attachment.type
-            segments.append({"type": "text", "text": f"[文件] {label}"})
+            segments.append(
+                {
+                    "type": "file",
+                    "source": str(attachment.url or "").strip(),
+                    "name": label,
+                    "mime_type": attachment.mime_type,
+                    "attachment_type": attachment.type,
+                }
+            )
 
         legacy_image = str(message.image or "").strip()
         if legacy_image:
@@ -764,7 +825,14 @@ class QQBotChannelService:
         ):
             if raw_url:
                 file_label = Path(raw_url).name or label
-                segments.append({"type": "text", "text": f"[文件] {file_label}"})
+                segments.append(
+                    {
+                        "type": "file",
+                        "source": raw_url,
+                        "name": file_label,
+                        "attachment_type": label,
+                    }
+                )
 
         return self._merge_adjacent_text_segments(segments)
 
@@ -966,6 +1034,51 @@ class QQBotChannelService:
                 text=fallback_text,
             )
 
+    async def _send_file_with_fallback(
+        self,
+        *,
+        route_kind: str,
+        openid: str,
+        guild_id: str | None,
+        msg_id: str | None,
+        file_source: str,
+        file_type: int,
+        fallback_text: str,
+    ) -> None:
+        if route_kind != "c2c":
+            logger.warning("qq_bot.file.fallback_to_text", openid=openid, route_kind=route_kind)
+            if fallback_text:
+                await self._send_with_retry(
+                    route_kind=route_kind,
+                    openid=openid,
+                    guild_id=guild_id,
+                    msg_id=msg_id,
+                    text=fallback_text,
+                )
+            return
+
+        try:
+            await self._send_with_retry(
+                route_kind=route_kind,
+                openid=openid,
+                guild_id=guild_id,
+                msg_id=msg_id,
+                text=None,
+                file_source=file_source,
+                file_type=file_type,
+            )
+        except (httpx.HTTPStatusError, httpx.TransportError, httpx.TimeoutException, OSError, ValueError) as exc:
+            logger.warning("qq_bot.file.fallback_to_text", openid=openid, error=str(exc))
+            if not fallback_text:
+                return
+            await self._send_with_retry(
+                route_kind=route_kind,
+                openid=openid,
+                guild_id=guild_id,
+                msg_id=msg_id,
+                text=fallback_text,
+            )
+
     async def _load_persisted_openid(self) -> str:
         loader = self._load_target_openid
         if not callable(loader):
@@ -1010,6 +1123,17 @@ class QQBotChannelService:
         if label:
             return f"[图片] {label}"
         return self._image_fallback_text(str(segment.get("source") or ""))
+
+    def _segment_file_fallback_text(self, segment: Mapping[str, Any]) -> str:
+        label = str(segment.get("name") or "").strip()
+        raw = str(segment.get("source") or "").strip()
+        if not label:
+            label = Path(raw).name or str(segment.get("attachment_type") or "file").strip() or "file"
+        return f"[文件] {label}"
+
+    def _segment_file_type(self, segment: Mapping[str, Any]) -> int:
+        attachment_type = str(segment.get("attachment_type") or "file").strip().lower()
+        return _QQ_BOT_ATTACHMENT_FILE_TYPES.get(attachment_type, 4)
 
     def _join_text_parts(self, *parts: str) -> str:
         return "\n".join(part.strip() for part in parts if str(part or "").strip()).strip()
@@ -1056,10 +1180,14 @@ class QQBotChannelService:
         msg_id: str | None,
         text: str | None,
         image_source: str | None = None,
+        file_source: str | None = None,
+        file_type: int = 4,
     ) -> None:
         for attempt in range(2):
             try:
                 access_token = await self._get_access_token()
+                if image_source is not None and file_source is not None:
+                    raise ValueError("qq message cannot send image and file in one media slot")
                 if image_source is not None:
                     file_info = await self._upload_image(
                         access_token=access_token,
@@ -1089,6 +1217,27 @@ class QQBotChannelService:
                                 **({"msg_id": msg_id} if msg_id else {}),
                             },
                         )
+                elif file_source is not None:
+                    if route_kind == "dm" and guild_id:
+                        raise ValueError("qq bot dm file upload is unavailable")
+                    file_info = await self._upload_file(
+                        access_token=access_token,
+                        openid=openid,
+                        file_source=file_source,
+                        file_type=file_type,
+                    )
+                    await self._request_json(
+                        "POST",
+                        f"{self.api_base_url}/v2/users/{openid}/messages",
+                        access_token=access_token,
+                        body={
+                            "msg_type": 7,
+                            "media": {"file_info": file_info},
+                            "msg_seq": _next_msg_seq(msg_id),
+                            **({"content": text} if text else {}),
+                            **({"msg_id": msg_id} if msg_id else {}),
+                        },
+                    )
                 elif route_kind == "dm" and guild_id:
                     await self._request_json(
                         "POST",
@@ -1142,8 +1291,54 @@ class QQBotChannelService:
             if base64_payload:
                 upload_bodies.append({"file_type": 1, "srv_send_msg": False, "file_data": base64_payload})
 
+        return await self._upload_media_variants(
+            access_token=access_token,
+            openid=openid,
+            upload_bodies=upload_bodies,
+            media_label="image",
+        )
+
+    async def _upload_file(
+        self,
+        *,
+        access_token: str,
+        openid: str,
+        file_source: str,
+        file_type: int,
+    ) -> str:
+        upload_bodies: list[dict[str, Any]] = []
+
+        resolved_file_type = int(file_type or 4)
+        if _HTTP_URL_PATTERN.match(file_source):
+            upload_bodies.append({"file_type": resolved_file_type, "srv_send_msg": False, "url": file_source})
+        else:
+            local_public_url = self._local_image_public_url(file_source)
+            if local_public_url:
+                upload_bodies.append({"file_type": resolved_file_type, "srv_send_msg": False, "url": local_public_url})
+
+            base64_payload = self._image_base64_payload(file_source)
+            if base64_payload:
+                upload_bodies.append(
+                    {"file_type": resolved_file_type, "srv_send_msg": False, "file_data": base64_payload}
+                )
+
+        return await self._upload_media_variants(
+            access_token=access_token,
+            openid=openid,
+            upload_bodies=upload_bodies,
+            media_label="file",
+        )
+
+    async def _upload_media_variants(
+        self,
+        *,
+        access_token: str,
+        openid: str,
+        upload_bodies: list[dict[str, Any]],
+        media_label: str,
+    ) -> str:
         if not upload_bodies:
-            raise ValueError("qq image source is unavailable")
+            raise ValueError(f"qq {media_label} source is unavailable")
 
         last_error: Exception | None = None
         for index, body in enumerate(upload_bodies, start=1):
@@ -1159,7 +1354,7 @@ class QQBotChannelService:
                 if index >= len(upload_bodies):
                     raise
                 logger.warning(
-                    "qq_bot.image.upload_variant_failed",
+                    f"qq_bot.{media_label}.upload_variant_failed",
                     openid=openid,
                     variant="url" if "url" in body else "file_data",
                     error=str(exc),
@@ -1169,11 +1364,11 @@ class QQBotChannelService:
             file_info = str(payload.get("file_info") or "").strip()
             if file_info:
                 return file_info
-            last_error = ValueError("qq image upload response missing file_info")
+            last_error = ValueError(f"qq {media_label} upload response missing file_info")
 
         if last_error is not None:
             raise last_error
-        raise ValueError("qq image upload response missing file_info")
+        raise ValueError(f"qq {media_label} upload response missing file_info")
 
     async def _get_access_token(self) -> str:
         cached = _TOKEN_CACHE.get(self.app_id)
