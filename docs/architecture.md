@@ -123,6 +123,7 @@ graph LR
 - **Skill Execution**：如果 LLM 返回工具调用请求，通过 Skill Manager 执行，结果回馈给 LLM 继续推理（标准的 ReAct 循环）。
 - **Codex Session Overlay**：普通 assistant 回复在出站阶段可附加当前 attached Codex task 状态栏；slash `/codex` 自身回复不附加，避免重复。
 - **R6 Non-Blocking Runtime**：可通过 `HYPO_NONBLOCKING_RUNTIME=1` 启用 tracked work item runtime。用户消息会进入 per-session priority queue，并受 global semaphore 控制；同一 session 保持顺序，不同 session 可并发执行，状态通过 additive `work_status` event 暴露。详见 `docs/architecture/nonblocking-message-runtime.md`。
+- **R7 WebUI Performance**：WebUI 对 assistant streaming chunks 做短 cadence buffer，Markdown 渲染按 message key/version 缓存，并在 streaming block 未闭合时延迟 KaTeX/Mermaid enhancement；长历史采用分页窗口渲染。详见 `docs/architecture/webui-performance-memory-codex-ui.md`。
 
 **② Model Router（多模型路由器）**
 
@@ -184,6 +185,7 @@ graph TD
 - `memory_items` stores typed durable memory with classes such as `user_profile`, `interaction_policy`, `operational_state`, and `credentials_state`.
 - Only prompt-safe classes are injected into model prompts; operational state and credentials state are excluded.
 - `MemoryGC` now runs a typed memory consolidation phase before legacy L3 session-summary output. It extracts candidates from inactive L1 sessions, legacy preferences, and semantic notes, applies changes after SQLite backup, and writes JSON consolidation reports.
+- WebUI now opens Memory on typed semantic memory, showing class, confidence, source, updated_at, and prompt-injection eligibility; raw SQLite browsing remains as a debug tab.
 - Detailed lifecycle and rollback policy: `docs/architecture/memory-consolidation.md`.
 
 **相对 OpenClaw 的增强**：OpenClaw 为双层（.jsonl + SQLite/Markdown），Hypo-Agent 拆分为三层，将结构化数据（SQLite）和语义记忆（Markdown + Vector）明确分离，职责更清晰。
