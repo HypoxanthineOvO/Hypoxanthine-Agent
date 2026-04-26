@@ -1,0 +1,124 @@
+goal: "Refactor Hypo-Agent after audit while preserving working capabilities."
+date: "2026-04-26"
+source_reports:
+  - docs/reports/2026-04-26-hypo-agent-audit-baseline.md
+  - docs/reports/2026-04-26-hypo-agent-backend-core-audit.md
+  - docs/reports/2026-04-26-hypo-agent-skill-webui-audit.md
+  - docs/reports/2026-04-26-hypo-agent-full-audit-and-refactor-roadmap.md
+recommended_path: hybrid
+paths:
+  conservative:
+    summary: "Keep current Skills architecture, add typed outcomes, manifests, probes, and safer wrappers."
+    risk: "Lower migration risk, slower reliability gains for code/command workflows."
+  aggressive:
+    summary: "Shrink Skills to bounded assistant operations and move code/command/repair workflows to Codex SDK lane."
+    risk: "Requires new job service, cancellation, trace integration, and safety model."
+  hybrid:
+    summary: "Implement taxonomy, traces, memory, queue, and probes first; introduce Codex SDK lane as opt-in."
+    risk: "Requires careful sequencing but preserves compatibility."
+milestones:
+  - id: R1
+    name: "Outcome Taxonomy, Trace Schema, And Breaker Accounting"
+    goal: "Stop fusing recoverable model/user/policy errors and make tool failures diagnosable."
+    scope:
+      - src/hypo_agent/core/skill_manager.py
+      - src/hypo_agent/security/circuit_breaker.py
+      - src/hypo_agent/memory/structured_store.py
+      - tests for skill invocation, permission denials, retries
+    tests:
+      - "Unknown tool name does not fuse any real tool."
+      - "Permission denial records policy_block with breaker weight 0."
+      - "Retry success records telemetry but no breaker failure."
+    docs_commit_required: true
+    docs_commit_prefix: "R1[doc]"
+  - id: R2
+    name: "Skill Contracts And Acceptance Probes"
+    goal: "Make skill pass/fail status operationally meaningful."
+    scope:
+      - skill manifests/catalog
+      - Notion, memory, exec, filesystem, browser/auth acceptance tests
+      - smoke/probe scripts
+    tests:
+      - "Unit gate"
+      - "Mocked contract gate"
+      - "HYPO_TEST_MODE deterministic probe gate"
+      - "Optional external integration gate"
+    docs_commit_required: true
+    docs_commit_prefix: "R2[doc]"
+  - id: R3
+    name: "Typed Memory Store And Legacy Preference Migration"
+    goal: "Separate user memory, rules, runtime state, credentials state, notes, and SOPs."
+    scope:
+      - src/hypo_agent/memory/structured_store.py
+      - src/hypo_agent/skills/memory_skill.py
+      - src/hypo_agent/core/pipeline.py
+      - migration scripts/tests
+    tests:
+      - "Legacy keys map into typed classes."
+      - "Runtime/auth state is not injected as user preference."
+      - "Chinese-first memory candidate is saved and retrieved."
+    docs_commit_required: true
+    docs_commit_prefix: "R3[doc]"
+  - id: R4
+    name: "Async Memory Consolidation Pipeline"
+    goal: "Add reviewable periodic memory cleanup and candidate extraction."
+    scope:
+      - src/hypo_agent/memory/memory_gc.py
+      - scheduler registration
+      - memory review reports/API/UI hooks
+    tests:
+      - "Review-only mode creates typed candidates without mutation."
+      - "Apply mode deduplicates and writes audited changes."
+    docs_commit_required: true
+    docs_commit_prefix: "R4[doc]"
+  - id: R5
+    name: "Non-Blocking Message Runtime"
+    goal: "Prevent one stuck request from blocking unrelated later messages."
+    scope:
+      - src/hypo_agent/core/event_queue.py
+      - src/hypo_agent/core/pipeline.py
+      - gateway/WebSocket job status events
+    tests:
+      - "Slow session A does not block session B."
+      - "Same-session messages remain ordered or visibly queued."
+      - "Cancellation emits terminal status."
+    docs_commit_required: true
+    docs_commit_prefix: "R5[doc]"
+  - id: R6
+    name: "WebUI Performance And Semantic Memory UI"
+    goal: "Make long sessions usable and expose typed memory workflows."
+    scope:
+      - web/src/composables/useChatSocket.ts
+      - web/src/views/ChatView.vue
+      - web/src/components/chat
+      - web/src/views/MemoryView.vue
+    tests:
+      - "Long streamed markdown test"
+      - "Tool-event burst test"
+      - "Long-session virtualization test"
+      - "Typed memory CRUD UI tests"
+    docs_commit_required: true
+    docs_commit_prefix: "R6[doc]"
+  - id: R7
+    name: "Codex SDK Execution Lane"
+    goal: "Move complex repo/command workflows to tracked, cancellable SDK jobs."
+    scope:
+      - new execution service/job API
+      - WebUI job panel
+      - high-level Codex action adapter
+    tests:
+      - "Inspect/apply/verify jobs run in test workspace."
+      - "Cancellation and timeout work."
+      - "Job trace integrates with structured trace store."
+    docs_commit_required: true
+    docs_commit_prefix: "R7[doc]"
+acceptance_commands:
+  narrow:
+    - "uv run pytest tests/skills/test_exec_skill.py tests/skills/test_tmux_skill.py tests/skills/test_log_inspector_skill.py tests/core/test_progressive_disclosure.py -q"
+    - "cd web && npm run test -- --run src/utils/__tests__/markdownRenderer.spec.ts src/views/__tests__/ChatView.spec.ts"
+  full_test_mode:
+    - "bash test_run.sh"
+    - "HYPO_TEST_MODE=1 uv run python scripts/agent_cli.py --port 8766 smoke"
+production_acceptance:
+  default: false
+  note: "Only run with explicit production/deployment acceptance; do not mix with default smoke."

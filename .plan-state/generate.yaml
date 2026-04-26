@@ -1,0 +1,26 @@
+phase: generate
+mode: interactive
+project: Hypo-Agent
+updated_at: "2026-04-26T11:56:42+00:00"
+append_mode:
+  enabled: true
+  preserved_prompts:
+    - .pipeline/prompts/001-audit-baseline-observability.md
+    - .pipeline/prompts/002-audit-skills-memory-pipeline.md
+    - .pipeline/prompts/003-audit-skill-acceptance-webui.md
+    - .pipeline/prompts/004-audit-synthesis-refactor-roadmap.md
+  generated_prompts:
+    - .pipeline/prompts/005-refactor-outcome-trace-breaker.md
+    - .pipeline/prompts/006-refactor-skill-contracts-probes.md
+    - .pipeline/prompts/007-refactor-codex-isolated-execution-lane.md
+    - .pipeline/prompts/008-refactor-typed-memory-auto-migration.md
+    - .pipeline/prompts/009-refactor-async-memory-consolidation.md
+    - .pipeline/prompts/010-refactor-nonblocking-message-runtime.md
+    - .pipeline/prompts/011-refactor-webui-performance-memory-ui.md
+config:
+  preset: tdd
+  auto_continue: false
+  plan_mode: interactive
+architecture_file: .pipeline/architecture.md
+confirm_required: true
+next_phase: confirm

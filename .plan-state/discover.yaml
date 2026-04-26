@@ -1,0 +1,70 @@
+phase: discover
+mode: interactive
+project: Hypo-Agent
+request_summary: >
+  Revise the completed audit-only Hypo-Workflow pipeline into a staged
+  refactor implementation plan, using the full audit roadmap and
+  .plan-state/refactor-roadmap.yaml as the primary inputs.
+plan_context:
+  planning_started_at: "2026-04-26T09:16:01+00:00"
+  append_mode: true
+  existing_completed_prompts:
+    - .pipeline/prompts/001-audit-baseline-observability.md
+    - .pipeline/prompts/002-audit-skills-memory-pipeline.md
+    - .pipeline/prompts/003-audit-skill-acceptance-webui.md
+    - .pipeline/prompts/004-audit-synthesis-refactor-roadmap.md
+  next_prompt_number: 005
+  source_reports:
+    - docs/reports/2026-04-26-hypo-agent-full-audit-and-refactor-roadmap.md
+    - .plan-state/refactor-roadmap.yaml
+evidence:
+  tool_invocation_counts:
+    success: 4967
+    error: 240
+    blocked: 29
+    fused: 22
+    timeout: 8
+  high_risk_clusters:
+    - run_command failures and timeouts
+    - read_file permission/fused failures
+    - notion_query_db schema and availability failures
+    - web_search timeout failures
+    - unknown tool names such as execread_file
+  implementation_observations:
+    - EventQueue is single unbounded asyncio.Queue.
+    - ChatPipeline event consumer awaits full user-message processing before reading next event.
+    - MemorySkill exposes only save_preference/get_preference.
+    - preferences table currently mixes personal facts, runtime state, auth state, and rules.
+    - WebUI text messages rerender markdown and post-process math/mermaid on text changes.
+recommendation: audit_only_first_then_refactor
+user_decisions:
+  route:
+    preference: early_codex_with_external_history_isolation
+    notes: >
+      User prefers introducing Codex earlier. "No pollution" means Hypo-Agent
+      Codex calls must not pollute the user's Codex session/history visible
+      from other Codex clients. Hypo-Agent should still push concrete progress
+      and results into the main conversation, but those push messages may be
+      transient / not persisted into L1 history.
+  r1_r2:
+    preference: do_not_skip
+    notes: "Keep the reliability foundation work; do not jump straight to Codex-only migration."
+  webui:
+    preference: not_urgent
+    notes: "Defer WebUI performance/semantic UI behind backend reliability, Codex lane, and memory foundations."
+  memory_migration:
+    preference: full_classifier_automatic_migration
+    notes: >
+      User prefers the more automatic path: periodically back up existing
+      memory/preference data, run classifier-based typed migration broadly,
+      and rely on backups/rollback rather than manual review as the primary
+      gate. User can manually clean old backup files.
+repo_findings:
+  codex_existing:
+    - src/hypo_agent/channels/codex_bridge.py already wraps codex_app_server AsyncCodex and supports submit, continue_thread, inspect_thread, abort, and per-run in-memory thread state.
+    - src/hypo_agent/channels/coder/coder_task_service.py already has coder_tasks, attach/detach, status, abort, and legacy Hypo-Coder task behavior.
+    - StructuredStore already has coder_tasks, repair_runs, repair_run_events, and codex_thread_id persistence.
+    - codex_app_server.AppServerConfig supports env, cwd, launch_args_override, and config_overrides, so implementation can probe isolated CODEX_HOME/config behavior before falling back.
+unresolved_questions:
+  - Confirm whether Discover is sufficient and planning may proceed to P2 Decompose.
+  - Decide whether to keep planning milestone count around 6-7 or compress into fewer larger milestones.
