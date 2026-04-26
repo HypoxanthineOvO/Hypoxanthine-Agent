@@ -54,3 +54,33 @@ def test_preference_upsert(tmp_path) -> None:
         assert await store.get_preference("language") == "en-US"
 
     asyncio.run(_run())
+
+
+def test_memory_skill_saves_and_lists_typed_memory_items(tmp_path) -> None:
+    db_path = tmp_path / "hypo.db"
+
+    async def _run() -> None:
+        store = StructuredStore(db_path=db_path)
+        await store.init()
+        skill = MemorySkill(structured_store=store)
+
+        saved = await skill.execute(
+            "save_memory_item",
+            {
+                "memory_class": "interaction_policy",
+                "key": "reply_boundary",
+                "value": "答完直接结束，不要追加反问",
+            },
+        )
+        listed = await skill.execute(
+            "list_memory_items",
+            {"memory_class": "interaction_policy"},
+        )
+
+        assert saved.status == "success"
+        assert saved.result["memory_class"] == "interaction_policy"
+        assert listed.status == "success"
+        assert listed.result["items"][0]["key"] == "reply_boundary"
+        assert listed.result["items"][0]["language"] == "zh"
+
+    asyncio.run(_run())

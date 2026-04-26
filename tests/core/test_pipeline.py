@@ -1540,6 +1540,47 @@ def test_preference_injection(tmp_path: Path) -> None:
     assert any("High Priority User Preferences" in item.get("content", "") for item in system_messages)
 
 
+def test_pipeline_prefers_typed_prompt_memory_and_filters_runtime_state(tmp_path: Path) -> None:
+    async def _seed() -> StructuredStore:
+        store = StructuredStore(db_path=tmp_path / "hypo.db")
+        await store.init()
+        await store.set_preference("auth.pending.zhihu", "legacy auth state")
+        await store.save_memory_item(
+            memory_class="interaction_policy",
+            key="reply_boundary",
+            value="答完直接结束，不要追加反问",
+            source="test",
+            language="zh",
+        )
+        await store.save_memory_item(
+            memory_class="operational_state",
+            key="email_scan.cursor",
+            value="cursor-1",
+            source="test",
+            language="zh",
+        )
+        return store
+
+    class StubRouter:
+        async def call(self, model_name, messages):
+            del model_name, messages
+            return "unused"
+
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=StubSessionMemory(),
+        history_window=20,
+        structured_store=asyncio.run(_seed()),
+    )
+
+    context = pipeline._preferences_context()
+
+    assert "reply_boundary: 答完直接结束，不要追加反问" in context
+    assert "email_scan.cursor" not in context
+    assert "auth.pending.zhihu" not in context
+
+
 def test_pipeline_includes_persona_system_prompt_when_provided() -> None:
     memory = StubSessionMemory()
 

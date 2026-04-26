@@ -79,6 +79,53 @@ def test_memory_tables_put_allows_preferences_only(tmp_path) -> None:
     assert verify.json()["rows"][0]["pref_value"] == "Asia/Shanghai"
 
 
+def test_memory_items_list_and_upsert_typed_memory(tmp_path) -> None:
+    client = _build_client(tmp_path)
+    with client:
+        asyncio.run(
+            client.app.state.structured_store.save_memory_item(
+                memory_class="interaction_policy",
+                key="reply_boundary",
+                value="答完直接结束",
+                source="memory_skill",
+                confidence=0.92,
+            )
+        )
+
+        listed = client.get(
+            "/api/memory/items",
+            params={"token": "test-token", "status": "active"},
+        )
+        saved = client.post(
+            "/api/memory/items",
+            params={"token": "test-token"},
+            json={
+                "memory_class": "operational_state",
+                "key": "email_scan.cursor",
+                "value": "cursor-1",
+                "source": "consolidation",
+                "confidence": 0.67,
+                "status": "active",
+            },
+        )
+        relisted = client.get(
+            "/api/memory/items",
+            params={"token": "test-token", "status": "active"},
+        )
+
+    assert listed.status_code == 200
+    first_item = listed.json()["items"][0]
+    assert first_item["memory_class"] == "interaction_policy"
+    assert first_item["injection_eligible"] is True
+
+    assert saved.status_code == 200
+    assert saved.json()["saved"] is True
+    operational_item = next(
+        item for item in relisted.json()["items"] if item["key"] == "email_scan.cursor"
+    )
+    assert operational_item["injection_eligible"] is False
+
+
 def test_memory_files_list_get_put_and_path_validation(tmp_path) -> None:
     client = _build_client(tmp_path)
     with client:

@@ -21,6 +21,12 @@ WRITABLE_TABLES: dict[str, bool] = {
     "preferences": True,
 }
 TABLE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+PROMPT_INJECTABLE_MEMORY_CLASSES = {
+    "user_profile",
+    "interaction_policy",
+    "knowledge_note",
+    "sop",
+}
 
 
 class TableRowUpdatePayload(BaseModel):
@@ -33,6 +39,21 @@ class FileUpdatePayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     content: str
+
+
+class MemoryItemPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    memory_class: str
+    key: str
+    value: str
+    source: str = "webui"
+    language: str = "zh"
+    confidence: float | None = None
+    status: str = "active"
+    metadata_json: str = "{}"
+    rollback_metadata_json: str = "{}"
+    memory_id: str | None = None
 
 
 def _db_path(request: Request) -> Path:
@@ -57,6 +78,15 @@ def _dump_message(message: Message) -> dict[str, Any]:
     payload = message.model_dump(mode="json")
     if message.timestamp is None:
         payload.pop("timestamp", None)
+    return payload
+
+
+def _serialize_memory_item(row: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(row)
+    payload["injection_eligible"] = (
+        str(payload.get("status") or "active") == "active"
+        and str(payload.get("memory_class") or "") in PROMPT_INJECTABLE_MEMORY_CLASSES
+    )
     return payload
 
 
@@ -195,6 +225,54 @@ async def update_memory_table_row(
         return {"table": name, "id": row_id, "updated": True}
 
     raise HTTPException(status_code=403, detail=f"Table '{name}' is not writable")
+
+
+@router.get("/memory/items")
+async def list_memory_items(
+    request: Request,
+    memory_class: str | None = Query(default=None),
+    status: str | None = Query(default="active"),
+) -> dict[str, Any]:
+    require_api_token(request)
+
+    normalized_status = None if status in (None, "", "all") else status
+    structured_store = request.app.state.structured_store
+    rows = await structured_store.list_memory_items(
+        memory_class=memory_class or None,
+        status=normalized_status,
+    )
+    return {
+        "items": [_serialize_memory_item(row) for row in rows],
+        "injectable_classes": sorted(PROMPT_INJECTABLE_MEMORY_CLASSES),
+    }
+
+
+@router.post("/memory/items")
+async def save_memory_item(payload: MemoryItemPayload, request: Request) -> dict[str, Any]:
+    require_api_token(request)
+
+    structured_store = request.app.state.structured_store
+    memory_id = await structured_store.save_memory_item(
+        memory_class=payload.memory_class,
+        key=payload.key,
+        value=payload.value,
+        source=payload.source,
+        language=payload.language,
+        confidence=payload.confidence,
+        status=payload.status,
+        metadata_json=payload.metadata_json,
+        rollback_metadata_json=payload.rollback_metadata_json,
+        memory_id=payload.memory_id,
+    )
+    rows = await structured_store.list_memory_items(
+        memory_class=payload.memory_class,
+        status=None,
+    )
+    matching = next((row for row in rows if str(row.get("key") or "") == payload.key), None)
+    return {
+        "saved": True,
+        "memory_id": str(matching.get("memory_id") if matching else memory_id),
+    }
 
 
 @router.get("/memory/files")
