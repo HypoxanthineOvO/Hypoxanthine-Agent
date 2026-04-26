@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import inspect
 import json
@@ -12,6 +14,7 @@ import re
 from math import ceil
 from time import perf_counter
 from typing import Any, Protocol
+from uuid import uuid4
 
 import structlog
 
@@ -235,6 +238,24 @@ _HEARTBEAT_PREFETCHED_SNAPSHOT_TOOLS = {
 }
 
 
+@dataclass
+class _PipelineWorkItem:
+    work_id: str
+    trace_id: str
+    session_id: str
+    kind: str
+    priority: int
+    event: dict[str, Any]
+    created_at: str = field(default_factory=lambda: utc_isoformat(utc_now()))
+    updated_at: str = field(default_factory=lambda: utc_isoformat(utc_now()))
+    status: str = "queued"
+    terminal: bool = False
+    scheduled: bool = False
+    sequence: int = 0
+    task: asyncio.Task[Any] | None = None
+    cancel_requested: bool = False
+
+
 def _error_fields(exc: Exception) -> dict[str, str]:
     message = str(exc).strip()
     if len(message) > 200:
@@ -359,6 +380,9 @@ class ChatPipeline:
         skill_catalog: Any | None = None,
         coder_task_service: Any | None = None,
         wewe_rss_monitor: Any | None = None,
+        nonblocking_runtime_enabled: bool = False,
+        max_concurrent_work_items: int = 4,
+        user_message_timeout_seconds: float | None = None,
     ) -> None:
         self.router = router
         self.chat_model = chat_model
@@ -404,6 +428,18 @@ class ChatPipeline:
         self.coder_task_service = coder_task_service
         self.wewe_rss_monitor = wewe_rss_monitor
         self._event_consumer_task: asyncio.Task[None] | None = None
+        self.nonblocking_runtime_enabled = bool(nonblocking_runtime_enabled)
+        self.max_concurrent_work_items = max(1, int(max_concurrent_work_items))
+        self.user_message_timeout_seconds = (
+            None
+            if user_message_timeout_seconds is None
+            else max(0.001, float(user_message_timeout_seconds))
+        )
+        self._work_semaphore = asyncio.Semaphore(self.max_concurrent_work_items)
+        self._work_items: dict[str, _PipelineWorkItem] = {}
+        self._session_work_queues: dict[str, asyncio.PriorityQueue[tuple[int, int, str]]] = {}
+        self._session_worker_tasks: dict[str, asyncio.Task[None]] = {}
+        self._work_sequence = 0
         self._pending_sop_usage: set[str] = set()
         self._last_activity_at = utc_isoformat(utc_now())
         self._last_activity_monotonic = perf_counter()
@@ -420,6 +456,7 @@ class ChatPipeline:
     async def stop_event_consumer(self) -> None:
         task = self._event_consumer_task
         if task is None:
+            await self._stop_nonblocking_workers()
             return
         self._event_consumer_task = None
         self._mark_activity(reason="event_consumer_stop")
@@ -428,6 +465,7 @@ class ChatPipeline:
             await task
         except asyncio.CancelledError:
             pass
+        await self._stop_nonblocking_workers()
 
     def _resolve_event_emitter(self, override: Any | None = None) -> Any | None:
         return override or self.event_emitter
@@ -533,16 +571,242 @@ class ChatPipeline:
         inbound: Message,
         *,
         emit: Any,
-    ) -> None:
+    ) -> str | None:
         if self.event_queue is None:
             raise RuntimeError("event_queue is required for queued user messages")
+        work_id: str | None = None
+        trace_id = str(inbound.metadata.get("trace_id") or "").strip() or f"trace-{uuid4().hex}"
+        if self.nonblocking_runtime_enabled:
+            work_id = str(inbound.metadata.get("work_id") or "").strip() or f"work-{uuid4().hex}"
+            event = {
+                "event_type": "user_message",
+                "message": inbound,
+                "emit": emit,
+                "work_id": work_id,
+                "trace_id": trace_id,
+            }
+            item = self._create_work_item(event)
+            await self._emit_work_status(item, "queued", terminal=False)
+            await self.event_queue.put(event)
+            return work_id
         await self.event_queue.put(
             {
                 "event_type": "user_message",
                 "message": inbound,
                 "emit": emit,
+                "trace_id": trace_id,
             }
         )
+        return None
+
+    def get_work_status(self, work_id: str | None) -> dict[str, Any]:
+        item = self._work_items.get(str(work_id or ""))
+        if item is None:
+            return {"work_id": work_id, "status": "unknown", "terminal": True}
+        return self._work_status_payload(item, item.status, terminal=item.terminal)
+
+    async def cancel_work(self, work_id: str) -> bool:
+        item = self._work_items.get(str(work_id or ""))
+        if item is None or item.terminal:
+            return False
+        item.cancel_requested = True
+        if item.status == "queued":
+            await self._emit_work_status(item, "cancelled", terminal=True)
+            return True
+        if item.task is not None and not item.task.done():
+            item.task.cancel()
+            return True
+        await self._emit_work_status(item, "cancelled", terminal=True)
+        return True
+
+    def _create_work_item(self, event: dict[str, Any]) -> _PipelineWorkItem:
+        work_id = str(event.get("work_id") or "").strip() or f"work-{uuid4().hex}"
+        event["work_id"] = work_id
+        existing = self._work_items.get(work_id)
+        if existing is not None:
+            return existing
+        raw_message = event.get("message")
+        inbound = raw_message if isinstance(raw_message, Message) else Message.model_validate(raw_message)
+        trace_id = str(event.get("trace_id") or inbound.metadata.get("trace_id") or "").strip()
+        if not trace_id:
+            trace_id = f"trace-{uuid4().hex}"
+            event["trace_id"] = trace_id
+        item = _PipelineWorkItem(
+            work_id=work_id,
+            trace_id=trace_id,
+            session_id=inbound.session_id,
+            kind="user_message",
+            priority=self._work_priority_for(inbound, event),
+            event=event,
+        )
+        self._work_items[work_id] = item
+        return item
+
+    def _work_priority_for(self, inbound: Message, event: dict[str, Any]) -> int:
+        raw_priority = event.get("priority") or inbound.metadata.get("priority")
+        if raw_priority is not None:
+            try:
+                return int(raw_priority)
+            except (TypeError, ValueError):
+                pass
+        tag = str(inbound.message_tag or "").strip().lower()
+        source = str(inbound.metadata.get("source") or "").strip().lower()
+        event_source = str(inbound.metadata.get("event_source") or "").strip().lower()
+        if tag in {"reminder", "heartbeat", "email_scan", "hypo_info", "subscription"}:
+            return 50
+        if source in {"scheduler", "heartbeat"} or event_source in {"scheduler", "heartbeat"}:
+            return 50
+        return 0
+
+    async def _schedule_nonblocking_user_message_event(self, event: dict[str, Any]) -> None:
+        item = self._create_work_item(event)
+        if item.terminal or item.scheduled:
+            return
+        item.scheduled = True
+        self._work_sequence += 1
+        item.sequence = self._work_sequence
+        queue = self._session_work_queues.setdefault(item.session_id, asyncio.PriorityQueue())
+        await queue.put((item.priority, item.sequence, item.work_id))
+        self._ensure_session_worker(item.session_id)
+
+    def _ensure_session_worker(self, session_id: str) -> None:
+        task = self._session_worker_tasks.get(session_id)
+        if task is not None and not task.done():
+            return
+        self._session_worker_tasks[session_id] = asyncio.create_task(
+            self._run_session_work_queue(session_id),
+            name=f"pipeline-session-worker:{session_id}",
+        )
+
+    async def _run_session_work_queue(self, session_id: str) -> None:
+        queue = self._session_work_queues[session_id]
+        while True:
+            _priority, _sequence, work_id = await queue.get()
+            try:
+                item = self._work_items.get(work_id)
+                if item is None:
+                    continue
+                if item.cancel_requested or item.terminal:
+                    if not item.terminal:
+                        await self._emit_work_status(item, "cancelled", terminal=True)
+                    continue
+                async with self._work_semaphore:
+                    if item.cancel_requested:
+                        await self._emit_work_status(item, "cancelled", terminal=True)
+                        continue
+                    await self._run_work_item(item)
+            finally:
+                queue.task_done()
+
+    async def _run_work_item(self, item: _PipelineWorkItem) -> None:
+        await self._emit_work_status(item, "running", terminal=False)
+        task = asyncio.create_task(
+            self._consume_user_message_event(item.event),
+            name=f"pipeline-work:{item.work_id}",
+        )
+        item.task = task
+        try:
+            if self.user_message_timeout_seconds is None:
+                result_status = await task
+            else:
+                result_status = await asyncio.wait_for(
+                    task,
+                    timeout=self.user_message_timeout_seconds,
+                )
+        except asyncio.TimeoutError:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            await self._emit_user_message_timeout(item)
+            await self._emit_work_status(item, "timeout", terminal=True)
+        except asyncio.CancelledError:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            await self._emit_work_status(item, "cancelled", terminal=True)
+        except Exception as exc:
+            logger.exception("pipeline.work_item.failed", work_id=item.work_id, session_id=item.session_id)
+            await self._emit_work_status(item, "error", terminal=True, error=str(exc))
+        else:
+            if item.cancel_requested:
+                await self._emit_work_status(item, "cancelled", terminal=True)
+            elif result_status in {"error", "timeout"}:
+                await self._emit_work_status(item, str(result_status), terminal=True)
+            else:
+                await self._emit_work_status(item, "done", terminal=True)
+
+    async def _emit_user_message_timeout(self, item: _PipelineWorkItem) -> None:
+        emitter = item.event.get("emit")
+        if not callable(emitter):
+            return
+        payload = {
+            "type": "error",
+            "code": "USER_MESSAGE_TIMEOUT",
+            "message": "消息处理超时，已释放队列容量",
+            "retryable": True,
+            "session_id": item.session_id,
+            "work_id": item.work_id,
+            "trace_id": item.trace_id,
+        }
+        result = emitter(payload)
+        if inspect.isawaitable(result):
+            await result
+
+    async def _emit_work_status(
+        self,
+        item: _PipelineWorkItem,
+        status: str,
+        *,
+        terminal: bool,
+        error: str | None = None,
+    ) -> None:
+        item.status = status
+        item.terminal = terminal
+        item.updated_at = utc_isoformat(utc_now())
+        payload = self._work_status_payload(item, status, terminal=terminal)
+        if error:
+            payload["error"] = error
+        emitter = item.event.get("emit")
+        if not callable(emitter):
+            return
+        result = emitter(payload)
+        if inspect.isawaitable(result):
+            await result
+
+    def _work_status_payload(
+        self,
+        item: _PipelineWorkItem,
+        status: str,
+        *,
+        terminal: bool,
+    ) -> dict[str, Any]:
+        return {
+            "type": "work_status",
+            "work_id": item.work_id,
+            "trace_id": item.trace_id,
+            "session_id": item.session_id,
+            "kind": item.kind,
+            "status": status,
+            "priority": item.priority,
+            "terminal": terminal,
+            "created_at": item.created_at,
+            "updated_at": item.updated_at,
+        }
+
+    async def _stop_nonblocking_workers(self) -> None:
+        tasks: list[asyncio.Task[Any]] = []
+        for item in self._work_items.values():
+            if item.task is not None and not item.task.done():
+                item.cancel_requested = True
+                item.task.cancel()
+                tasks.append(item.task)
+        for task in self._session_worker_tasks.values():
+            if not task.done():
+                task.cancel()
+                tasks.append(task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._session_worker_tasks.clear()
 
     def _is_internal_heartbeat_message(self, inbound: Message) -> bool:
         source = str(inbound.metadata.get("source") or "").strip().lower()
@@ -2743,12 +3007,16 @@ class ChatPipeline:
         if store is None:
             return ""
 
-        lister = getattr(store, "list_preferences_sync", None)
-        if not callable(lister):
-            return ""
-
         try:
-            rows = lister(limit=20)
+            typed_lister = getattr(store, "list_prompt_memory_sync", None)
+            rows = typed_lister(limit=20) if callable(typed_lister) else []
+            context_title = "[High Priority User Memory]"
+            if not rows:
+                legacy_lister = getattr(store, "list_preferences_sync", None)
+                if not callable(legacy_lister):
+                    return ""
+                rows = legacy_lister(limit=20)
+                context_title = "[High Priority User Preferences]"
         except _PIPELINE_RECOVERABLE_ERRORS as exc:
             # FALLBACK: preference context is optional and can be omitted for this turn.
             logger.warning(
@@ -2760,7 +3028,7 @@ class ChatPipeline:
         if not rows:
             return ""
 
-        lines = ["[High Priority User Preferences]"]
+        lines = [context_title]
         lines.append(
             "These preferences override any generic tendency to be overly helpful, proactive, or suggest next steps."
         )
@@ -3688,6 +3956,9 @@ class ChatPipeline:
                     event_type=event.get("event_type"),
                 )
                 if str(event.get("event_type") or "").strip().lower() == "user_message":
+                    if self.nonblocking_runtime_enabled:
+                        await self._schedule_nonblocking_user_message_event(event)
+                        continue
                     await self._consume_user_message_event(event)
                     continue
                 message = self._event_to_message(event)
@@ -3705,7 +3976,7 @@ class ChatPipeline:
                 if callable(task_done):
                     task_done()
 
-    async def _consume_user_message_event(self, event: dict[str, Any]) -> None:
+    async def _consume_user_message_event(self, event: dict[str, Any]) -> str:
         raw_message = event.get("message")
         if isinstance(raw_message, Message):
             inbound = raw_message
@@ -3747,6 +4018,7 @@ class ChatPipeline:
                 emit_result = emitter(payload)
                 if inspect.isawaitable(emit_result):
                     await emit_result
+            return "done"
         except TimeoutError as exc:
             logger.warning(
                 "pipeline.error_converted",
@@ -3764,6 +4036,7 @@ class ChatPipeline:
             emit_result = emitter(error_payload)
             if inspect.isawaitable(emit_result):
                 await emit_result
+            return "timeout"
         except RuntimeError as exc:
             logger.warning(
                 "pipeline.error_converted",
@@ -3781,6 +4054,7 @@ class ChatPipeline:
             emit_result = emitter(error_payload)
             if inspect.isawaitable(emit_result):
                 await emit_result
+            return "error"
         except Exception as exc:
             logger.warning(
                 "pipeline.error_converted",
@@ -3798,6 +4072,7 @@ class ChatPipeline:
             emit_result = emitter(error_payload)
             if inspect.isawaitable(emit_result):
                 await emit_result
+            return "error"
         finally:
             for context_var, token in reversed(tokens):
                 context_var.reset(token)
