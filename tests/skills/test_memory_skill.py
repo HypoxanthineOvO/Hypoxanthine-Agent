@@ -18,6 +18,10 @@ def test_save_preference_tool(tmp_path) -> None:
             {"key": "favorite_drink", "value": "绿茶"},
         )
         assert output.status == "success"
+        assert output.result["storage_path"] == str(db_path)
+        assert output.result["storage_folder"] == str(db_path.parent)
+        assert str(db_path) in output.result["human_summary"]
+        assert str(db_path.parent) in output.result["human_summary"]
         assert await store.get_preference("favorite_drink") == "绿茶"
 
     asyncio.run(_run())
@@ -50,4 +54,3 @@ def test_preference_upsert(tmp_path) -> None:
         assert await store.get_preference("language") == "en-US"
 
     asyncio.run(_run())
-

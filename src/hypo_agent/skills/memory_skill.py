@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 from typing import Any
 
 from hypo_agent.models import SkillOutput
@@ -9,7 +10,7 @@ from hypo_agent.skills.base import BaseSkill
 
 class MemorySkill(BaseSkill):
     name = "memory"
-    description = "Persist and retrieve user preferences in L2 memory."
+    description = "Persist and retrieve structured user memory in L2."
     required_permissions: list[str] = []
 
     def __init__(self, *, structured_store: Any) -> None:
@@ -23,9 +24,10 @@ class MemorySkill(BaseSkill):
                 "function": {
                     "name": "save_preference",
                     "description": (
-                        "Save a stable user preference/habit/personal detail to persistent memory. "
-                        "Use this when the user expresses something like preferred language, tone, "
-                        "timezone, likes/dislikes, or recurring habits."
+                        "Save a stable structured memory item to L2 persistent memory. "
+                        "Use this for durable preferences, habits, profile details, or other "
+                        "reusable key-value memory. After calling it, explicitly tell the user "
+                        "which database file and folder were updated."
                     ),
                     "parameters": {
                         "type": "object",
@@ -47,7 +49,7 @@ class MemorySkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "get_preference",
-                    "description": "Read a preference from persistent memory by key.",
+                    "description": "Read a structured memory item from persistent L2 memory by key.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -90,7 +92,21 @@ class MemorySkill(BaseSkill):
             if inspect.isawaitable(result):
                 await result
 
-        return SkillOutput(status="success", result={"key": key, "value": value})
+        storage_path = Path(getattr(self.structured_store, "db_path"))
+        storage_folder = storage_path.parent
+        return SkillOutput(
+            status="success",
+            result={
+                "key": key,
+                "value": value,
+                "storage_path": str(storage_path),
+                "storage_folder": str(storage_folder),
+                "human_summary": (
+                    f"已写入结构化记忆：{key}={value}。"
+                    f"数据库文件在 {storage_path}，所在文件夹是 {storage_folder}。"
+                ),
+            },
+        )
 
     async def _get_preference(self, params: dict[str, Any]) -> SkillOutput:
         key = str(params.get("key") or "").strip()

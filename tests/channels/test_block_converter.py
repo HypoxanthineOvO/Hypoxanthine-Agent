@@ -76,6 +76,16 @@ def test_blocks_to_markdown_renders_supported_block_types() -> None:
             "bookmark": {"url": "https://example.com"},
         },
         {
+            "id": "childpage1",
+            "type": "child_page",
+            "child_page": {"title": "Project Hub"},
+        },
+        {
+            "id": "childdb1",
+            "type": "child_database",
+            "child_database": {"title": "Tasks"},
+        },
+        {
             "id": "table1",
             "type": "table",
             "table": {
@@ -139,6 +149,8 @@ def test_blocks_to_markdown_renders_supported_block_types() -> None:
     assert "![diagram](https://example.com/image.png)" in markdown
     assert "> 💡 Tip" in markdown
     assert "[https://example.com](https://example.com)" in markdown
+    assert "- 子页面: Project Hub" in markdown
+    assert "- 子数据库: Tasks" in markdown
     assert "| A | B |" in markdown
     assert "<details><summary>More</summary>" in markdown
     assert "[不支持的块类型: embed]" in markdown

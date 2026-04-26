@@ -1,9 +1,9 @@
-default_model: GenesiQWen35BA3B
+default_model: DeepSeekV4
 
 task_routing:
-  chat: GenesiQWen35BA3B
-  reasoning: GenesiQWen35BA3B
-  heartbeat: GenesiQWen35BA3B
+  chat: DeepSeekV4
+  reasoning: DeepSeekV4
+  heartbeat: DeepSeekV4
   lightweight: GenesiQWen35BA3B
   compression: GenesiQWen35BA3B
   embedding: VolcanoEmbedding
@@ -15,7 +15,7 @@ models:
     provider: "VSPLab"
     supports_tool_calling: true
     description: "OpenAI ChatGPT"
-    fallback: CodingPlanAuto
+    fallback: GPTMini
     reasoning_config:
       chat: low
       reasoning: high
@@ -24,13 +24,13 @@ models:
     provider: "VSPLab"
     supports_tool_calling: true
     description: "OpenAI ChatGPT"
-    fallback: EdenQwen
+    fallback: CodingPlanAuto
   DeepSeekV4:
     litellm_model: "deepseek/deepseek-v4-flash"
     provider: Deepseek
     supports_tool_calling: true
     description: "Deepseek V4 Flash"
-    fallback: GenesiQWen35BA3B
+    fallback: GPT
     reasoning_config:
       chat: low
       reasoning: high

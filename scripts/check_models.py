@@ -66,6 +66,15 @@ PROBE_TOOLS: list[dict[str, Any]] = [
 FULL_TOOL_PROMPT = "Please call the list_directory tool with path '.' and depth 1."
 
 
+def _supports_explicit_tool_choice(litellm_model: str | None) -> bool:
+    model_name = str(litellm_model or "").strip().lower()
+    if not model_name:
+        return True
+    _, _, remainder = model_name.partition("/")
+    slug = remainder or model_name
+    return not (slug.startswith("gpt-5") and "mini" in slug)
+
+
 def _build_request_kwargs(*, litellm_model: str | None) -> dict[str, Any]:
     model_name = str(litellm_model or "").strip().lower()
     if model_name.startswith("ollama_chat/"):
@@ -372,8 +381,8 @@ async def _probe_chat_model(
                     api_key=spec.api_key,
                     messages=[{"role": "user", "content": tool_prompt}],
                     tools=effective_probe_tools,
-                    tool_choice="auto",
                     max_tokens=64,
+                    **({"tool_choice": "auto"} if _supports_explicit_tool_choice(spec.litellm_model) else {}),
                     **_build_request_kwargs(litellm_model=spec.litellm_model),
                 )
             else:

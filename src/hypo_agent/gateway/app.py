@@ -501,6 +501,9 @@ def _build_codex_bridge(secrets_path: Path | str = "config/secrets.yaml") -> Cod
     model = "gpt-5.4"
     reasoning_effort = "high"
     codex_bin = shutil.which("codex") or ""
+    approval_policy = "never"
+    approvals_reviewer = "guardian_subagent"
+    sandbox_mode = "danger-full-access"
     try:
         secrets = load_secrets_config(secrets_path)
     except FileNotFoundError:
@@ -511,10 +514,16 @@ def _build_codex_bridge(secrets_path: Path | str = "config/secrets.yaml") -> Cod
         model = str(codex_cfg.model or "").strip() or model
         reasoning_effort = str(codex_cfg.reasoning_effort or "").strip() or reasoning_effort
         codex_bin = str(codex_cfg.codex_bin or "").strip() or codex_bin
+        approval_policy = str(codex_cfg.approval_policy or "").strip() or approval_policy
+        approvals_reviewer = str(codex_cfg.approvals_reviewer or "").strip() or approvals_reviewer
+        sandbox_mode = str(codex_cfg.sandbox_mode or "").strip() or sandbox_mode
     return CodexBridge(
         model=model,
         reasoning_effort=reasoning_effort,
         codex_bin=codex_bin or None,
+        approval_policy=approval_policy,
+        approvals_reviewer=approvals_reviewer,
+        sandbox_mode=sandbox_mode,
     )
 
 
@@ -782,7 +791,8 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
                             "style into L3 semantic memory so it can be retrieved in future "
                             "conversations. Important: if the user explicitly asks you to "
                             "remember a stable preference or personal detail, you must call "
-                            "this tool instead of only acknowledging it in text."
+                            "this tool instead of only acknowledging it in text. After calling "
+                            "it, explicitly tell the user the exact file path and parent folder."
                         ),
                         "parameters": {
                             "type": "object",
@@ -1362,6 +1372,8 @@ def create_app(
             wewe_rss_monitor = getattr(app.state, "wewe_rss_monitor", None)
             if wewe_rss_monitor is not None and hasattr(wewe_rss_monitor, "close"):
                 await wewe_rss_monitor.close()
+            if resolved_deps.skill_manager is not None and hasattr(resolved_deps.skill_manager, "aclose"):
+                await resolved_deps.skill_manager.aclose()
             if resolved_deps.probe_server is not None:
                 await resolved_deps.probe_server.stop()
             if image_renderer is not None and callable(getattr(image_renderer, "shutdown", None)):

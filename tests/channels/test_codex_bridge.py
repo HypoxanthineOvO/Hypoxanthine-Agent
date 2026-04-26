@@ -117,6 +117,7 @@ class FakeAsyncCodex:
         self.started = False
         self.closed = False
         self.resume_calls: list[str] = []
+        self.thread_resume_calls: list[dict[str, object]] = []
         self.thread_start_calls: list[dict[str, object]] = []
 
     async def __aenter__(self):
@@ -137,7 +138,7 @@ class FakeAsyncCodex:
         return self.start_thread
 
     async def thread_resume(self, thread_id: str, **kwargs):
-        del kwargs
+        self.thread_resume_calls.append(dict(kwargs))
         self.resume_calls.append(thread_id)
         return self.start_thread
 
@@ -266,6 +267,70 @@ def test_codex_bridge_submit_propagates_full_access_execution_policy() -> None:
         assert fake_thread.turn_calls
         assert str(fake_thread.turn_calls[0]["approval_policy"]) in {"never", "AskForApprovalValue.never"}
         assert fake_thread.turn_calls[0]["sandbox_policy"] == {"type": "dangerFullAccess"}
+
+    asyncio.run(_run())
+
+
+def test_codex_bridge_submit_propagates_auto_review_execution_policy() -> None:
+    async def _run() -> None:
+        fake_thread = FakeThread("thread-1", text="ok")
+        fake_codex = FakeAsyncCodex(start_thread=fake_thread)
+        bridge = CodexBridge(
+            model="gpt-5.4",
+            codex_factory=lambda: fake_codex,
+            codex_bin="/home/heyx/.volta/bin/codex",
+            approval_policy="on-request",
+            approvals_reviewer="guardian_subagent",
+            sandbox_mode="workspace-write",
+        )
+        await bridge.start()
+
+        async def on_complete(run_id: str, status: str, result: str | None) -> None:
+            del run_id, status, result
+
+        thread = await bridge.submit(
+            run_id="repair-1",
+            prompt="fix it",
+            working_dir="/repo",
+            on_complete=on_complete,
+        )
+        fake_thread.turn_handle.release()
+        await asyncio.wait_for(thread.task, timeout=2)
+
+        assert fake_codex.thread_start_calls
+        start_call = fake_codex.thread_start_calls[0]
+        assert str(start_call["approval_policy"]) in {
+            "on-request",
+            "AskForApprovalValue.on_request",
+            "root=<AskForApprovalValue.on_request: 'on-request'>",
+        }
+        assert str(start_call["approvals_reviewer"]) in {
+            "guardian_subagent",
+            "ApprovalsReviewer.guardian_subagent",
+        }
+        assert str(start_call["sandbox"]) in {
+            "workspace-write",
+            "SandboxMode.workspace_write",
+        }
+        assert fake_thread.turn_calls
+        turn_call = fake_thread.turn_calls[0]
+        assert str(turn_call["approval_policy"]) in {
+            "on-request",
+            "AskForApprovalValue.on_request",
+            "root=<AskForApprovalValue.on_request: 'on-request'>",
+        }
+        assert str(turn_call["approvals_reviewer"]) in {
+            "guardian_subagent",
+            "ApprovalsReviewer.guardian_subagent",
+        }
+        assert turn_call["sandbox_policy"] == {
+            "type": "workspaceWrite",
+            "writableRoots": ["/repo"],
+            "readOnlyAccess": {"type": "fullAccess"},
+            "networkAccess": False,
+            "excludeTmpdirEnvVar": False,
+            "excludeSlashTmp": False,
+        }
 
     asyncio.run(_run())
 

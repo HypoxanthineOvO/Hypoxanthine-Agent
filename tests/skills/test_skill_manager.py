@@ -118,6 +118,23 @@ def test_skill_manager_invokes_registered_tool() -> None:
     assert result.result == {"echo": "hello"}
 
 
+def test_skill_manager_aclose_closes_registered_skills() -> None:
+    class ClosableSkill(EchoSkill):
+        def __init__(self) -> None:
+            self.closed = 0
+
+        async def close(self) -> None:
+            self.closed += 1
+
+    skill = ClosableSkill()
+    manager = SkillManager()
+    manager.register(skill)
+
+    asyncio.run(manager.aclose())
+
+    assert skill.closed == 1
+
+
 def test_skill_manager_loads_enabled_skills_from_yaml(tmp_path) -> None:
     config = tmp_path / "skills.yaml"
     config.write_text(
@@ -381,9 +398,9 @@ def test_skill_manager_skips_permission_check_for_skills_without_permissions() -
     assert output.status == "success"
 
 
-def test_skill_manager_infers_scan_directory_as_write_operation() -> None:
+def test_skill_manager_infers_scan_directory_as_read_operation() -> None:
     manager = SkillManager()
-    assert manager._infer_operation("scan_directory") == "write"
+    assert manager._infer_operation("scan_directory") == "read"
     assert manager._infer_operation("update_directory_description") == "read"
 
 

@@ -28,6 +28,15 @@ DEFAULT_PROBE_TOOLS: list[dict[str, Any]] = [
 ]
 
 
+def _probe_supports_explicit_tool_choice(litellm_model: str | None) -> bool:
+    model_name = str(litellm_model or "").strip().lower()
+    if not model_name:
+        return True
+    _, _, remainder = model_name.partition("/")
+    slug = remainder or model_name
+    return not (slug.startswith("gpt-5") and "mini" in slug)
+
+
 @dataclass(slots=True)
 class ModelProbeResult:
     model_name: str
@@ -70,8 +79,9 @@ async def probe_model(
         "model": config.litellm_model,
         "messages": [{"role": "user", "content": prompt}],
         "tools": tools or DEFAULT_PROBE_TOOLS,
-        "tool_choice": tool_choice,
     }
+    if _probe_supports_explicit_tool_choice(config.litellm_model):
+        kwargs["tool_choice"] = tool_choice
     if isinstance(config.api_base, str) and config.api_base.strip():
         kwargs["api_base"] = config.api_base
     if isinstance(config.api_key, str) and config.api_key.strip():

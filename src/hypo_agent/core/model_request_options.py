@@ -165,6 +165,8 @@ def _resolve_reasoning_level(
 def _supports_openai_reasoning_model(model_name: str) -> bool:
     _, _, remainder = model_name.partition("/")
     slug = (remainder or model_name).lower()
+    if "mini" in slug:
+        return False
     return slug.startswith(("gpt-5", "o1", "o3", "o4"))
 
 

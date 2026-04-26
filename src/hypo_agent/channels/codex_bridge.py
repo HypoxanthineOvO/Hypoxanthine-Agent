@@ -6,7 +6,7 @@ import shutil
 from typing import Any, Callable
 
 from codex_app_server import AppServerConfig, AsyncCodex, TextInput
-from codex_app_server.generated.v2_all import AskForApprovalValue, SandboxMode
+from codex_app_server.generated.v2_all import ApprovalsReviewer, AskForApprovalValue, SandboxMode
 
 
 @dataclass(slots=True)
@@ -31,11 +31,17 @@ class CodexBridge:
         model: str = "gpt-5.4",
         reasoning_effort: str = "high",
         codex_bin: str | None = None,
+        approval_policy: str = "never",
+        approvals_reviewer: str | None = "guardian_subagent",
+        sandbox_mode: str = "danger-full-access",
         codex_factory: Callable[[], Any] | None = None,
     ) -> None:
         self.model = str(model or "").strip() or "gpt-5.4"
         self.reasoning_effort = str(reasoning_effort or "").strip() or "high"
         self.codex_bin = str(codex_bin or "").strip() or shutil.which("codex") or ""
+        self.approval_policy = self._normalize_approval_policy(approval_policy)
+        self.approvals_reviewer = self._normalize_approvals_reviewer(approvals_reviewer)
+        self.sandbox_mode = self._normalize_sandbox_mode(sandbox_mode)
         self._codex_factory = codex_factory
         self._codex: Any | None = None
         self._threads: dict[str, CodexThread] = {}
@@ -106,8 +112,9 @@ class CodexBridge:
             sdk_thread = await self._codex.thread_start(
                 model=self.model,
                 cwd=working_dir,
-                approval_policy=AskForApprovalValue.never,
-                sandbox=SandboxMode.danger_full_access,
+                approval_policy=self._approval_policy_value(),
+                approvals_reviewer=self._approvals_reviewer_value(),
+                sandbox=self._sandbox_mode_value(),
                 config={"model_reasoning_effort": self.reasoning_effort},
             )
         except Exception as exc:
@@ -159,7 +166,9 @@ class CodexBridge:
                 thread_id,
                 model=self.model,
                 cwd=working_dir,
-                approval_policy=AskForApprovalValue.never,
+                approval_policy=self._approval_policy_value(),
+                approvals_reviewer=self._approvals_reviewer_value(),
+                sandbox=self._sandbox_mode_value(),
                 config={"model_reasoning_effort": self.reasoning_effort},
             )
         except Exception as exc:
@@ -219,6 +228,9 @@ class CodexBridge:
                 thread_id,
                 model=self.model,
                 cwd=working_dir,
+                approval_policy=self._approval_policy_value(),
+                approvals_reviewer=self._approvals_reviewer_value(),
+                sandbox=self._sandbox_mode_value(),
                 config={"model_reasoning_effort": self.reasoning_effort},
             )
             payload = await sdk_thread.read(include_turns=True)
@@ -248,8 +260,9 @@ class CodexBridge:
             turn_handle = await thread.thread.turn(
                 TextInput(prompt),
                 cwd=thread.working_dir,
-                approval_policy=AskForApprovalValue.never,
-                sandbox_policy={"type": "dangerFullAccess"},
+                approval_policy=self._approval_policy_value(),
+                approvals_reviewer=self._approvals_reviewer_value(),
+                sandbox_policy=self._turn_sandbox_policy(thread.working_dir),
             )
             thread.turn_handle = turn_handle
             thread.turn_id = str(getattr(turn_handle, "id", "") or "")
@@ -286,11 +299,17 @@ class CodexBridge:
                     if method == "thread/status/changed":
                         status = getattr(getattr(payload, "status", None), "root", None)
                         status_type = str(getattr(status, "type", "") or "").strip().lower()
+                        active_flags = self._active_flags(status)
+                        event_payload: dict[str, Any] = {"status": status_type or "unknown"}
+                        if active_flags:
+                            event_payload["active_flags"] = active_flags
+                            event_payload["waiting_on_approval"] = "waitingOnApproval" in active_flags
+                            event_payload["waiting_on_user_input"] = "waitingOnUserInput" in active_flags
                         await self._invoke_event_callback(
                             on_event,
                             thread.run_id,
                             "thread_status",
-                            {"status": status_type or "unknown"},
+                            event_payload,
                         )
                         if status_type in {"idle", "system_error"}:
                             break
@@ -390,3 +409,104 @@ class CodexBridge:
 
     def _status_value(self, value: Any) -> str:
         return str(getattr(value, "value", value) or "").strip().lower()
+
+    def _approval_policy_value(self) -> AskForApprovalValue:
+        return {
+            "untrusted": AskForApprovalValue.untrusted,
+            "on-failure": AskForApprovalValue.on_failure,
+            "on-request": AskForApprovalValue.on_request,
+            "never": AskForApprovalValue.never,
+        }.get(self.approval_policy, AskForApprovalValue.never)
+
+    def _approvals_reviewer_value(self) -> ApprovalsReviewer | None:
+        if not self.approvals_reviewer:
+            return None
+        return {
+            "user": ApprovalsReviewer.user,
+            "guardian_subagent": ApprovalsReviewer.guardian_subagent,
+        }.get(self.approvals_reviewer)
+
+    def _sandbox_mode_value(self) -> SandboxMode:
+        return {
+            "read-only": SandboxMode.read_only,
+            "workspace-write": SandboxMode.workspace_write,
+            "danger-full-access": SandboxMode.danger_full_access,
+        }.get(self.sandbox_mode, SandboxMode.danger_full_access)
+
+    def _turn_sandbox_policy(self, working_dir: str) -> dict[str, Any]:
+        if self.sandbox_mode == "read-only":
+            return {
+                "type": "readOnly",
+                "access": {"type": "fullAccess"},
+                "networkAccess": False,
+            }
+        if self.sandbox_mode == "workspace-write":
+            return {
+                "type": "workspaceWrite",
+                "writableRoots": [str(working_dir or "").strip() or "."],
+                "readOnlyAccess": {"type": "fullAccess"},
+                "networkAccess": False,
+                "excludeTmpdirEnvVar": False,
+                "excludeSlashTmp": False,
+            }
+        return {"type": "dangerFullAccess"}
+
+    def _normalize_approval_policy(self, value: str | None) -> str:
+        normalized = str(value or "").strip().lower().replace("_", "-")
+        aliases = {
+            "": "never",
+            "auto": "never",
+            "auto-approve": "never",
+            "full-auto": "never",
+            "fullauto": "never",
+            "manual": "on-request",
+            "onrequest": "on-request",
+            "onfailure": "on-failure",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized in {"untrusted", "on-failure", "on-request", "never"}:
+            return normalized
+        return "never"
+
+    def _normalize_approvals_reviewer(self, value: str | None) -> str:
+        normalized = str(value or "").strip().lower().replace("-", "_")
+        aliases = {
+            "": "",
+            "none": "",
+            "manual": "user",
+            "auto": "guardian_subagent",
+            "auto_review": "guardian_subagent",
+            "autoreview": "guardian_subagent",
+            "guardian": "guardian_subagent",
+            "guardian_sub_agent": "guardian_subagent",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized in {"user", "guardian_subagent"}:
+            return normalized
+        return ""
+
+    def _normalize_sandbox_mode(self, value: str | None) -> str:
+        normalized = str(value or "").strip().lower().replace("_", "-")
+        aliases = {
+            "": "danger-full-access",
+            "readonly": "read-only",
+            "workspace": "workspace-write",
+            "workspacewrite": "workspace-write",
+            "full": "danger-full-access",
+            "danger": "danger-full-access",
+            "dangerfullaccess": "danger-full-access",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized in {"read-only", "workspace-write", "danger-full-access"}:
+            return normalized
+        return "danger-full-access"
+
+    def _active_flags(self, status: Any) -> list[str]:
+        raw_flags = getattr(status, "active_flags", None) or []
+        flags: list[str] = []
+        for item in raw_flags:
+            value = getattr(item, "value", None) or str(item or "")
+            text = str(value).strip()
+            if text:
+                flags.append(text)
+        return flags

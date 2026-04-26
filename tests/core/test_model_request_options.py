@@ -40,6 +40,18 @@ def test_openai_reasoning_gets_high() -> None:
     assert kwargs == {"reasoning_effort": "high"}
 
 
+def test_openai_mini_chat_skips_reasoning_effort() -> None:
+    config = _resolved_model(litellm_model="openai/gpt-5.4-mini")
+
+    kwargs = build_model_request_kwargs(
+        model_config=config,
+        litellm_model=config.litellm_model,
+        task_type="chat",
+    )
+
+    assert kwargs == {}
+
+
 def test_anthropic_reasoning_gets_thinking_enabled() -> None:
     config = _resolved_model(
         provider="Anthropic",

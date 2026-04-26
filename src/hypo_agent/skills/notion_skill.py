@@ -507,9 +507,15 @@ class NotionSkill(BaseSkill):
                 "Missing Notion config: config/secrets.yaml -> services.notion.integration_secret"
             )
         proxy_url = str(notion_cfg.proxy_url).strip() if notion_cfg is not None else ""
+        timeout_ms = int(getattr(notion_cfg, "timeout_ms", 60_000) or 60_000)
+        api_timeout_seconds = float(getattr(notion_cfg, "api_timeout_seconds", 30.0) or 30.0)
+        max_retries = int(getattr(notion_cfg, "max_retries", 3) or 3)
         return NotionClient(
             integration_secret=integration_secret,
             proxy_url=proxy_url or None,
+            timeout_ms=timeout_ms,
+            api_timeout_seconds=api_timeout_seconds,
+            max_retries=max_retries,
         )
 
     def _load_todo_database_id(self) -> str | None:
@@ -533,6 +539,14 @@ class NotionSkill(BaseSkill):
             f"{cleaned[0:8]}-{cleaned[8:12]}-{cleaned[12:16]}-"
             f"{cleaned[16:20]}-{cleaned[20:32]}"
         )
+
+    async def close(self) -> None:
+        close = getattr(self._client, "close", None)
+        if not callable(close):
+            return
+        result = close()
+        if asyncio.iscoroutine(result):
+            await result
 
     def _parse_json_object(self, raw: Any, *, field_name: str) -> dict[str, Any]:
         try:

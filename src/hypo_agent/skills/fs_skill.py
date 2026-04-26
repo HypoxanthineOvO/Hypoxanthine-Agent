@@ -184,11 +184,11 @@ class FileSystemSkill(BaseSkill):
         if not raw_path:
             return SkillOutput(status="error", error_info="path is required")
 
-        denied = self._deny_if_no_permission(raw_path, "read")
+        path = self._resolve_read_target(raw_path)
+        denied = self._deny_if_no_permission(str(path), "read")
         if denied is not None:
             return denied
 
-        path = Path(raw_path).expanduser().resolve(strict=False)
         if not path.exists() or not path.is_file():
             return SkillOutput(status="error", error_info=f"File not found: {path}")
 
@@ -497,6 +497,32 @@ class FileSystemSkill(BaseSkill):
         if allowed:
             return None
         return SkillOutput(status="error", error_info=f"Permission denied: {reason}")
+
+    def _resolve_read_target(self, raw_path: str) -> Path:
+        requested = Path(raw_path).expanduser()
+        candidates: list[Path] = []
+
+        if requested.is_absolute():
+            candidates.append(requested.resolve(strict=False))
+        else:
+            candidates.append(requested.resolve(strict=False))
+            memory_dir = get_memory_dir().resolve(strict=False)
+            candidates.append((memory_dir / requested).resolve(strict=False))
+            if len(requested.parts) == 1:
+                candidates.append((memory_dir / "exports" / requested.name).resolve(strict=False))
+
+        seen: set[Path] = set()
+        unique_candidates: list[Path] = []
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            unique_candidates.append(candidate)
+
+        for candidate in unique_candidates:
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        return unique_candidates[0]
 
     def _truncate_text(self, content: str) -> tuple[str, bool]:
         if len(content) <= self.MAX_FILE_CHARS:

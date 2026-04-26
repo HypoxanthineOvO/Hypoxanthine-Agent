@@ -210,6 +210,31 @@ def test_build_repair_service_supports_legacy_codex_bridge_signature(tmp_path: P
     assert captured["repo_root"] == tmp_path
 
 
+def test_build_codex_bridge_reads_noninteractive_approval_config(tmp_path: Path) -> None:
+    import hypo_agent.gateway.app as app_module
+
+    secrets_path = tmp_path / "secrets.yaml"
+    secrets_path.write_text(
+        """
+services:
+  codex:
+    model: "gpt-5.4"
+    reasoning_effort: "high"
+    codex_bin: "/tmp/codex"
+    approval_policy: "on-request"
+    approvals_reviewer: "guardian_subagent"
+    sandbox_mode: "workspace-write"
+""",
+        encoding="utf-8",
+    )
+
+    bridge = app_module._build_codex_bridge(secrets_path)
+
+    assert bridge.approval_policy == "on-request"
+    assert bridge.approvals_reviewer == "guardian_subagent"
+    assert bridge.sandbox_mode == "workspace-write"
+
+
 def test_create_app_tolerates_legacy_repair_service_without_on_task_update(
     tmp_path: Path,
     monkeypatch,

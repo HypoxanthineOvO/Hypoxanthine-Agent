@@ -3,16 +3,27 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import httpx
+
 from hypo_agent.skills.agent_search_skill import AgentSearchSkill
 
 
-def _write_secrets(path: Path, *, api_key: str = "tvly-test-key") -> None:
+def _write_secrets(
+    path: Path,
+    *,
+    api_key: str = "tvly-test-key",
+    zhihu_cookie: str = "",
+) -> None:
+    zhihu_block = ""
+    if zhihu_cookie:
+        zhihu_block = f'\n  zhihu:\n    cookie: "{zhihu_cookie}"'
     path.write_text(
         f"""
 providers: {{}}
 services:
   tavily:
     api_key: {api_key}
+{zhihu_block}
 """.strip(),
         encoding="utf-8",
     )
@@ -133,6 +144,75 @@ def test_agent_search_skill_web_read_returns_extracted_content(tmp_path: Path) -
     assert client.extract_calls == [
         {
             "urls": ["https://example.com/article"],
+            "extract_depth": "advanced",
+            "format": "markdown",
+            "include_images": True,
+            "include_favicon": True,
+        }
+    ]
+
+
+def test_agent_search_skill_web_read_falls_back_to_zhihu_pin_api(tmp_path: Path) -> None:
+    secrets_path = tmp_path / "secrets.yaml"
+    _write_secrets(secrets_path, zhihu_cookie="z_c0=demo-cookie")
+
+    class EmptyExtractClient(FakeTavilyClient):
+        def extract(self, urls, **kwargs):
+            self.extract_calls.append({"urls": urls, **kwargs})
+            return {
+                "results": [],
+                "failed_results": [{"url": urls[0], "error": "anti-bot"}],
+                "response_time": 0.12,
+                "request_id": "req-empty",
+            }
+
+    client = EmptyExtractClient("tvly-test-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v4/pins/2031345498871873562"
+        assert request.headers["referer"].startswith("https://www.zhihu.com/pin/")
+        assert request.headers["cookie"] == "z_c0=demo-cookie"
+        return httpx.Response(
+            200,
+            json={
+                "id": "2031345498871873562",
+                "url": "https://www.zhihu.com/pin/2031345498871873562?native=0",
+                "updated": 1777090644,
+                "like_count": 12,
+                "comment_count": 3,
+                "author": {"name": "Hypo", "url_token": "hypo"},
+                "excerpt_title": "OpenAI skills",
+                "content": [
+                    {
+                        "title": "概览",
+                        "content": "OpenAI 也开源了 skills 仓库。<br><br>现在已经能直接复用。",
+                    }
+                ],
+            },
+        )
+
+    skill = AgentSearchSkill(
+        secrets_path=secrets_path,
+        tavily_client_factory=lambda api_key: client,
+        http_transport=httpx.MockTransport(handler),
+    )
+
+    output = asyncio.run(
+        skill.execute(
+            "web_read",
+            {"url": "https://www.zhihu.com/pin/2031345498871873562?utm_psn=2031530652642842068"},
+        )
+    )
+
+    assert output.status == "success"
+    assert output.result["url"] == "https://www.zhihu.com/pin/2031345498871873562?native=0"
+    assert "OpenAI skills" in output.result["content"]
+    assert "作者：Hypo" in output.result["content"]
+    assert "## 概览" in output.result["content"]
+    assert "现在已经能直接复用。" in output.result["content"]
+    assert client.extract_calls == [
+        {
+            "urls": ["https://www.zhihu.com/pin/2031345498871873562?utm_psn=2031530652642842068"],
             "extract_depth": "advanced",
             "format": "markdown",
             "include_images": True,

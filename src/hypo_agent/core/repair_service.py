@@ -918,7 +918,11 @@ class RepairService:
         if event_type == "agent_message_delta":
             return str(payload.get("delta") or "").strip()
         if event_type == "thread_status":
-            return f"thread_status={str(payload.get('status') or 'unknown').strip()}"
+            status = str(payload.get("status") or "unknown").strip()
+            flags = payload.get("active_flags")
+            if isinstance(flags, list) and flags:
+                return f"thread_status={status} flags={','.join(str(item) for item in flags)}"
+            return f"thread_status={status}"
         if event_type == "turn_completed":
             return f"turn_completed status={str(payload.get('status') or 'completed').strip()}"
         if event_type == "item_completed":

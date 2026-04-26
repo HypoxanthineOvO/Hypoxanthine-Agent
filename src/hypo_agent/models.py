@@ -200,6 +200,9 @@ class CodexServiceConfig(BaseModel):
     model: str = "gpt-5.4"
     reasoning_effort: str = "high"
     codex_bin: str = ""
+    approval_policy: str = "never"
+    approvals_reviewer: str = "guardian_subagent"
+    sandbox_mode: str = "danger-full-access"
 
 
 class ProbeConfig(BaseModel):
@@ -216,6 +219,9 @@ class NotionServiceConfig(BaseModel):
     default_workspace: str = ""
     todo_database_id: str = ""
     proxy_url: str = ""
+    timeout_ms: int = Field(default=60_000, ge=1000)
+    api_timeout_seconds: float = Field(default=30.0, ge=1.0)
+    max_retries: int = Field(default=3, ge=1)
 
 
 class ServicesConfig(BaseModel):

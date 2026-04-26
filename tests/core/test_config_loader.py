@@ -213,22 +213,24 @@ providers:
         load_runtime_model_config(models_yaml, secrets_yaml)
 
 
-def test_repo_models_config_routes_local_main_and_local_utility_models() -> None:
+def test_repo_models_config_routes_fast_tool_model_and_local_utility_models() -> None:
     runtime = load_runtime_model_config(
         Path(__file__).resolve().parents[2] / "config" / "models.yaml",
         Path(__file__).resolve().parents[2] / "config" / "secrets.yaml",
     )
 
-    assert runtime.default_model == "GenesiQWen35BA3B"
-    assert runtime.task_routing["chat"] == "GenesiQWen35BA3B"
-    assert runtime.task_routing["reasoning"] == "GenesiQWen35BA3B"
+    assert runtime.default_model == "DeepSeekV4"
+    assert runtime.task_routing["chat"] == "DeepSeekV4"
+    assert runtime.task_routing["reasoning"] == "DeepSeekV4"
     assert runtime.task_routing["lightweight"] == "GenesiQWen35BA3B"
     assert runtime.task_routing["compression"] == "GenesiQWen35BA3B"
-    assert runtime.task_routing["heartbeat"] == "GenesiQWen35BA3B"
+    assert runtime.task_routing["heartbeat"] == "DeepSeekV4"
     assert runtime.task_routing["vision"] == "GPT"
     assert runtime.models["DeepSeekV4"].litellm_model == "deepseek/deepseek-v4-flash"
     assert runtime.models["DeepSeekV4"].provider == "Deepseek"
-    assert runtime.models["DeepSeekV4"].fallback == "GenesiQWen35BA3B"
+    assert runtime.models["DeepSeekV4"].fallback == "GPT"
+    assert runtime.models["GPT"].fallback == "GPTMini"
+    assert runtime.models["GPTMini"].fallback == "CodingPlanAuto"
     assert runtime.models["GenesiQWen35BA3B"].litellm_model == "openai/qwen3.6-35b"
     assert runtime.models["GenesiQWen35BA3B"].provider == "GenesisLocal"
     assert runtime.models["GenesiQWen35BA3B"].fallback is None
@@ -380,6 +382,9 @@ services:
     default_workspace: Hypo
     todo_database_id: todo-db
     proxy_url: http://127.0.0.1:7890
+    timeout_ms: 60000
+    api_timeout_seconds: 30
+    max_retries: 4
 """.strip(),
         encoding="utf-8",
     )
@@ -392,6 +397,9 @@ services:
     assert secrets.services.notion.default_workspace == "Hypo"
     assert secrets.services.notion.todo_database_id == "todo-db"
     assert secrets.services.notion.proxy_url == "http://127.0.0.1:7890"
+    assert secrets.services.notion.timeout_ms == 60000
+    assert secrets.services.notion.api_timeout_seconds == 30
+    assert secrets.services.notion.max_retries == 4
 
 
 def test_load_secrets_config_accepts_weibo_and_zhihu_services(tmp_path: Path) -> None:

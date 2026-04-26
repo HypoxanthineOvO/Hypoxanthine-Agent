@@ -25,6 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
         ("agent-search", "搜索一下 Claude 4 最新消息", "search_web"),
         ("info-portal", "今天有什么 AI 新闻", "info_today"),
         ("notion", "帮我在 Notion 创建一个页面", "notion_create_entry"),
+        ("notion", "帮我把 Notion 页面转成 md 发给我", "notion_export_page_markdown"),
         ("coder", "提交一个代码任务给 Coder", "coder_submit_task"),
         ("probe", "看看探针设备列表", "probe_list_devices"),
         ("info-reach", "帮我订阅 LLM 相关资讯", "info_subscribe"),

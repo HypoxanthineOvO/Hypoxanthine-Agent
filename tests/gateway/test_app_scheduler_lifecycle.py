@@ -124,6 +124,14 @@ class RecordingImageRenderer:
         self.stopped += 1
 
 
+class RecordingSkillManager:
+    def __init__(self) -> None:
+        self.closed = 0
+
+    async def aclose(self) -> None:
+        self.closed += 1
+
+
 def test_app_lifespan_starts_and_stops_scheduler_and_pipeline_consumer(tmp_path) -> None:
     scheduler = RecordingScheduler()
     pipeline = RecordingPipeline()
@@ -192,6 +200,29 @@ def test_app_lifespan_initializes_and_stops_image_renderer(tmp_path) -> None:
         assert app.state.image_renderer is renderer
 
     assert renderer.stopped == 1
+
+
+def test_app_lifespan_closes_skill_manager(tmp_path) -> None:
+    scheduler = RecordingScheduler()
+    pipeline = RecordingPipeline()
+    skill_manager = RecordingSkillManager()
+    deps = AppDeps(
+        session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+        structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        scheduler=scheduler,
+        event_queue=DummyEventQueue(),
+        skill_manager=skill_manager,
+    )
+    app = create_app(
+        auth_token="test-token",
+        pipeline=pipeline,
+        deps=deps,
+    )
+
+    with TestClient(app):
+        assert skill_manager.closed == 0
+
+    assert skill_manager.closed == 1
 
 
 def test_event_consumer_starts_on_lifespan(tmp_path) -> None:

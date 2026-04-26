@@ -80,6 +80,47 @@ def test_probe_model_reports_no_tool_calls() -> None:
     assert result.tool_calls_count == 0
 
 
+def test_probe_model_omits_tool_choice_for_openai_mini_models() -> None:
+    captured: list[dict] = []
+
+    async def fake_acompletion(**kwargs):
+        captured.append(kwargs)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "echo", "arguments": "{\"text\":\"hello\"}"},
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+
+    config = ResolvedModelConfig(
+        provider="VSPLab",
+        litellm_model="openai/gpt-5.4-mini",
+        api_base="https://api.vsplab.cn/v1",
+        api_key="sk-test",
+    )
+    result = asyncio.run(
+        probe_model(
+            "GPTMini",
+            config,
+            acompletion_fn=fake_acompletion,
+            timeout_seconds=5.0,
+        )
+    )
+
+    assert result.connectivity_ok is True
+    assert "tool_choice" not in captured[0]
+
+
 def test_probe_model_disables_thinking_for_ollama_chat_probes() -> None:
     captured: list[dict] = []
 

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
+import html
 import inspect
+import json
 from copy import deepcopy
 from collections.abc import AsyncIterator
 from collections.abc import Awaitable, Callable
@@ -231,6 +232,8 @@ class ModelRouter:
                     tool_calls,
                     reverse_tool_name_map,
                 )
+                if tool_calls:
+                    text = self._strip_embedded_tool_payload_text(text)
                 reasoning_content = self._extract_reasoning_content(response)
                 assistant_message: dict[str, Any] = {
                     "role": "assistant",
@@ -1175,6 +1178,10 @@ class ModelRouter:
             return None
 
     def _extract_text_embedded_tool_calls(self, text: str) -> list[dict[str, Any]]:
+        dsml_calls = self._extract_dsml_tool_calls(text)
+        if dsml_calls:
+            return dsml_calls
+
         parsed = self._parse_json_value_from_text(text)
         if parsed is None:
             return []
@@ -1235,6 +1242,91 @@ class ModelRouter:
             "type": "function",
             "function": {"name": name, "arguments": arguments},
         }
+
+    def _extract_dsml_tool_calls(self, text: str) -> list[dict[str, Any]]:
+        raw = str(text or "")
+        if "DSML" not in raw or "tool_calls" not in raw:
+            return []
+
+        block_match = re.search(
+            r"<\s*｜DSML｜tool_calls\s*>(?P<body>.*?)</\s*｜DSML｜tool_calls\s*>",
+            raw,
+            flags=re.DOTALL,
+        )
+        if block_match is None:
+            return []
+
+        block_body = block_match.group("body")
+        normalized: list[dict[str, Any]] = []
+        invoke_pattern = re.compile(
+            r"<\s*｜DSML｜invoke\b(?P<attrs>[^>]*)>(?P<body>.*?)</\s*｜DSML｜invoke\s*>",
+            flags=re.DOTALL,
+        )
+        param_pattern = re.compile(
+            r"<\s*｜DSML｜parameter\b(?P<attrs>[^>]*)>(?P<body>.*?)</\s*｜DSML｜parameter\s*>",
+            flags=re.DOTALL,
+        )
+
+        for idx, invoke_match in enumerate(invoke_pattern.finditer(block_body), start=1):
+            invoke_attrs = self._parse_dsml_attrs(invoke_match.group("attrs"))
+            tool_name = str(invoke_attrs.get("name") or "").strip()
+            if not tool_name:
+                continue
+
+            arguments: dict[str, Any] = {}
+            for param_match in param_pattern.finditer(invoke_match.group("body")):
+                param_attrs = self._parse_dsml_attrs(param_match.group("attrs"))
+                param_name = str(param_attrs.get("name") or "").strip()
+                if not param_name:
+                    continue
+                raw_value = html.unescape(param_match.group("body")).strip()
+                if self._dsml_param_is_json(param_attrs):
+                    parsed_value = self._try_parse_json_value(raw_value)
+                    arguments[param_name] = parsed_value if parsed_value is not None else raw_value
+                else:
+                    arguments[param_name] = raw_value
+
+            normalized.append(
+                {
+                    "id": f"call_{idx}",
+                    "type": "function",
+                    "function": {
+                        "name": html.unescape(tool_name),
+                        "arguments": self._json_dump(arguments),
+                    },
+                }
+            )
+        return normalized
+
+    def _parse_dsml_attrs(self, attrs: str) -> dict[str, str]:
+        parsed: dict[str, str] = {}
+        for match in re.finditer(
+            r"([A-Za-z_][\w:-]*)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')",
+            str(attrs or ""),
+        ):
+            value = match.group(2) if match.group(2) is not None else match.group(3)
+            parsed[match.group(1)] = html.unescape(value or "")
+        return parsed
+
+    def _dsml_param_is_json(self, attrs: dict[str, str]) -> bool:
+        for key in ("json", "object", "array"):
+            value = attrs.get(key)
+            if isinstance(value, str) and value.strip().lower() in {"1", "true", "yes"}:
+                return True
+        value_type = str(attrs.get("type") or "").strip().lower()
+        return value_type in {"json", "object", "array"}
+
+    def _strip_embedded_tool_payload_text(self, text: str) -> str:
+        raw = str(text or "")
+        if "DSML" not in raw or "tool_calls" not in raw:
+            return raw
+        stripped = re.sub(
+            r"<\s*｜DSML｜tool_calls\s*>.*?</\s*｜DSML｜tool_calls\s*>",
+            "",
+            raw,
+            flags=re.DOTALL,
+        ).strip()
+        return stripped
 
     def _extract_delta_text(self, chunk: Any) -> str:
         choices = self._read_field(chunk, "choices") or []

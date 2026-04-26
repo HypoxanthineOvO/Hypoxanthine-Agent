@@ -69,9 +69,9 @@ tool_narration:
   update_persona_memory:
     template: "🧠 正在更新记忆..."
   save_preference:
-    template: "💾 正在保存偏好..."
+    template: "💾 正在写入结构化记忆..."
   get_preference:
-    template: "🪪 正在读取偏好..."
+    template: "🪪 正在读取结构化记忆..."
   snooze_reminder:
     template: "💤 正在延后提醒..."
 

@@ -25,7 +25,7 @@ class SkillManager:
         "read_file": "read",
         "write_file": "write",
         "list_directory": "read",
-        "scan_directory": "write",
+        "scan_directory": "read",
         "get_directory_index": "read",
         "update_directory_description": "read",
     }
@@ -77,6 +77,18 @@ class SkillManager:
     def register_many(self, skills: list[BaseSkill], *, source: str = "auto") -> None:
         for skill in skills:
             self.register(skill, source=source)
+
+    async def aclose(self) -> None:
+        for skill in list(self._skills.values()):
+            close = getattr(skill, "close", None)
+            if not callable(close):
+                continue
+            try:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.warning("skill_manager.close_failed", skill_name=skill.name, exc_info=True)
 
     def get_tools_schema(
         self,

@@ -10,6 +10,8 @@ from notion_client.errors import APIErrorCode, APIResponseError, HTTPResponseErr
 
 from hypo_agent.exceptions import ExternalServiceError
 
+_NON_RECURSIVE_CHILD_BLOCK_TYPES = {"child_page", "child_database"}
+
 
 class NotionUnavailableError(ExternalServiceError):
     """Raised when Notion API is unreachable, rate-limited beyond retry budget, or unauthorized."""
@@ -25,8 +27,8 @@ class NotionClient:
         integration_secret: str,
         *,
         notion_version: str = "2022-06-28",
-        timeout_ms: int = 30_000,
-        api_timeout_seconds: float = 10.0,
+        timeout_ms: int = 60_000,
+        api_timeout_seconds: float = 30.0,
         max_retries: int = 3,
         proxy_url: str | None = None,
     ) -> None:
@@ -34,15 +36,18 @@ class NotionClient:
         self.api_timeout_seconds = max(0.01, float(api_timeout_seconds))
         self.max_retries = max(1, int(max_retries))
         normalized_proxy_url = str(proxy_url or "").strip() or None
-        transport_client = httpx.AsyncClient(proxy=normalized_proxy_url)
+        self._transport_client = httpx.AsyncClient(proxy=normalized_proxy_url)
         self.client = AsyncClient(
             options={
                 "auth": integration_secret,
                 "timeout_ms": timeout_ms,
                 "notion_version": notion_version,
             },
-            client=transport_client,
+            client=self._transport_client,
         )
+
+    async def close(self) -> None:
+        await self._transport_client.aclose()
 
     async def get_page(self, page_id: str) -> dict[str, Any]:
         response = await self._call_with_retry(
@@ -180,7 +185,8 @@ class NotionClient:
                 for item in results:
                     if not isinstance(item, dict):
                         continue
-                    if item.get("has_children") is True:
+                    block_type = str(item.get("type") or "")
+                    if item.get("has_children") is True and block_type not in _NON_RECURSIVE_CHILD_BLOCK_TYPES:
                         block_type = str(item.get("type") or "")
                         payload = item.get(block_type)
                         if isinstance(payload, dict):

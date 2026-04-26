@@ -190,6 +190,23 @@ def test_read_file_falls_back_for_unsupported_format(tmp_path: Path) -> None:
     assert output.metadata["format"] == "unsupported"
 
 
+def test_read_file_resolves_exported_attachment_filename_from_memory_exports(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    skill, _, _ = _build_skill(tmp_path)
+    exported = tmp_path / "memory" / "exports" / "tool-output.md"
+    exported.parent.mkdir(parents=True, exist_ok=True)
+    exported.write_text("export body", encoding="utf-8")
+    monkeypatch.setattr(fs_module, "get_memory_dir", lambda: tmp_path / "memory")
+
+    output = asyncio.run(skill.execute("read_file", {"path": "tool-output.md"}))
+
+    assert output.status == "success"
+    assert output.result == "export body"
+    assert output.metadata["path"] == str(exported)
+
+
 def test_write_file_allows_whitelisted_path(tmp_path: Path) -> None:
     skill, writable, _ = _build_skill(tmp_path)
     file_path = writable / "nested" / "notes.md"

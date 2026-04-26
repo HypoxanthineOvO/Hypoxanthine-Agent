@@ -253,6 +253,12 @@ def _render_blocks(blocks: list[dict[str, Any]], *, indent: int) -> list[str]:
             url = str(payload.get("url") or "").strip()
             label = text or url or "bookmark"
             chunk = f"[{label}]({url})" if url else label
+        elif block_type == "child_page":
+            title = str(payload.get("title") or "").strip() or "未命名子页面"
+            chunk = f"- 子页面: {title}"
+        elif block_type == "child_database":
+            title = str(payload.get("title") or "").strip() or "未命名子数据库"
+            chunk = f"- 子数据库: {title}"
         else:
             chunk = f"[不支持的块类型: {block_type or 'unknown'}]"
 

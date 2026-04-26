@@ -74,8 +74,13 @@ class PersonaManager:
 
         return {
             "file_path": str(file_path),
+            "folder_path": str(file_path.parent),
             "key": normalized_key,
             "value": normalized_value,
+            "human_summary": (
+                f"已写入长期记忆：{normalized_key}={normalized_value}。"
+                f"文件在 {file_path}，所在文件夹是 {file_path.parent}。"
+            ),
         }
 
     def _build_static_section(self, config: PersonaConfig) -> str:

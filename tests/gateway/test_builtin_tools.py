@@ -80,6 +80,9 @@ def test_build_default_pipeline_registers_update_persona_memory_builtin(
     content = file_path.read_text(encoding="utf-8")
     assert "## 回复风格" in content
     assert "简洁" in content
+    assert output.result["file_path"] == str(file_path)
+    assert output.result["folder_path"] == str(file_path.parent)
+    assert str(file_path.parent) in output.result["human_summary"]
     assert semantic_memory.updated_paths == [file_path]
 
 

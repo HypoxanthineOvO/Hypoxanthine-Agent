@@ -1105,6 +1105,56 @@ def test_model_router_call_with_tools_extracts_text_embedded_json_tool_call(
     assert '"key": "回复风格"' in payload["tool_calls"][0]["function"]["arguments"]
 
 
+def test_model_router_call_with_tools_extracts_text_embedded_dsml_tool_call(
+    runtime_config: RuntimeModelConfig,
+) -> None:
+    async def fake_acompletion(**kwargs):
+        del kwargs
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '<｜DSML｜tool_calls> <｜DSML｜invoke name="write_file"> '
+                            '<｜DSML｜parameter name="path" string="true">'
+                            "/home/heyx/Hypo-Agent/memory/knowledge/belongings.md"
+                            "</｜DSML｜parameter> "
+                            '<｜DSML｜parameter name="content" string="true">'
+                            "# 重要物品存放位置\n学生证: 工位左手边抽屉"
+                            "</｜DSML｜parameter> "
+                            "</｜DSML｜invoke> </｜DSML｜tool_calls>"
+                        )
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    router = ModelRouter(runtime_config, acompletion_fn=fake_acompletion)
+    payload = asyncio.run(
+        router.call_with_tools(
+            "Gemini3Pro",
+            [{"role": "user", "content": "hi"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+        )
+    )
+
+    assert payload["text"] == ""
+    assert payload["tool_calls"][0]["function"]["name"] == "write_file"
+    assert payload["tool_calls"][0]["function"]["arguments"] == (
+        '{"path": "/home/heyx/Hypo-Agent/memory/knowledge/belongings.md", '
+        '"content": "# 重要物品存放位置\\n学生证: 工位左手边抽屉"}'
+    )
+
+
 def test_model_router_does_not_pass_api_base_when_missing() -> None:
     runtime = RuntimeModelConfig.model_validate(
         {

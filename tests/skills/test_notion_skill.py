@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import hypo_agent.skills.notion_skill as notion_skill_module
 from hypo_agent.channels.notion.notion_client import NotionUnavailableError
 from hypo_agent.skills.notion_skill import NotionSkill
 
@@ -176,6 +177,62 @@ class DummyHeartbeatService:
 
     def register_event_source(self, name: str, callback: object) -> None:
         self.registrations.append((name, callback))
+
+
+def test_build_client_from_config_passes_timeout_settings(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class RecordingNotionClient:
+        def __init__(self, integration_secret: str, **kwargs) -> None:
+            captured["integration_secret"] = integration_secret
+            captured.update(kwargs)
+
+    secrets_path = tmp_path / "secrets.yaml"
+    secrets_path.write_text(
+        """
+providers: {}
+services:
+  notion:
+    integration_secret: "secret_xxx"
+    default_workspace: "Hypo"
+    todo_database_id: "todo-db"
+    proxy_url: "http://127.0.0.1:7890"
+    timeout_ms: 60000
+    api_timeout_seconds: 30
+    max_retries: 4
+""".strip(),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(notion_skill_module, "NotionClient", RecordingNotionClient)
+
+    NotionSkill(secrets_path=secrets_path)
+
+    assert captured == {
+        "integration_secret": "secret_xxx",
+        "proxy_url": "http://127.0.0.1:7890",
+        "timeout_ms": 60000,
+        "api_timeout_seconds": 30.0,
+        "max_retries": 4,
+    }
+
+
+def test_notion_skill_close_closes_underlying_client() -> None:
+    class ClosableFakeNotionClient(FakeNotionClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.closed = 0
+
+        async def close(self) -> None:
+            self.closed += 1
+
+    async def _run() -> None:
+        client = ClosableFakeNotionClient()
+        skill = NotionSkill(notion_client=client)
+        await skill.close()
+        assert client.closed == 1
+
+    asyncio.run(_run())
 
 
 def test_read_page_formats_title_properties_and_markdown() -> None:

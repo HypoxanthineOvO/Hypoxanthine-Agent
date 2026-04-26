@@ -73,7 +73,10 @@ TOOL_USE_SYSTEM_PROMPT = (
     "you MUST call update_persona_memory(key, value) to persist them in long-term memory. "
     "If the user explicitly asks you to remember a preference, profile detail, or reply style, "
     "do not only answer with text like '好的，我记住了'; call update_persona_memory first. "
-    "Use save_preference(key, value) and get_preference(key) for structured key-value memory when needed. "
+    "Use save_preference(key, value) and get_preference(key) for structured key-value memory when needed; "
+    "these tools are for stable memory items, not only narrow 'preferences'. "
+    "After any successful memory write, explicitly tell the user which file or database path was updated "
+    "and which folder it lives in. "
     "When you derive a reusable workflow or troubleshooting playbook, use save_sop(title, content) "
     "only after the user has explicitly approved saving it in a prior turn. "
     "You must first ask for confirmation, wait for the user's explicit approval, "
@@ -208,6 +211,10 @@ _RETRYABLE_TOOLS = {
     "get_heartbeat_snapshot",
 }
 
+_TERMINAL_SUCCESS_TOOLS = {
+    "notion_export_page_markdown",
+}
+
 LEGACY_TOOL_NAME_REMAP = {
     "web_search": "search_web",
 }
@@ -220,6 +227,12 @@ _ACCESS_DENIED_REPLY_PATTERNS = (
     "cannot access",
     "permission denied",
 )
+_HEARTBEAT_PREFETCHED_SNAPSHOT_TOOLS = {
+    "get_mail_snapshot",
+    "get_notion_todo_snapshot",
+    "get_reminder_snapshot",
+    "get_heartbeat_snapshot",
+}
 
 
 def _error_fields(exc: Exception) -> dict[str, str]:
@@ -823,9 +836,15 @@ class ChatPipeline:
     def _core_tool_names_for_inbound(self, inbound: Message | None) -> set[str] | None:
         if self._is_heartbeat_request(inbound):
             if self.heartbeat_allowed_tools:
-                return set(self.heartbeat_allowed_tools)
+                return set(self.heartbeat_allowed_tools) - self._heartbeat_disallowed_tools(inbound)
             return None
         return set(_CORE_TOOL_WHITELIST)
+
+    def _heartbeat_disallowed_tools(self, inbound: Message | None) -> set[str]:
+        metadata = inbound.metadata if inbound is not None else {}
+        if not self._metadata_flag_enabled(metadata, "heartbeat_snapshot_prefetched"):
+            return set()
+        return set(_HEARTBEAT_PREFETCHED_SNAPSHOT_TOOLS)
 
     def _merge_tool_schemas(
         self,
@@ -878,7 +897,36 @@ class ChatPipeline:
         exposure["core_count"] = len(exposure["core_tool_names"])
         exposure["preloaded_count"] = len(preloaded_tools)
         exposure["persisted_dynamic_count"] = len(persisted_tools)
-        return exposed_tools, exposure
+        disallowed_tool_names = self._heartbeat_disallowed_tools(inbound)
+        if not disallowed_tool_names:
+            return exposed_tools, exposure
+        filtered_exposed_tools = [
+            tool
+            for tool in exposed_tools
+            if str(tool.get("function", {}).get("name") or "").strip() not in disallowed_tool_names
+        ]
+        exposure["tool_names"] = [
+            str(tool.get("function", {}).get("name") or "").strip()
+            for tool in filtered_exposed_tools
+            if str(tool.get("function", {}).get("name") or "").strip()
+        ]
+        exposure["core_tool_names"] = [
+            tool_name
+            for tool_name in exposure["core_tool_names"]
+            if tool_name not in disallowed_tool_names
+        ]
+        exposure["core_count"] = len(exposure["core_tool_names"])
+        exposure["preloaded_count"] = sum(
+            1
+            for tool in preloaded_tools
+            if str(tool.get("function", {}).get("name") or "").strip() not in disallowed_tool_names
+        )
+        exposure["persisted_dynamic_count"] = sum(
+            1
+            for tool in persisted_tools
+            if str(tool.get("function", {}).get("name") or "").strip() not in disallowed_tool_names
+        )
+        return filtered_exposed_tools, exposure
 
     def _tool_names(self, tools: list[dict[str, Any]]) -> set[str]:
         return {
@@ -1604,6 +1652,7 @@ class ChatPipeline:
             full_text = ""
             killed = False
             session_fused = False
+            reply_completed_from_tool = False
             last_tool_fallback_text: str | None = None
             react_iterations_completed = 0
             react_tool_calls_total = 0
@@ -2108,6 +2157,21 @@ class ChatPipeline:
                             ),
                             session_id=inbound.session_id,
                         )
+                        if self._tool_success_completes_reply(tool_name, output):
+                            reached_round_limit = False
+                            full_text = self._tool_success_reply_text(
+                                tool_name=tool_name,
+                                output=output,
+                                attachments=tool_attachments_for_event,
+                            )
+                            if full_text:
+                                yield await self._format_event(
+                                    event_type="assistant_chunk",
+                                    response=RichResponse(text=full_text),
+                                    session_id=inbound.session_id,
+                                )
+                            reply_completed_from_tool = True
+                            break
                         react_messages.append(
                             {
                                 "role": "tool",
@@ -2127,6 +2191,8 @@ class ChatPipeline:
                                 session_id=inbound.session_id,
                             )
                             break
+                    if reply_completed_from_tool:
+                        break
                     if session_fused:
                         break
                     if self._should_force_final_response(
@@ -3286,6 +3352,27 @@ class ChatPipeline:
     def _should_export_long_output(self, content: str) -> bool:
         return len(str(content or "")) > self.long_output_threshold_chars
 
+    def _tool_success_completes_reply(self, tool_name: str, output: SkillOutput) -> bool:
+        return output.status == "success" and tool_name in _TERMINAL_SUCCESS_TOOLS
+
+    def _tool_success_reply_text(
+        self,
+        *,
+        tool_name: str,
+        output: SkillOutput,
+        attachments: list[Attachment],
+    ) -> str:
+        if tool_name == "notion_export_page_markdown":
+            filename = ""
+            if attachments:
+                filename = str(attachments[0].filename or Path(attachments[0].url).name).strip()
+            if not filename:
+                filename = str(output.result or "").strip()
+            if filename:
+                return f"已导出为 Markdown 文件附件：{filename}"
+            return "已导出为 Markdown 文件附件。"
+        return self._tool_fallback_text(output)
+
     def _externalized_tool_output_notice(
         self,
         *,
@@ -3293,9 +3380,11 @@ class ChatPipeline:
         tool_name: str,
     ) -> str:
         normalized_tool = str(tool_name or "").strip() or "tool"
+        attachment_path = str(attachment.url or "").strip()
         return (
             f"{normalized_tool} 输出过长，已导出为 Markdown 文件附件："
-            f"{attachment.filename or Path(attachment.url).name}"
+            f"{attachment.filename or Path(attachment.url).name}。"
+            f"保存路径：{attachment_path}"
         )
 
     def _export_long_tool_output_attachment(
@@ -3323,6 +3412,17 @@ class ChatPipeline:
     def _tool_is_retryable(self, tool_name: str) -> bool:
         return tool_name in _RETRYABLE_TOOLS
 
+    def _should_retry_tool_output(self, tool_name: str, output: SkillOutput) -> bool:
+        if not self._tool_is_retryable(tool_name):
+            return False
+        error_info = str(output.error_info or "").strip().lower()
+        if tool_name == "read_file" and (
+            "file not found" in error_info
+            or "no such file" in error_info
+        ):
+            return False
+        return True
+
     async def _invoke_tool_with_retry(
         self,
         *,
@@ -3344,7 +3444,11 @@ class ChatPipeline:
                 skill_name=skill_name,
             )
             last_output = output
-            if output.status == "success" or attempt >= attempts:
+            if (
+                output.status == "success"
+                or attempt >= attempts
+                or not self._should_retry_tool_output(tool_name, output)
+            ):
                 if attempt > 1:
                     logger.info(
                         "tool.retry.completed",

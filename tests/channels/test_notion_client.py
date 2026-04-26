@@ -76,3 +76,52 @@ def test_notion_client_passes_proxy_url_to_httpx(monkeypatch: pytest.MonkeyPatch
 
     assert captured["proxy"] == "http://127.0.0.1:7890"
     asyncio.run(client.client.client.aclose())
+
+
+def test_get_page_content_does_not_recurse_into_child_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = NotionClient("ntn_test_secret", max_retries=1)
+    calls: list[str] = []
+
+    async def fake_list(*, block_id: str, page_size: int, start_cursor: str | None = None):
+        del page_size, start_cursor
+        calls.append(block_id)
+        if block_id == "root-page":
+            return {
+                "results": [
+                    {
+                        "id": "child-page-1",
+                        "type": "child_page",
+                        "has_children": True,
+                        "child_page": {"title": "Nested Space"},
+                    },
+                    {
+                        "id": "callout-1",
+                        "type": "callout",
+                        "has_children": True,
+                        "callout": {"rich_text": []},
+                    },
+                ],
+                "has_more": False,
+            }
+        if block_id == "callout-1":
+            return {
+                "results": [
+                    {
+                        "id": "paragraph-1",
+                        "type": "paragraph",
+                        "has_children": False,
+                        "paragraph": {"rich_text": []},
+                    }
+                ],
+                "has_more": False,
+            }
+        raise AssertionError(f"unexpected recursive fetch for {block_id}")
+
+    monkeypatch.setattr(client.client.blocks.children, "list", fake_list)
+
+    blocks = asyncio.run(client.get_page_content("root-page"))
+
+    assert calls == ["root-page", "callout-1"]
+    assert len(blocks) == 2
+    assert "children" not in blocks[0]["child_page"]
+    assert blocks[1]["callout"]["children"][0]["id"] == "paragraph-1"

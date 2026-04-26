@@ -8,7 +8,7 @@ import hypo_agent.core.pipeline as pipeline_module
 import pytest
 from hypo_agent.core.pipeline import ChatPipeline
 from hypo_agent.core.skill_manager import SkillManager
-from hypo_agent.models import CircuitBreakerConfig, Message, SkillOutput
+from hypo_agent.models import Attachment, CircuitBreakerConfig, Message, SkillOutput
 from hypo_agent.security.circuit_breaker import CircuitBreaker
 from hypo_agent.skills.base import BaseSkill
 
@@ -1278,11 +1278,13 @@ def test_pipeline_stream_reply_exports_long_tool_output_before_tool_message(tmp_
     events = asyncio.run(_collect())
     assert events[1]["type"] == "tool_call_result"
     assert "Markdown 文件附件" in str(events[1]["result"])
+    assert str(events[1]["attachments"][0]["url"]) in str(events[1]["result"])
     assert "compressed_meta" not in events[1]
     assert events[1]["attachments"][0]["filename"].endswith(".md")
     tool_messages = [m for m in router.last_messages if m.get("role") == "tool"]
     assert tool_messages
     assert "Markdown 文件附件" in str(tool_messages[-1]["content"])
+    assert str(events[1]["attachments"][0]["url"]) in str(tool_messages[-1]["content"])
 
 
 def test_pipeline_stream_reply_keeps_tool_output_uncompressed_when_compressor_disabled() -> None:
@@ -1482,6 +1484,216 @@ def test_pipeline_retries_retryable_tool_once_after_failure() -> None:
         ("search_web", {"query": "hypo agent"}),
         ("search_web", {"query": "hypo agent"}),
     ]
+
+
+def test_pipeline_skips_prefetched_heartbeat_snapshot_tools() -> None:
+    pipeline = ChatPipeline(
+        router=object(),
+        chat_model="Gemini3Pro",
+        session_memory=StubSessionMemory(),
+        heartbeat_allowed_tools={
+            "get_mail_snapshot",
+            "get_notion_todo_snapshot",
+            "get_reminder_snapshot",
+            "get_heartbeat_snapshot",
+            "get_recent_logs",
+            "search_sop",
+        },
+    )
+
+    inbound = Message(
+        text="heartbeat",
+        sender="user",
+        session_id="s1",
+        message_tag="heartbeat",
+        metadata={"source": "heartbeat", "heartbeat_snapshot_prefetched": True},
+    )
+
+    assert pipeline._core_tool_names_for_inbound(inbound) == {
+        "get_recent_logs",
+        "search_sop",
+    }
+
+
+def test_pipeline_does_not_retry_permanent_read_file_errors() -> None:
+    memory = StubSessionMemory()
+
+    class MissingFileSkillManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        def get_tools_schema(self) -> list[dict]:
+            return [{"type": "function", "function": {"name": "read_file"}}]
+
+        async def invoke(
+            self,
+            tool_name: str,
+            params: dict,
+            *,
+            session_id: str | None = None,
+            skill_name: str | None = None,
+        ) -> SkillOutput:
+            del session_id, skill_name
+            self.calls.append((tool_name, dict(params)))
+            return SkillOutput(
+                status="error",
+                error_info="File not found: /tmp/missing.md",
+            )
+
+    class StubRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{\"path\": \"/tmp/missing.md\"}",
+                            },
+                        }
+                    ],
+                }
+            return {"text": "done", "tool_calls": []}
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            del model_name, messages, session_id, tools
+            raise AssertionError("stream should not be called")
+            yield ""  # pragma: no cover
+
+    skills = MissingFileSkillManager()
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skills,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="read missing file", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+
+    assert events[-1]["type"] == "assistant_done"
+    assert skills.calls == [("read_file", {"path": "/tmp/missing.md"})]
+
+
+def test_pipeline_short_circuits_after_notion_markdown_export() -> None:
+    memory = StubSessionMemory()
+
+    class ExportSkillManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        def get_tools_schema(self) -> list[dict]:
+            return [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "notion_export_page_markdown",
+                        "parameters": {"type": "object"},
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "parameters": {"type": "object"},
+                    },
+                },
+            ]
+
+        def match_skills_for_text(self, text: str) -> list[str]:
+            del text
+            return ["notion"]
+
+        def find_skill_by_tool_name(self, tool_name: str):
+            if tool_name == "notion_export_page_markdown":
+                return type("SkillOwner", (), {"name": "notion"})()
+            return None
+
+        def get_skill_tools_schema(self, skill_name: str) -> list[dict]:
+            if skill_name == "notion":
+                return self.get_tools_schema()
+            return []
+
+        async def invoke(
+            self,
+            tool_name: str,
+            params: dict,
+            *,
+            session_id: str | None = None,
+            skill_name: str | None = None,
+        ) -> SkillOutput:
+            del session_id, skill_name
+            self.calls.append((tool_name, dict(params)))
+            return SkillOutput(
+                status="success",
+                result="/tmp/notion-export.md",
+                attachments=[
+                    Attachment(
+                        type="file",
+                        url="/tmp/notion-export.md",
+                        filename="notion-export.md",
+                        mime_type="text/markdown",
+                    )
+                ],
+            )
+
+    class ExportRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "notion_export_page_markdown",
+                                "arguments": '{"page_id": "page-1"}',
+                            },
+                        }
+                    ],
+                }
+            raise AssertionError("router should not be called again after notion export success")
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            del model_name, messages, session_id, tools
+            raise AssertionError("stream should not be called")
+            yield ""  # pragma: no cover
+
+    skills = ExportSkillManager()
+    pipeline = ChatPipeline(
+        router=ExportRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skills,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="导出这个 Notion 页面", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+
+    assert events[-1]["type"] == "assistant_done"
+    assert skills.calls == [("notion_export_page_markdown", {"page_id": "page-1"})]
+    assert memory.appended[1].attachments[0].filename == "notion-export.md"
+    assert "导出" in (memory.appended[1].text or "")
 
 
 
