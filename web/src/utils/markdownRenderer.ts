@@ -154,8 +154,114 @@ const markdown: MarkdownIt = new MarkdownIt({
   .use(taskListsPlugin as unknown as (md: MarkdownIt) => void)
   .use(mathPlugin);
 
-export function renderMarkdown(source: string): string {
-  return markdown.render(source);
+export interface RenderMarkdownOptions {
+  cacheKey?: string;
+  version?: number | string;
+  streaming?: boolean;
+}
+
+interface MarkdownCacheEntry {
+  html: string;
+  source: string;
+  usedAt: number;
+}
+
+const MARKDOWN_RENDER_CACHE_LIMIT = 160;
+const markdownRenderCache = new Map<string, MarkdownCacheEntry>();
+let markdownCacheHits = 0;
+let markdownCacheMisses = 0;
+
+function markdownCacheId(source: string, options: RenderMarkdownOptions): string | null {
+  const key = options.cacheKey?.trim();
+  if (!key) {
+    return null;
+  }
+  const version = options.version ?? source.length;
+  return `${key}:${String(version)}:${options.streaming === true ? "streaming" : "final"}`;
+}
+
+function evictOldMarkdownCacheEntries(): void {
+  while (markdownRenderCache.size > MARKDOWN_RENDER_CACHE_LIMIT) {
+    let oldestKey: string | null = null;
+    let oldestUsedAt = Number.POSITIVE_INFINITY;
+    for (const [key, entry] of markdownRenderCache.entries()) {
+      if (entry.usedAt < oldestUsedAt) {
+        oldestKey = key;
+        oldestUsedAt = entry.usedAt;
+      }
+    }
+    if (oldestKey === null) {
+      return;
+    }
+    markdownRenderCache.delete(oldestKey);
+  }
+}
+
+export function clearMarkdownRenderCache(): void {
+  markdownRenderCache.clear();
+  markdownCacheHits = 0;
+  markdownCacheMisses = 0;
+}
+
+export function getMarkdownRenderCacheStats(): {
+  entries: number;
+  hits: number;
+  misses: number;
+} {
+  return {
+    entries: markdownRenderCache.size,
+    hits: markdownCacheHits,
+    misses: markdownCacheMisses,
+  };
+}
+
+export function renderMarkdown(
+  source: string,
+  options: RenderMarkdownOptions = {},
+): string {
+  const cacheId = markdownCacheId(source, options);
+  if (cacheId) {
+    const cached = markdownRenderCache.get(cacheId);
+    if (cached && cached.source === source) {
+      cached.usedAt = Date.now();
+      markdownCacheHits += 1;
+      return cached.html;
+    }
+  }
+
+  markdownCacheMisses += cacheId ? 1 : 0;
+  const html = markdown.render(source);
+  if (cacheId) {
+    markdownRenderCache.set(cacheId, {
+      html,
+      source,
+      usedAt: Date.now(),
+    });
+    evictOldMarkdownCacheEntries();
+  }
+  return html;
+}
+
+function hasUnclosedCodeFence(source: string): boolean {
+  const fenceLines = source
+    .split(/\r?\n/)
+    .filter((line) => /^\s*(```|~~~)/.test(line));
+  return fenceLines.length % 2 === 1;
+}
+
+function hasUnclosedDisplayMath(source: string): boolean {
+  const markers = source.match(/(^|\n)\s*\$\$/g) ?? [];
+  return markers.length % 2 === 1;
+}
+
+export function shouldRenderEnhancedMarkdown(
+  source: string,
+  options: Pick<RenderMarkdownOptions, "streaming"> = {},
+): boolean {
+  if (options.streaming !== true) {
+    return true;
+  }
+  return !hasUnclosedCodeFence(source) && !hasUnclosedDisplayMath(source);
 }
 
 let mermaidLoader: Promise<typeof import("mermaid")> | null = null;

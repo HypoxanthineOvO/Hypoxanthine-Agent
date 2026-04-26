@@ -48,6 +48,35 @@ interface MemoryTableData {
   rows: Array<Record<string, unknown>>;
 }
 
+interface TypedMemoryItem {
+  memory_id: string;
+  memory_class: string;
+  key: string;
+  value: string;
+  language?: string;
+  source: string;
+  confidence?: number | null;
+  status: string;
+  metadata_json?: string;
+  updated_at?: string;
+  injection_eligible?: boolean;
+}
+
+interface TypedMemoryResponse {
+  items?: TypedMemoryItem[];
+  injectable_classes?: string[];
+}
+
+interface TypedMemoryForm {
+  memory_id: string | null;
+  memory_class: string;
+  key: string;
+  value: string;
+  source: string;
+  confidence: number | null;
+  status: string;
+}
+
 const message = (() => {
   try {
     return useMessage();
@@ -59,7 +88,7 @@ const message = (() => {
     };
   }
 })();
-const activeTab = ref<"l1" | "l2" | "l3">("l1");
+const activeTab = ref<"typed" | "l1" | "sqlite" | "l3">("typed");
 
 const normalizedApiBase = computed(() => {
   const explicitBase = props.apiBase.trim();
@@ -74,6 +103,33 @@ const withToken = (path: string): string => {
   const separator = base.includes("?") ? "&" : "?";
   return `${base}${separator}token=${encodeURIComponent(props.token)}`;
 };
+
+// Typed semantic memory
+const memoryClassOptions = [
+  { label: "user_profile", value: "user_profile" },
+  { label: "interaction_policy", value: "interaction_policy" },
+  { label: "knowledge_note", value: "knowledge_note" },
+  { label: "sop", value: "sop" },
+  { label: "operational_state", value: "operational_state" },
+  { label: "credentials_state", value: "credentials_state" },
+] as const;
+const memoryStatusOptions = [
+  { label: "active", value: "active" },
+  { label: "archived", value: "archived" },
+] as const;
+const injectableClasses = ref<string[]>([]);
+const typedMemoryItems = ref<TypedMemoryItem[]>([]);
+const typedClassFilter = ref("");
+const typedStatusFilter = ref("active");
+const typedForm = ref<TypedMemoryForm>({
+  memory_id: null,
+  memory_class: "interaction_policy",
+  key: "",
+  value: "",
+  source: "webui",
+  confidence: 0.8,
+  status: "active",
+});
 
 // L1 sessions
 const sessions = ref<SessionSummary[]>([]);
@@ -100,6 +156,14 @@ const filteredFiles = computed(() =>
   files.value.filter((item) => item.toLowerCase().includes(fileFilter.value.toLowerCase())),
 );
 
+const filteredTypedMemoryItems = computed(() =>
+  typedMemoryItems.value.filter((item) => {
+    const classMatches = !typedClassFilter.value || item.memory_class === typedClassFilter.value;
+    const statusMatches = !typedStatusFilter.value || item.status === typedStatusFilter.value;
+    return classMatches && statusMatches;
+  }),
+);
+
 const tableRows = computed(() => tableData.value?.rows ?? []);
 const tableColumns = computed(() => {
   if (tableRows.value.length === 0) return [];
@@ -111,6 +175,78 @@ const tableColumns = computed(() => {
     ellipsis: { tooltip: true },
   }));
 });
+
+const isInjectionEligible = (item: TypedMemoryItem): boolean =>
+  item.status === "active" &&
+  (item.injection_eligible === true || injectableClasses.value.includes(item.memory_class));
+
+const resetTypedForm = (): void => {
+  typedForm.value = {
+    memory_id: null,
+    memory_class: "interaction_policy",
+    key: "",
+    value: "",
+    source: "webui",
+    confidence: 0.8,
+    status: "active",
+  };
+};
+
+const selectTypedMemoryItem = (item: TypedMemoryItem): void => {
+  typedForm.value = {
+    memory_id: item.memory_id,
+    memory_class: item.memory_class,
+    key: item.key,
+    value: item.value,
+    source: item.source || "webui",
+    confidence: item.confidence ?? null,
+    status: item.status || "active",
+  };
+};
+
+const loadTypedMemoryItems = async (): Promise<void> => {
+  const params = new URLSearchParams();
+  if (typedStatusFilter.value) {
+    params.set("status", typedStatusFilter.value);
+  }
+  if (typedClassFilter.value) {
+    params.set("memory_class", typedClassFilter.value);
+  }
+  const query = params.toString();
+  const data = await apiGetJson<TypedMemoryResponse>(
+    withToken(`memory/items${query ? `?${query}` : ""}`),
+  );
+  typedMemoryItems.value = Array.isArray(data.items) ? data.items : [];
+  injectableClasses.value = Array.isArray(data.injectable_classes)
+    ? data.injectable_classes
+    : ["interaction_policy", "knowledge_note", "sop", "user_profile"];
+};
+
+const saveTypedMemoryItem = async (): Promise<void> => {
+  if (!typedForm.value.key.trim() || !typedForm.value.value.trim()) {
+    message.warning("key 和 value 不能为空");
+    return;
+  }
+  const response = await fetch(withToken("memory/items"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      memory_id: typedForm.value.memory_id,
+      memory_class: typedForm.value.memory_class,
+      key: typedForm.value.key,
+      value: typedForm.value.value,
+      source: typedForm.value.source || "webui",
+      confidence: typedForm.value.confidence,
+      status: typedForm.value.status,
+    }),
+  });
+  if (!response.ok) {
+    message.error("保存 typed memory 失败");
+    return;
+  }
+  message.success("typed memory 已保存");
+  await loadTypedMemoryItems();
+};
 
 const loadSessions = async (): Promise<void> => {
   const data = await apiGetJson<SessionSummary[]>(withToken("sessions"));
@@ -170,9 +306,11 @@ const exportSession = async (): Promise<void> => {
 
 const loadTables = async (): Promise<void> => {
   const data = await apiGetJson<{ tables: MemoryTableSummary[] }>(withToken("memory/tables"));
-  tables.value = data.tables;
+  tables.value = Array.isArray(data.tables) ? data.tables : [];
   if (!tables.value.some((item) => item.name === activeTable.value) && tables.value.length > 0) {
     activeTable.value = tables.value[0]?.name ?? "preferences";
+  } else if (tables.value.length === 0) {
+    activeTable.value = "";
   }
 };
 
@@ -181,11 +319,19 @@ const loadTableData = async (): Promise<void> => {
     tableData.value = null;
     return;
   }
-  tableData.value = await apiGetJson<MemoryTableData>(
+  const data = await apiGetJson<MemoryTableData>(
     withToken(
       `memory/tables/${encodeURIComponent(activeTable.value)}?page=${tablePage.value}&size=${tableSize.value}`,
     ),
   );
+  tableData.value = {
+    table: data.table ?? activeTable.value,
+    page: data.page ?? tablePage.value,
+    size: data.size ?? tableSize.value,
+    total: data.total ?? 0,
+    writable: Boolean(data.writable),
+    rows: Array.isArray(data.rows) ? data.rows : [],
+  };
   if (activeTable.value === "preferences" && tableData.value.rows.length > 0) {
     const first = tableData.value.rows[0];
     editingPrefKey.value = String(first?.pref_key ?? "");
@@ -253,7 +399,7 @@ const saveFileContent = async (): Promise<void> => {
 };
 
 onMounted(async () => {
-  await Promise.all([loadSessions(), loadTables(), loadFiles()]);
+  await Promise.all([loadTypedMemoryItems(), loadSessions(), loadTables(), loadFiles()]);
   await Promise.all([loadSessionMessages(), loadTableData(), loadFileContent()]);
 });
 
@@ -265,6 +411,10 @@ watch([activeTable, tablePage, tableSize], () => {
   void loadTableData();
 });
 
+watch([typedClassFilter, typedStatusFilter], () => {
+  void loadTypedMemoryItems();
+});
+
 watch(activeFile, () => {
   void loadFileContent();
 });
@@ -273,6 +423,119 @@ watch(activeFile, () => {
 <template>
   <section class="memory-view">
     <n-tabs v-model:value="activeTab" type="line" animated>
+      <n-tab-pane name="typed" tab="语义记忆">
+        <n-card title="Typed Memory">
+          <div class="typed-layout">
+            <main class="typed-main">
+              <div class="actions">
+                <select v-model="typedClassFilter" class="native-control" aria-label="memory class filter">
+                  <option value="">全部类型</option>
+                  <option
+                    v-for="option in memoryClassOptions"
+                    :key="option.value"
+                    :value="option.value"
+                  >
+                    {{ option.label }}
+                  </option>
+                </select>
+                <select v-model="typedStatusFilter" class="native-control" aria-label="memory status filter">
+                  <option
+                    v-for="option in memoryStatusOptions"
+                    :key="option.value"
+                    :value="option.value"
+                  >
+                    {{ option.label }}
+                  </option>
+                </select>
+                <n-button @click="resetTypedForm">新建</n-button>
+              </div>
+
+              <div class="typed-list">
+                <button
+                  v-for="item in filteredTypedMemoryItems"
+                  :key="item.memory_id"
+                  type="button"
+                  class="typed-memory-item"
+                  data-testid="typed-memory-item"
+                  @click="selectTypedMemoryItem(item)"
+                >
+                  <span class="memory-class">{{ item.memory_class }}</span>
+                  <strong>{{ item.key }}</strong>
+                  <span>{{ item.value }}</span>
+                  <small>
+                    {{ item.source || "unknown" }} ·
+                    confidence {{ item.confidence ?? "n/a" }} ·
+                    {{ item.updated_at || "no timestamp" }} ·
+                    {{ isInjectionEligible(item) ? "可注入" : "不注入" }}
+                  </small>
+                </button>
+              </div>
+            </main>
+
+            <aside class="typed-editor">
+              <label>
+                <span>Class</span>
+                <select v-model="typedForm.memory_class" class="native-control">
+                  <option
+                    v-for="option in memoryClassOptions"
+                    :key="option.value"
+                    :value="option.value"
+                  >
+                    {{ option.label }}
+                  </option>
+                </select>
+              </label>
+              <label>
+                <span>Key</span>
+                <input v-model="typedForm.key" class="native-control" type="text" />
+              </label>
+              <label>
+                <span>Value</span>
+                <textarea
+                  v-model="typedForm.value"
+                  class="native-control value-editor"
+                  data-testid="typed-memory-value"
+                />
+              </label>
+              <label>
+                <span>Source</span>
+                <input v-model="typedForm.source" class="native-control" type="text" />
+              </label>
+              <label>
+                <span>Confidence</span>
+                <input
+                  v-model.number="typedForm.confidence"
+                  class="native-control"
+                  max="1"
+                  min="0"
+                  step="0.01"
+                  type="number"
+                />
+              </label>
+              <label>
+                <span>Status</span>
+                <select v-model="typedForm.status" class="native-control">
+                  <option
+                    v-for="option in memoryStatusOptions"
+                    :key="option.value"
+                    :value="option.value"
+                  >
+                    {{ option.label }}
+                  </option>
+                </select>
+              </label>
+              <n-button
+                type="primary"
+                data-testid="typed-memory-save"
+                @click="saveTypedMemoryItem"
+              >
+                保存
+              </n-button>
+            </aside>
+          </div>
+        </n-card>
+      </n-tab-pane>
+
       <n-tab-pane name="l1" tab="L1 会话">
         <n-card title="会话管理">
           <div class="l1-layout">
@@ -313,7 +576,7 @@ watch(activeFile, () => {
         </n-card>
       </n-tab-pane>
 
-      <n-tab-pane name="l2" tab="L2 SQLite">
+      <n-tab-pane name="sqlite" tab="SQLite Debug">
         <n-card title="表浏览器">
           <div class="l2-layout">
             <aside class="table-list">
@@ -401,10 +664,15 @@ watch(activeFile, () => {
 
 .l1-layout,
 .l2-layout,
-.l3-layout {
+.l3-layout,
+.typed-layout {
   display: grid;
   gap: 10px;
   grid-template-columns: 220px 1fr;
+}
+
+.typed-layout {
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
 }
 
 .session-list,
@@ -439,15 +707,89 @@ watch(activeFile, () => {
 
 .session-main,
 .table-main,
-.file-main {
+.file-main,
+.typed-main,
+.typed-editor {
   min-width: 0;
 }
 
 .actions {
   align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 8px;
+}
+
+.typed-list {
+  display: grid;
+  gap: 8px;
+  max-height: 560px;
+  overflow: auto;
+}
+
+.typed-memory-item {
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  border: 1px solid var(--panel-edge);
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px;
+  text-align: left;
+}
+
+.typed-memory-item strong,
+.typed-memory-item span,
+.typed-memory-item small {
+  overflow-wrap: anywhere;
+}
+
+.memory-class {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.typed-memory-item small {
+  color: var(--muted);
+}
+
+.typed-editor {
+  border: 1px solid var(--panel-edge);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+}
+
+.typed-editor label {
+  display: grid;
+  gap: 4px;
+}
+
+.typed-editor label span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.native-control {
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  border: 1px solid var(--panel-edge);
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  min-width: 0;
+  padding: 7px 8px;
+}
+
+.value-editor {
+  min-height: 128px;
+  resize: vertical;
 }
 
 .preview {
@@ -466,7 +808,8 @@ watch(activeFile, () => {
 @media (max-width: 1023px) {
   .l1-layout,
   .l2-layout,
-  .l3-layout {
+  .l3-layout,
+  .typed-layout {
     grid-template-columns: 1fr;
   }
 }

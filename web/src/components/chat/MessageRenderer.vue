@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { computed } from "vue";
+
+import CodexStatusCard from "./CodexStatusCard.vue";
 import CompressedMessage from "./CompressedMessage.vue";
 import ErrorStateCard from "./ErrorStateCard.vue";
 import FileAttachment from "./FileAttachment.vue";
@@ -13,7 +16,9 @@ import {
   hasFileAttachment,
   hasMarkdownPreview,
   hasMedia,
+  codexStatusInfo,
   isCompressedToolResult,
+  isCodexStatusMessage,
   isErrorCard,
   isToolCall,
   mediaType,
@@ -41,6 +46,25 @@ const emit = defineEmits<{
 
 const mediaSource = (): string =>
   resolveAssetUrl(props.message.image ?? props.message.file ?? "", props.apiBase, props.token);
+
+const markdownCacheKey = computed(() =>
+  String(
+    props.message.metadata?.render_key ??
+      props.message.tool_call_id ??
+      props.message.timestamp ??
+      `${props.message.session_id}:${props.message.sender}`,
+  ),
+);
+
+const markdownCacheVersion = computed(() =>
+  String(
+    props.message.metadata?.render_version ??
+      `${props.message.text?.length ?? 0}:${props.message.metadata?.streaming === true ? "streaming" : "final"}`,
+  ),
+);
+
+const isStreaming = computed(() => props.message.metadata?.streaming === true);
+const codexInfo = computed(() => codexStatusInfo(props.message));
 </script>
 
 <template>
@@ -73,9 +97,18 @@ const mediaSource = (): string =>
     :loading="retryingFailedMessage"
     @retry="emit('retry')"
   />
+  <CodexStatusCard
+    v-else-if="isCodexStatusMessage(message)"
+    :task-id="codexInfo.taskId"
+    :status="codexInfo.status"
+    :summary="codexInfo.summary"
+  />
   <MarkdownPreview
     v-else-if="hasMarkdownPreview(message)"
     :content="message.text ?? ''"
+    :cache-key="markdownCacheKey"
+    :cache-version="markdownCacheVersion"
+    :streaming="isStreaming"
   />
   <MediaMessage
     v-else-if="hasMedia(message)"
@@ -94,10 +127,16 @@ const mediaSource = (): string =>
   <TextMessage
     v-else-if="(message.text ?? '').trim().length > 0 && message.sender === 'user'"
     :text="message.text ?? ''"
+    :cache-key="markdownCacheKey"
+    :cache-version="markdownCacheVersion"
+    :streaming="isStreaming"
   />
   <MarkdownPreview
     v-else-if="(message.text ?? '').trim().length > 0"
     :content="message.text ?? ''"
     :show-source-toggle="message.sender === 'assistant' && message.message_tag !== 'narration'"
+    :cache-key="markdownCacheKey"
+    :cache-version="markdownCacheVersion"
+    :streaming="isStreaming"
   />
 </template>

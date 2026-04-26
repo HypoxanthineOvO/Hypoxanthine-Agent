@@ -117,6 +117,38 @@ export function isHiddenSystemToolEvent(message: Message): boolean {
   );
 }
 
+export interface CodexStatusInfo {
+  taskId: string;
+  status: string;
+  summary: string;
+}
+
+export function isCodexStatusMessage(message: Message): boolean {
+  if (message.message_tag !== "tool_status") {
+    return false;
+  }
+  const metadata = message.metadata ?? {};
+  return Boolean(
+    message.sender === "hypo-coder" ||
+      metadata.source === "hypo_coder" ||
+      metadata.task_id ||
+      metadata.codex_job_id,
+  );
+}
+
+export function codexStatusInfo(message: Message): CodexStatusInfo {
+  const metadata = message.metadata ?? {};
+  const taskId = String(metadata.task_id ?? metadata.codex_job_id ?? "unknown");
+  const status = String(metadata.status ?? message.status ?? "running");
+  const summary = String(
+    metadata.summary ??
+      metadata.operation ??
+      metadata.prompt_summary ??
+      "详细输出已收起到 Codex Jobs 面板",
+  );
+  return { taskId, status, summary };
+}
+
 export function isCompressedToolResult(message: Message): boolean {
   return (
     message.event_type === "tool_call_result" &&

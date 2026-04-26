@@ -39,6 +39,7 @@ const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 16000, 30000] as const;
 const PIPELINE_STAGE_DELAY_MS = 800;
 const PIPELINE_STAGE_MERGE_WINDOW_MS = 500;
 const TOOL_RESULT_SUCCESS_TTL_MS = 1000;
+const ASSISTANT_CHUNK_FLUSH_MS = 33;
 
 function withToken(url: string, token: string): string {
   const separator = url.includes("?") ? "&" : "?";
@@ -53,6 +54,8 @@ export function useChatSocket(options: UseChatSocketOptions) {
 
   let socket: WebSocket | null = null;
   let streamingAssistantIndex: number | null = null;
+  let assistantChunkBuffer = "";
+  let assistantChunkFlushTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectAttempt = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let shouldReconnect = true;
@@ -144,6 +147,50 @@ export function useChatSocket(options: UseChatSocketOptions) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
     reconnectDelayMs.value = null;
+  };
+
+  const clearAssistantChunkFlushTimer = (): void => {
+    if (assistantChunkFlushTimer === null) {
+      return;
+    }
+    clearTimeout(assistantChunkFlushTimer);
+    assistantChunkFlushTimer = null;
+  };
+
+  const clearAssistantChunkBuffer = (): void => {
+    clearAssistantChunkFlushTimer();
+    assistantChunkBuffer = "";
+  };
+
+  const flushAssistantChunkBuffer = (): void => {
+    clearAssistantChunkFlushTimer();
+    if (!assistantChunkBuffer || streamingAssistantIndex === null) {
+      return;
+    }
+    const targetIndex = streamingAssistantIndex;
+    if (targetIndex < 0 || targetIndex >= messages.value.length) {
+      assistantChunkBuffer = "";
+      return;
+    }
+    const existing = messages.value[targetIndex];
+    if (!existing) {
+      assistantChunkBuffer = "";
+      return;
+    }
+    existing.text = `${existing.text ?? ""}${assistantChunkBuffer}`;
+    existing.metadata = {
+      ...(existing.metadata ?? {}),
+      streaming: true,
+      render_version: `${String(existing.text ?? "").length}:streaming`,
+    };
+    assistantChunkBuffer = "";
+  };
+
+  const scheduleAssistantChunkFlush = (): void => {
+    if (assistantChunkFlushTimer !== null) {
+      return;
+    }
+    assistantChunkFlushTimer = setTimeout(flushAssistantChunkBuffer, ASSISTANT_CHUNK_FLUSH_MS);
   };
 
   const scheduleReconnect = (): void => {
@@ -513,7 +560,9 @@ export function useChatSocket(options: UseChatSocketOptions) {
     };
 
     socket.onclose = () => {
+      flushAssistantChunkBuffer();
       streamingAssistantIndex = null;
+      clearAssistantChunkBuffer();
       clearAllPendingPipelineStages();
       clearAllTransientPipelineItemTimers();
       socket = null;
@@ -615,25 +664,32 @@ export function useChatSocket(options: UseChatSocketOptions) {
           if (!isExistingStreamSlot) {
             messages.value.push({
               kind: "text",
-              text: chunkText,
+              text: "",
               sender: "assistant",
               session_id: payload.session_id,
               timestamp: payload.timestamp,
+              metadata: {
+                streaming: true,
+                render_key: `assistant-stream-${payload.session_id}-${Date.now()}`,
+                render_version: "0:streaming",
+              },
             });
             streamingAssistantIndex = messages.value.length - 1;
-            return;
           }
 
+          assistantChunkBuffer += chunkText;
           const targetIndex = streamingAssistantIndex;
-          if (targetIndex === null) {
-            return;
+          if (targetIndex !== null) {
+            const existing = messages.value[targetIndex];
+            if (existing) {
+              existing.timestamp = existing.timestamp ?? payload.timestamp;
+              existing.metadata = {
+                ...(existing.metadata ?? {}),
+                streaming: true,
+              };
+            }
           }
-          const existing = messages.value[targetIndex];
-          if (!existing) {
-            return;
-          }
-          existing.text = `${existing.text ?? ""}${chunkText}`;
-          existing.timestamp = existing.timestamp ?? payload.timestamp;
+          scheduleAssistantChunkFlush();
           return;
         }
 
@@ -642,6 +698,7 @@ export function useChatSocket(options: UseChatSocketOptions) {
             return;
           }
           clearPendingPipelineStage(payload.session_id);
+          flushAssistantChunkBuffer();
           if (
             streamingAssistantIndex !== null &&
             streamingAssistantIndex >= 0 &&
@@ -650,6 +707,11 @@ export function useChatSocket(options: UseChatSocketOptions) {
             const existing = messages.value[streamingAssistantIndex];
             if (existing) {
               existing.timestamp = existing.timestamp ?? payload.timestamp;
+              existing.metadata = {
+                ...(existing.metadata ?? {}),
+                streaming: false,
+                render_version: `${String(existing.text ?? "").length}:final`,
+              };
               if (Array.isArray(payload.attachments) && payload.attachments.length > 0) {
                 existing.attachments = payload.attachments.map((attachment) => ({ ...attachment }));
               }
@@ -765,6 +827,8 @@ export function useChatSocket(options: UseChatSocketOptions) {
   const disconnect = (): void => {
     shouldReconnect = false;
     clearReconnectTimer();
+    flushAssistantChunkBuffer();
+    clearAssistantChunkBuffer();
     clearAllPendingPipelineStages();
     clearAllTransientPipelineItemTimers();
     reconnectAttempt = 0;
@@ -813,6 +877,7 @@ export function useChatSocket(options: UseChatSocketOptions) {
   const replaceMessages = (nextMessages: Message[]): void => {
     messages.value = nextMessages.map((item) => stripLegacySourcePrefix({ ...item }));
     streamingAssistantIndex = null;
+    clearAssistantChunkBuffer();
     clearAllPendingPipelineStages();
     clearAllTransientPipelineItemTimers();
     reindexActivePipelineMessages();

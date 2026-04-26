@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { renderMarkdown, renderMathIn } from "../markdownRenderer";
+import {
+  clearMarkdownRenderCache,
+  getMarkdownRenderCacheStats,
+  renderMarkdown,
+  renderMathIn,
+  shouldRenderEnhancedMarkdown,
+} from "../markdownRenderer";
 
 describe("markdownRenderer", () => {
   it("renders gfm table", () => {
@@ -40,5 +46,42 @@ describe("markdownRenderer", () => {
     expect(html).toContain("python");
     expect(html).toContain('class="copy-btn"');
     expect(html).toContain("data-code=");
+  });
+
+  it("caches rendered markdown by message id and version", () => {
+    clearMarkdownRenderCache();
+
+    const first = renderMarkdown("**ok**", { cacheKey: "message-1", version: 1 });
+    const second = renderMarkdown("**ok**", { cacheKey: "message-1", version: 1 });
+    const third = renderMarkdown("**changed**", { cacheKey: "message-1", version: 2 });
+    const stats = getMarkdownRenderCacheStats();
+
+    expect(second).toBe(first);
+    expect(third).not.toBe(first);
+    expect(stats.hits).toBe(1);
+    expect(stats.entries).toBe(2);
+  });
+
+  it("defers enhanced math and mermaid rendering while streaming incomplete blocks", () => {
+    expect(
+      shouldRenderEnhancedMarkdown("```mermaid\nflowchart LR\nA-->B\n", {
+        streaming: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRenderEnhancedMarkdown("$$\nx^2 + y^2 = z^2\n", {
+        streaming: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRenderEnhancedMarkdown("```mermaid\nflowchart LR\nA-->B\n```\n", {
+        streaming: true,
+      }),
+    ).toBe(true);
+    expect(
+      shouldRenderEnhancedMarkdown("```mermaid\nflowchart LR\nA-->B\n", {
+        streaming: false,
+      }),
+    ).toBe(true);
   });
 });

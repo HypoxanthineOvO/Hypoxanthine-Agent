@@ -36,6 +36,26 @@ describe("MemoryView", () => {
           json: async () => ({ tables: [{ name: "preferences", row_count: 1, writable: true }] }),
         };
       }
+      if (url.includes("/memory/items?")) {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [
+              {
+                memory_id: "mem-1",
+                memory_class: "interaction_policy",
+                key: "reply_boundary",
+                value: "答完直接结束",
+                source: "memory_skill",
+                confidence: 0.92,
+                status: "active",
+                updated_at: "2026-04-26T13:00:00Z",
+                injection_eligible: true,
+              },
+            ],
+          }),
+        };
+      }
       if (url.includes("/memory/tables/preferences")) {
         return {
           ok: true,
@@ -101,6 +121,94 @@ describe("MemoryView", () => {
           String(url) === "http://localhost:8000/api/memory/tables/preferences?page=1&size=50&token=test-token",
       ),
     ).toBe(true);
-    expect(wrapper.text()).toContain("s1");
+    expect(
+      fetchMock.mock.calls.some(
+        ([url]) => String(url) === "http://localhost:8000/api/memory/items?status=active&token=test-token",
+      ),
+    ).toBe(true);
+    expect(wrapper.text()).toContain("reply_boundary");
+    expect(wrapper.text()).toContain("可注入");
+  });
+
+  it("edits typed memory items through the semantic memory api", async () => {
+    const requests: Array<{ url: string; body?: string }> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      requests.push({ url, body: typeof init?.body === "string" ? init.body : undefined });
+      if (url.includes("/memory/items?")) {
+        return {
+          ok: true,
+          json: async () => ({
+            items: [
+              {
+                memory_id: "mem-1",
+                memory_class: "interaction_policy",
+                key: "reply_boundary",
+                value: "答完直接结束",
+                source: "memory_skill",
+                confidence: 0.92,
+                status: "active",
+                updated_at: "2026-04-26T13:00:00Z",
+                injection_eligible: true,
+              },
+            ],
+          }),
+        };
+      }
+      if (url.includes("/memory/items")) {
+        return {
+          ok: true,
+          json: async () => ({ saved: true, memory_id: "mem-1" }),
+        };
+      }
+      if (url.includes("/sessions?")) {
+        return { ok: true, json: async () => [] };
+      }
+      if (url.includes("/memory/tables?")) {
+        return { ok: true, json: async () => ({ tables: [] }) };
+      }
+      if (url.includes("/memory/files?")) {
+        return { ok: true, json: async () => ({ files: [] }) };
+      }
+      return { ok: true, json: async () => [] };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(MemoryView, {
+      props: {
+        token: "test-token",
+        apiBase: "http://localhost:8000/api",
+      },
+      global: {
+        stubs: {
+          MonacoEditor: {
+            props: ["modelValue"],
+            template: "<textarea :value='modelValue'></textarea>",
+          },
+        },
+      },
+    });
+
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    await wrapper.get('[data-testid="typed-memory-item"]').trigger("click");
+    await wrapper.get('[data-testid="typed-memory-value"]').setValue("答完直接结束，不要追加反问");
+    await wrapper.get('[data-testid="typed-memory-save"]').trigger("click");
+    await flushUi();
+
+    const post = requests.find(
+      (request) => request.url === "http://localhost:8000/api/memory/items?token=test-token" && request.body,
+    );
+    expect(post).toBeTruthy();
+    expect(JSON.parse(post?.body ?? "{}")).toMatchObject({
+      memory_class: "interaction_policy",
+      key: "reply_boundary",
+      value: "答完直接结束，不要追加反问",
+      source: "memory_skill",
+      confidence: 0.92,
+      status: "active",
+    });
   });
 });

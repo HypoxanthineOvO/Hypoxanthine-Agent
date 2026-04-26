@@ -17,6 +17,21 @@ export interface ToolInvocationRow {
   created_at: string;
 }
 
+export interface CoderTaskRow {
+  id?: number;
+  task_id: string;
+  session_id: string;
+  working_directory: string;
+  prompt_summary?: string | null;
+  model?: string | null;
+  status: string;
+  attached?: number | boolean;
+  done?: number | boolean;
+  last_error?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
 interface LoadSessionMessagesOptions {
   apiBase: string;
   token: string;
@@ -138,4 +153,24 @@ export async function loadSessionMessages(
   const history = (await messagesResponse.json()) as Message[];
   const invocations = (await invocationsResponse.json()) as ToolInvocationRow[];
   return mergeTimelineMessages(history, toToolInvocationMessages(invocations));
+}
+
+export async function loadSessionCoderTasks(
+  options: LoadSessionMessagesOptions,
+): Promise<CoderTaskRow[]> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const tasksUrl = withApiToken(
+    makeApiUrl(`sessions/${encodeURIComponent(options.sessionId)}/coder-tasks`, options.apiBase),
+    options.token,
+  );
+  try {
+    const response = await fetchImpl(tasksUrl);
+    if (!response.ok) {
+      return [];
+    }
+    const rows = (await response.json()) as CoderTaskRow[];
+    return Array.isArray(rows) ? rows : [];
+  } catch {
+    return [];
+  }
 }

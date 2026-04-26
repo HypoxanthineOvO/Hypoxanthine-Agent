@@ -3,12 +3,14 @@ import { useNotification } from "naive-ui";
 import { computed, h, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 
 import ChatComposer from "@/components/chat/ChatComposer.vue";
+import CodexJobPanel from "@/components/chat/CodexJobPanel.vue";
 import ChatMessageList from "@/components/chat/ChatMessageList.vue";
 import ConnectionStatus from "@/components/ConnectionStatus.vue";
 import ReconnectBanner from "@/components/layout/ReconnectBanner.vue";
 import { useChatSocket } from "@/composables/useChatSocket";
 import { useHotkey } from "@/composables/useHotkey";
-import { loadSessionMessages } from "@/composables/useSessionHistory";
+import { loadSessionCoderTasks, loadSessionMessages } from "@/composables/useSessionHistory";
+import type { CoderTaskRow } from "@/composables/useSessionHistory";
 import { useThemeMode } from "@/composables/useThemeMode";
 import type { Message } from "@/types/message";
 import { isHiddenSystemToolEvent, resolveAssetUrl } from "@/utils/messageRouting";
@@ -35,6 +37,7 @@ interface ChatComposerExpose { collapseExpanded: () => boolean; focusComposer: (
 
 const quickPrompts = ["📧 帮我看看邮件", "📁 今天有什么任务？", "🔧 检查系统状态", "💬 随便聊聊"] as const;
 const capabilitySummary = ["邮件扫描与优先级摘要", "文件管理与代码仓库检索", "QQ 消息同步与通知镜像", "定时提醒与系统巡检"] as const;
+const MESSAGE_PAGE_SIZE = 160;
 
 const resolveInitialSessionId = (): string => {
   const querySession = new URLSearchParams(window.location.search).get("session");
@@ -47,6 +50,8 @@ const messagesRef = ref<HTMLElement | null>(null);
 const composerComponentRef = ref<ChatComposerExpose | null>(null);
 const activeSessionId = ref(resolveInitialSessionId());
 const retryingFailedMessage = ref(false);
+const visibleMessageLimit = ref(MESSAGE_PAGE_SIZE);
+const codexTasks = ref<CoderTaskRow[]>([]);
 const { toggleMode } = useThemeMode();
 
 const normalizedApiBase = computed(() => {
@@ -89,12 +94,19 @@ const notification = (() => {
 
 const showReconnectBanner = computed(() => status.value === "reconnecting" || reconnectDelayMs.value !== null);
 const displayedMessages = computed(() => messages.value.filter((message) => !isHiddenSystemToolEvent(message)));
+const hiddenMessageCount = computed(() => Math.max(0, displayedMessages.value.length - visibleMessageLimit.value));
+const visibleMessages = computed(() => {
+  if (hiddenMessageCount.value <= 0) {
+    return displayedMessages.value;
+  }
+  return displayedMessages.value.slice(-visibleMessageLimit.value);
+});
 
 const timelineItems = computed<TimelineItem[]>(() => {
   const items: TimelineItem[] = [];
   let previousVisibleTimestamp: string | undefined;
 
-  displayedMessages.value.forEach((message, index) => {
+  visibleMessages.value.forEach((message, index) => {
     const currentTimestamp = normalizeTimestamp(message.timestamp);
     if (currentTimestamp && shouldInsertTimeSeparator(currentTimestamp, previousVisibleTimestamp)) {
       items.push({
@@ -135,6 +147,7 @@ const scheduleScrollToBottom = (): void => {
 };
 
 const restoreSessionMessages = async (sessionId: string): Promise<void> => {
+  visibleMessageLimit.value = MESSAGE_PAGE_SIZE;
   try {
     replaceMessages(
       await loadSessionMessages({
@@ -146,6 +159,11 @@ const restoreSessionMessages = async (sessionId: string): Promise<void> => {
   } catch {
     replaceMessages([]);
   }
+  codexTasks.value = await loadSessionCoderTasks({
+    apiBase: normalizedApiBase.value,
+    token: props.token,
+    sessionId,
+  });
 };
 
 const applyQuickPrompt = (prompt: string): void => {
@@ -167,6 +185,10 @@ const retryFailedMessage = async (): Promise<void> => {
   retryingFailedMessage.value = false;
 };
 
+const showOlderMessages = (): void => {
+  visibleMessageLimit.value += MESSAGE_PAGE_SIZE;
+};
+
 watch(() => `${messages.value.length}:${messages.value[messages.value.length - 1]?.text?.length ?? 0}`, scheduleScrollToBottom);
 
 watch(
@@ -176,6 +198,7 @@ watch(
     if (normalized !== activeSessionId.value) {
       activeSessionId.value = normalized;
       replaceMessages([]);
+      codexTasks.value = [];
       void restoreSessionMessages(normalized);
     }
   },
@@ -258,7 +281,18 @@ onUnmounted(() => {
       @retry="reconnectNow"
     />
 
+    <CodexJobPanel :tasks="codexTasks" />
+
     <main ref="messagesRef" class="message-list" aria-live="polite">
+      <button
+        v-if="hiddenMessageCount > 0"
+        type="button"
+        class="load-older-button"
+        data-testid="load-older-messages"
+        @click="showOlderMessages"
+      >
+        加载更早消息 · {{ hiddenMessageCount }}
+      </button>
       <ChatMessageList
         :timeline-items="timelineItems"
         :welcome-visible="welcomeVisible"
@@ -356,6 +390,18 @@ onUnmounted(() => {
   min-height: 0;
   overflow-y: auto;
   padding-right: 0.2rem;
+}
+.load-older-button {
+  justify-self: center;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  border: 1px solid color-mix(in srgb, var(--panel-edge) 78%, transparent);
+  border-radius: 999px;
+  color: var(--text-soft);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  padding: 0.38rem 0.8rem;
 }
 :global(.retry-action) {
   background: transparent;

@@ -6,6 +6,9 @@ import TextMessage from "./TextMessage.vue";
 const props = defineProps<{
   content: string;
   showSourceToggle?: boolean;
+  cacheKey?: string;
+  cacheVersion?: number | string;
+  streaming?: boolean;
 }>();
 
 const showSource = ref(false);
@@ -25,7 +28,13 @@ const buttonLabel = computed(() => (showSource.value ? "预览" : "<> 源码"));
     </header>
 
     <pre v-if="showSource" class="source-content"><code>{{ content }}</code></pre>
-    <TextMessage v-else :text="content" />
+    <TextMessage
+      v-else
+      :text="content"
+      :cache-key="cacheKey"
+      :cache-version="cacheVersion"
+      :streaming="streaming"
+    />
   </section>
 </template>
 

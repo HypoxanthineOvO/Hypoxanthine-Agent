@@ -1,13 +1,28 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
-import { renderMarkdown, renderMathIn, renderMermaidIn } from "../../utils/markdownRenderer";
+import {
+  renderMarkdown,
+  renderMathIn,
+  renderMermaidIn,
+  shouldRenderEnhancedMarkdown,
+} from "../../utils/markdownRenderer";
 
 const props = defineProps<{
   text: string;
+  cacheKey?: string;
+  cacheVersion?: number | string;
+  streaming?: boolean;
 }>();
 
 const root = ref<HTMLElement | null>(null);
+const renderedHtml = computed(() =>
+  renderMarkdown(props.text, {
+    cacheKey: props.cacheKey,
+    version: props.cacheVersion,
+    streaming: props.streaming === true,
+  }),
+);
 
 const onRootClick = (event: MouseEvent): void => {
   const target = event.target;
@@ -32,6 +47,9 @@ const renderMermaidIfNeeded = async (): Promise<void> => {
   if (!root.value) {
     return;
   }
+  if (!shouldRenderEnhancedMarkdown(props.text, { streaming: props.streaming === true })) {
+    return;
+  }
   await renderMathIn(root.value);
   await renderMermaidIn(root.value);
 };
@@ -46,15 +64,16 @@ onBeforeUnmount(() => {
 });
 
 watch(
-  () => props.text,
+  () => [props.text, props.streaming] as const,
   () => {
     void renderMermaidIfNeeded();
   },
+  { flush: "post" },
 );
 </script>
 
 <template>
-  <div ref="root" class="text-message markdown-body" v-html="renderMarkdown(text)" />
+  <div ref="root" class="text-message markdown-body" v-html="renderedHtml" />
 </template>
 
 <style scoped>

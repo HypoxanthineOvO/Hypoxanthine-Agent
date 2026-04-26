@@ -95,6 +95,50 @@ describe("useChatSocket", () => {
     expect(socket.messages.value).toHaveLength(2);
   });
 
+  it("buffers assistant streaming chunks and flushes them on a fixed cadence", () => {
+    vi.useFakeTimers();
+    try {
+      const socket = useChatSocket({
+        url: "ws://localhost:8000/ws",
+        token: "abc123",
+        sessionId: ref("session-1"),
+      });
+      socket.connect();
+
+      const ws = MockWebSocket.instances[0];
+      if (!ws) {
+        throw new Error("WebSocket was not created");
+      }
+      ws.emitOpen();
+
+      for (let index = 0; index < 20; index += 1) {
+        ws.emitMessage(
+          JSON.stringify({
+            type: "assistant_chunk",
+            text: `${index},`,
+            sender: "assistant",
+            session_id: "session-1",
+          }),
+        );
+      }
+
+      expect(socket.messages.value).toHaveLength(1);
+      expect(socket.messages.value[0]?.metadata?.streaming).toBe(true);
+      expect(socket.messages.value[0]?.text).toBe("");
+
+      vi.advanceTimersByTime(32);
+      expect(socket.messages.value[0]?.text).toBe("");
+
+      vi.advanceTimersByTime(1);
+      expect(socket.messages.value[0]?.text).toBe(
+        Array.from({ length: 20 }, (_, index) => `${index},`).join(""),
+      );
+      expect(socket.messages.value[0]?.metadata?.streaming).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("uses latest session id when sending", () => {
     const sessionId = ref("s1");
     const socket = useChatSocket({

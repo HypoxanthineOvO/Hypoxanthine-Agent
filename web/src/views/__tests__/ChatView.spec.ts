@@ -474,7 +474,7 @@ describe("ChatView", () => {
     expect(wrapper.text()).not.toContain("⏳ 正在处理...");
   });
 
-  it("renders non-ephemeral codex tool status messages in the chat timeline", async () => {
+  it("renders non-ephemeral codex tool status messages as summary cards", async () => {
     const wrapper = mount(ChatView, {
       props: {
         wsUrl: "ws://localhost:8000/ws",
@@ -504,8 +504,105 @@ describe("ChatView", () => {
     await flushUi();
     await flushUi();
 
-    expect(wrapper.text()).toContain("[Codex | task-123]");
-    expect(wrapper.text()).toContain("checking files");
+    expect(wrapper.text()).toContain("Codex 任务");
+    expect(wrapper.text()).toContain("task-123");
+    expect(wrapper.text()).toContain("running");
+    expect(wrapper.text()).not.toContain("[Codex | task-123]");
+    expect(wrapper.text()).not.toContain("checking files");
+  });
+
+  it("renders codex job status panel from session coder task history", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/sessions/main/messages")) {
+        return { ok: true, json: async () => [] };
+      }
+      if (url.includes("/sessions/main/tool-invocations")) {
+        return { ok: true, json: async () => [] };
+      }
+      if (url.includes("/sessions/main/coder-tasks")) {
+        return {
+          ok: true,
+          json: async () => [
+            {
+              task_id: "task-123",
+              session_id: "main",
+              working_directory: "/repo/demo",
+              prompt_summary: "fix login",
+              model: "gpt-5.5",
+              status: "running",
+              attached: 1,
+              done: 0,
+              last_error: "",
+              created_at: "2026-04-26T13:00:00Z",
+              updated_at: "2026-04-26T13:01:00Z",
+            },
+          ],
+        };
+      }
+      return { ok: true, json: async () => [] };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(ChatView, {
+      props: {
+        wsUrl: "ws://localhost:8000/ws",
+        token: "test-token",
+        apiBase: "http://localhost:8000/api",
+      },
+    });
+
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/api/sessions/main/coder-tasks?token=test-token",
+    );
+    expect(wrapper.text()).toContain("Codex Jobs");
+    expect(wrapper.text()).toContain("task-123");
+    expect(wrapper.text()).toContain("running");
+    expect(wrapper.text()).toContain("/repo/demo");
+  });
+
+  it("paginates long chat history so only the latest messages render initially", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/sessions/main/messages")) {
+        return {
+          ok: true,
+          json: async () =>
+            Array.from({ length: 250 }, (_, index) => ({
+              text: `message-${index}`,
+              sender: index % 2 === 0 ? "user" : "assistant",
+              session_id: "main",
+              timestamp: new Date(Date.UTC(2026, 3, 26, 10, 0, index)).toISOString(),
+            })),
+        };
+      }
+      return { ok: true, json: async () => [] };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(ChatView, {
+      props: {
+        wsUrl: "ws://localhost:8000/ws",
+        token: "test-token",
+        apiBase: "http://localhost:8000/api",
+      },
+    });
+
+    await flushUi();
+    await flushUi();
+    await flushUi();
+
+    expect(wrapper.text()).toContain("message-249");
+    expect(wrapper.text()).not.toContain("message-0");
+
+    await wrapper.get('[data-testid="load-older-messages"]').trigger("click");
+    await flushUi();
+
+    expect(wrapper.text()).toContain("message-0");
   });
 
   it("renders narration messages with a weaker dedicated style and keeps them after reply", async () => {
