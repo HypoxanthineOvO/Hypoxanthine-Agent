@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import hypo_agent.channels.codex_bridge as codex_bridge_module
 from hypo_agent.channels.codex_bridge import CodexBridge, CodexThread
 
 
@@ -173,6 +174,39 @@ def test_codex_bridge_submit_completes_and_calls_callback() -> None:
 
         await bridge.stop()
         assert fake_codex.closed is True
+
+    asyncio.run(_run())
+
+
+def test_codex_bridge_start_passes_isolated_home_env_and_config(tmp_path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class CapturingAsyncCodex(FakeAsyncCodex):
+        def __init__(self, *, config):
+            captured["config"] = config
+            super().__init__()
+
+    monkeypatch.setattr(codex_bridge_module, "AsyncCodex", CapturingAsyncCodex)
+
+    async def _run() -> None:
+        bridge = CodexBridge(
+            model="gpt-5.4",
+            codex_bin="/home/heyx/.volta/bin/codex",
+            codex_home=str(tmp_path / "codex-home"),
+            app_server_cwd=str(tmp_path / "app-server-cwd"),
+            config_overrides={"history.persistence": "none"},
+        )
+
+        assert bridge.isolation_mode == "dedicated_codex_home"
+        assert await bridge.start() is True
+
+        config = captured["config"]
+        assert config.codex_bin == "/home/heyx/.volta/bin/codex"
+        assert config.cwd == str(tmp_path / "app-server-cwd")
+        assert config.env["CODEX_HOME"] == str(tmp_path / "codex-home")
+        assert "history.persistence=none" in config.config_overrides
+
+        await bridge.stop()
 
     asyncio.run(_run())
 

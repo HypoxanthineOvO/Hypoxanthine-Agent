@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from pathlib import Path
 import shutil
 from typing import Any, Callable
 
@@ -35,6 +36,9 @@ class CodexBridge:
         approvals_reviewer: str | None = "guardian_subagent",
         sandbox_mode: str = "danger-full-access",
         codex_factory: Callable[[], Any] | None = None,
+        codex_home: str | None = None,
+        app_server_cwd: str | None = None,
+        config_overrides: dict[str, str] | list[str] | tuple[str, ...] | None = None,
     ) -> None:
         self.model = str(model or "").strip() or "gpt-5.4"
         self.reasoning_effort = str(reasoning_effort or "").strip() or "high"
@@ -43,6 +47,10 @@ class CodexBridge:
         self.approvals_reviewer = self._normalize_approvals_reviewer(approvals_reviewer)
         self.sandbox_mode = self._normalize_sandbox_mode(sandbox_mode)
         self._codex_factory = codex_factory
+        self.codex_home = str(codex_home or "").strip()
+        self.app_server_cwd = str(app_server_cwd or "").strip()
+        self.config_overrides = self._normalize_config_overrides(config_overrides)
+        self.isolation_mode = "dedicated_codex_home" if self.codex_home else "sdk_default"
         self._codex: Any | None = None
         self._threads: dict[str, CodexThread] = {}
         self._start_error: str = ""
@@ -52,7 +60,7 @@ class CodexBridge:
             return True
         try:
             codex = self._codex_factory() if callable(self._codex_factory) else AsyncCodex(
-                config=AppServerConfig(codex_bin=self.codex_bin or None)
+                config=self._app_server_config()
             )
             entered = codex.__aenter__()
             self._codex = await entered if hasattr(entered, "__await__") else codex
@@ -62,6 +70,19 @@ class CodexBridge:
             self._codex = None
             self._start_error = str(exc)
             return False
+
+    def _app_server_config(self) -> AppServerConfig:
+        env = None
+        if self.codex_home:
+            resolved_home = Path(self.codex_home).expanduser().resolve(strict=False)
+            resolved_home.mkdir(parents=True, exist_ok=True)
+            env = {"CODEX_HOME": str(resolved_home)}
+        return AppServerConfig(
+            codex_bin=self.codex_bin or None,
+            cwd=self.app_server_cwd or None,
+            env=env,
+            config_overrides=tuple(self.config_overrides),
+        )
 
     async def stop(self) -> None:
         for thread in list(self._threads.values()):
@@ -500,6 +521,16 @@ class CodexBridge:
         if normalized in {"read-only", "workspace-write", "danger-full-access"}:
             return normalized
         return "danger-full-access"
+
+    def _normalize_config_overrides(
+        self,
+        value: dict[str, str] | list[str] | tuple[str, ...] | None,
+    ) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if isinstance(value, dict):
+            return tuple(f"{key}={item}" for key, item in sorted(value.items()))
+        return tuple(str(item).strip() for item in value if str(item).strip())
 
     def _active_flags(self, status: Any) -> list[str]:
         raw_flags = getattr(status, "active_flags", None) or []
