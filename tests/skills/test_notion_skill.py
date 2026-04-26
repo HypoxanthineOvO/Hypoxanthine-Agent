@@ -514,6 +514,28 @@ def test_create_entry_constructs_parent_properties_and_children() -> None:
     asyncio.run(_run())
 
 
+def test_create_entry_rejects_unknown_property_before_remote_api_call() -> None:
+    async def _run() -> None:
+        client = FakeNotionClient()
+        skill = NotionSkill(notion_client=client)
+
+        result = await skill.execute(
+            "notion_create_entry",
+            {
+                "database_id": "22222222222222222222222222222222",
+                "properties": '{"Wrong Status":"In Progress"}',
+            },
+        )
+
+        assert result.status == "error"
+        assert "未知 Notion 字段" in result.error_info
+        assert "Wrong Status" in result.error_info
+        assert "notion_get_schema" in result.error_info
+        assert client.create_calls == []
+
+    asyncio.run(_run())
+
+
 def test_search_formats_results() -> None:
     async def _run() -> None:
         skill = NotionSkill(notion_client=FakeNotionClient())

@@ -83,6 +83,7 @@ class VerificationReport:
     pipeline_checks: list[PipelineMatchCheck]
     conflicts: list[ConflictCheck]
     registered_tools: list[str]
+    acceptance_report: dict[str, Any]
 
     @property
     def ok(self) -> bool:
@@ -251,6 +252,7 @@ def verify_repo(repo_root: Path) -> VerificationReport:
         pipeline_checks=pipeline_checks,
         conflicts=conflicts,
         registered_tools=registered_tools,
+        acceptance_report=runtime_manager.get_skill_acceptance_report(),
     )
 
 
@@ -362,6 +364,18 @@ def _print_report(report: VerificationReport) -> None:
             print(
                 f"| `{item.trigger}` | `{', '.join(item.skills)}` | `{item.severity}` | {item.note} |"
             )
+
+    print()
+    print("## Acceptance Gates")
+    acceptance_summary = report.acceptance_report.get("summary", {})
+    print("| Gate | total | defined | optional | missing |")
+    print("| --- | ---: | ---: | ---: | ---: |")
+    for gate in ("unit", "contract", "test_mode_probe", "optional_integration"):
+        item = acceptance_summary.get(gate, {})
+        print(
+            f"| `{gate}` | {int(item.get('total') or 0)} | {int(item.get('defined') or 0)} | "
+            f"{int(item.get('optional') or 0)} | {int(item.get('missing') or 0)} |"
+        )
 
     print()
     summary = {

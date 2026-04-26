@@ -623,6 +623,7 @@ class NotionSkill(BaseSkill):
         notion_properties: dict[str, Any] = {}
         for name, value in payload.items():
             resolved_name = self._resolve_schema_property_name(name, schema=schema)
+            self._validate_schema_property_name(name, resolved_name=resolved_name, schema=schema)
             prop_type = schema.get(resolved_name) or self._infer_property_type(resolved_name, value)
             notion_properties[resolved_name] = self._convert_property_value(
                 resolved_name,
@@ -700,6 +701,21 @@ class NotionSkill(BaseSkill):
         if inferred:
             return inferred
         return raw_name
+
+    def _validate_schema_property_name(
+        self,
+        original_name: str,
+        *,
+        resolved_name: str,
+        schema: dict[str, str],
+    ) -> None:
+        if not schema or resolved_name in schema:
+            return
+        known = "、".join(sorted(schema)) or "无"
+        raise ValueError(
+            f"未知 Notion 字段：{original_name}。当前数据库字段包括：{known}。"
+            "请先调用 notion_get_schema 确认字段名，再用完全一致的字段名重试。"
+        )
 
     def _property_alias_candidates(self, name: str) -> list[str]:
         lowered = str(name or "").strip().casefold()

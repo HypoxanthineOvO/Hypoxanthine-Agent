@@ -44,3 +44,14 @@ def test_verify_skills_has_no_severe_trigger_conflicts() -> None:
     severe = [item for item in report.conflicts if item.severity == "severe"]
 
     assert severe == []
+
+
+def test_verify_skills_includes_contract_acceptance_report() -> None:
+    module = _load_verify_module()
+
+    report = module.verify_repo(REPO_ROOT)
+
+    assert report.acceptance_report["summary"]["unit"]["total"] > 0
+    assert report.acceptance_report["summary"]["contract"]["total"] > 0
+    assert report.acceptance_report["summary"]["test_mode_probe"]["total"] > 0
+    assert report.acceptance_report["skills"]
