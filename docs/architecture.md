@@ -178,6 +178,13 @@ graph TD
 
 **所有层级的数据均可通过 WebUI 或直接编辑文件进行修改。**
 
+**R4/R5 typed memory updates**：
+
+- `memory_items` stores typed durable memory with classes such as `user_profile`, `interaction_policy`, `operational_state`, and `credentials_state`.
+- Only prompt-safe classes are injected into model prompts; operational state and credentials state are excluded.
+- `MemoryGC` now runs a typed memory consolidation phase before legacy L3 session-summary output. It extracts candidates from inactive L1 sessions, legacy preferences, and semantic notes, applies changes after SQLite backup, and writes JSON consolidation reports.
+- Detailed lifecycle and rollback policy: `docs/architecture/memory-consolidation.md`.
+
 **相对 OpenClaw 的增强**：OpenClaw 为双层（.jsonl + SQLite/Markdown），Hypo-Agent 拆分为三层，将结构化数据（SQLite）和语义记忆（Markdown + Vector）明确分离，职责更清晰。
 
 ### 3.4 Scheduler（定时调度器）
@@ -186,6 +193,7 @@ graph TD
 - 定时任务配置在 `tasks.yaml` 中，用户可通过 WebUI 编辑。
 - 触发时将任务以内部消息格式插入 Message Queue，与用户消息使用同一套 Pipeline 处理。
 - **V1 采用串行队列**：Heartbeat 任务与用户对话排队执行，避免并发复杂性。
+- **R5 更新**：`tasks.yaml` 支持 `memory_gc` cadence 配置；MemoryGC scheduled trigger uses a background task with timeout protection so consolidation does not block normal message handling.
 - **M8 更新**：
   - 调度器与 Pipeline 通过中心 `asyncio.Queue`（`reminder_trigger` / `heartbeat_trigger`）集成；
   - APScheduler 使用 MemoryJobStore，启动时由 L2 `reminders` 表重建 active 任务；
