@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from hypo_agent.core.skill_contracts import SkillContract
 from hypo_agent.core.skill_manager import SkillManager
 from hypo_agent.models import CircuitBreakerConfig, SkillOutput
 from hypo_agent.security.circuit_breaker import CircuitBreaker
@@ -76,6 +77,21 @@ def test_skill_manager_registers_tools_schema() -> None:
     tools = manager.get_tools_schema()
     assert len(tools) == 1
     assert tools[0]["function"]["name"] == "echo"
+
+
+def test_skill_manager_exports_contracts_and_acceptance_report() -> None:
+    manager = SkillManager()
+    manager.register(EchoSkill())
+
+    contracts = manager.get_skill_contracts()
+    report = manager.get_skill_acceptance_report()
+
+    assert len(contracts) == 1
+    assert isinstance(contracts[0], SkillContract)
+    assert contracts[0].skill_name == "echo"
+    assert contracts[0].tools[0].tool_name == "echo"
+    assert report["summary"]["unit"]["total"] == 1
+    assert report["skills"][0]["skill_name"] == "echo"
 
 
 def test_skill_manager_get_tools_schema_prepends_builtin_tools() -> None:
@@ -340,6 +356,124 @@ def test_skill_manager_blocks_when_permission_denied() -> None:
     assert pm.calls == [("/tmp/test.txt", "read")]
 
 
+def test_skill_manager_records_permission_denial_as_policy_block_without_breaker_failure() -> None:
+    class RecorderBreaker:
+        def __init__(self) -> None:
+            self.failures: list[tuple[str, str | None, str | None]] = []
+
+        def can_execute(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ):
+            return True, ""
+
+        def record_success(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ) -> None:
+            return None
+
+        def record_failure(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ) -> None:
+            self.failures.append((tool_name, session_id, skill_name))
+
+    class DeniedPermissionManager:
+        def check_permission(self, path: str, operation: str):
+            del path, operation
+            return False, "outside whitelist"
+
+    class RecordingStructuredStore:
+        def __init__(self) -> None:
+            self.records: list[dict] = []
+
+        async def record_tool_invocation(self, **kwargs) -> int:
+            self.records.append(kwargs)
+            return 11
+
+    breaker = RecorderBreaker()
+    store = RecordingStructuredStore()
+    manager = SkillManager(
+        circuit_breaker=breaker,
+        permission_manager=DeniedPermissionManager(),
+        structured_store=store,
+    )
+    manager.register(FileReadSkill())
+
+    output = asyncio.run(manager.invoke("read_file", {"path": "/secret.txt"}, session_id="s1"))
+
+    assert output.status == "error"
+    assert output.metadata["outcome_class"] == "policy_block"
+    assert output.metadata["breaker_weight"] == 0
+    assert "权限" in output.metadata["user_visible_summary"]
+    assert breaker.failures == []
+    assert store.records[0]["status"] == "blocked"
+    assert store.records[0]["outcome_class"] == "policy_block"
+    assert store.records[0]["breaker_weight"] == 0
+    assert store.records[0]["operation"] == "read"
+
+
+def test_skill_manager_records_unknown_tool_as_model_error_without_breaker_failure() -> None:
+    class RecorderBreaker:
+        def __init__(self) -> None:
+            self.failures: list[tuple[str, str | None, str | None]] = []
+
+        def can_execute(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ):
+            return True, ""
+
+        def record_success(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ) -> None:
+            return None
+
+        def record_failure(
+            self,
+            tool_name: str,
+            session_id: str | None,
+            skill_name: str | None = None,
+        ) -> None:
+            self.failures.append((tool_name, session_id, skill_name))
+
+    class RecordingStructuredStore:
+        def __init__(self) -> None:
+            self.records: list[dict] = []
+
+        async def record_tool_invocation(self, **kwargs) -> int:
+            self.records.append(kwargs)
+            return 12
+
+    breaker = RecorderBreaker()
+    store = RecordingStructuredStore()
+    manager = SkillManager(circuit_breaker=breaker, structured_store=store)
+    manager.register(EchoSkill())
+
+    output = asyncio.run(manager.invoke("execread_file", {"path": "/tmp/a"}, session_id="s1"))
+
+    assert output.status == "error"
+    assert output.metadata["outcome_class"] == "model_error"
+    assert output.metadata["breaker_weight"] == 0
+    assert "未知工具" in output.metadata["user_visible_summary"]
+    assert breaker.failures == []
+    assert store.records[0]["outcome_class"] == "model_error"
+    assert store.records[0]["breaker_weight"] == 0
+    assert store.records[0]["retryable"] is False
+
+
 def test_skill_manager_allows_when_permission_granted() -> None:
     class AllowBreaker:
         def can_execute(
@@ -427,10 +561,15 @@ def test_skill_manager_records_tool_invocations() -> None:
     assert record["skill_name"] == "echo"
     assert record["params_json"] == '{"text": "hello"}'
     assert record["status"] == "success"
+    assert record["outcome_class"] == "success"
+    assert record["breaker_weight"] == 0
+    assert record["retryable"] is False
+    assert record["trace_id"]
     assert record["duration_ms"] >= 0
     assert isinstance(record["result_summary"], str)
     assert record["compressed_meta_json"] is None
     assert output.metadata["invocation_id"] == 7
+    assert output.metadata["outcome_class"] == "success"
 
 
 def test_skill_manager_records_blocked_tool_invocations() -> None:
@@ -479,9 +618,58 @@ def test_skill_manager_records_blocked_tool_invocations() -> None:
     assert len(store.records) == 1
     record = store.records[0]
     assert record["status"] == "blocked"
+    assert record["outcome_class"] == "tool_bug"
+    assert record["breaker_weight"] == 0
     assert record["error_info"] == "blocked for test"
     assert record["skill_name"] == "echo"
     assert output.metadata["invocation_id"] == 99
+
+
+def test_skill_manager_classifies_timeout_as_external_unavailable_with_low_breaker_weight() -> None:
+    class TimeoutSkill(BaseSkill):
+        name = "search"
+        description = "Search external services"
+        required_permissions = []
+
+        @property
+        def tools(self) -> list[dict]:
+            return [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "web_search",
+                        "description": "Search web",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ]
+
+        async def execute(self, tool_name: str, params: dict) -> SkillOutput:
+            del tool_name, params
+            return SkillOutput(status="timeout", error_info="request timed out after 60 seconds")
+
+    class RecordingStructuredStore:
+        def __init__(self) -> None:
+            self.records: list[dict] = []
+
+        async def record_tool_invocation(self, **kwargs) -> int:
+            self.records.append(kwargs)
+            return 13
+
+    store = RecordingStructuredStore()
+    breaker = CircuitBreaker(CircuitBreakerConfig(tool_level_max_failures=3, session_level_max_failures=5))
+    manager = SkillManager(circuit_breaker=breaker, structured_store=store)
+    manager.register(TimeoutSkill())
+
+    output = asyncio.run(manager.invoke("web_search", {"query": "x"}, session_id="s1"))
+
+    assert output.status == "timeout"
+    assert output.metadata["outcome_class"] == "external_unavailable"
+    assert output.metadata["retryable"] is True
+    assert output.metadata["breaker_weight"] == 1
+    assert store.records[0]["outcome_class"] == "external_unavailable"
+    assert store.records[0]["retryable"] is True
+    assert store.records[0]["breaker_weight"] == 1
 
 
 def test_skill_manager_passes_logical_skill_name_to_circuit_breaker() -> None:

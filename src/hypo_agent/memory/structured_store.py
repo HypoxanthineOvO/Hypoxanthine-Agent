@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import sqlite3
 from typing import Any
+from uuid import uuid4
 
 import aiosqlite
 try:
@@ -167,6 +168,37 @@ class StructuredStore:
                 )
                 await db.execute(
                     """
+                    CREATE TABLE IF NOT EXISTS memory_items (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        memory_id TEXT NOT NULL UNIQUE,
+                        memory_class TEXT NOT NULL,
+                        key TEXT NOT NULL,
+                        value TEXT NOT NULL,
+                        language TEXT NOT NULL DEFAULT 'zh',
+                        source TEXT NOT NULL DEFAULT '',
+                        confidence REAL,
+                        status TEXT NOT NULL DEFAULT 'active',
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        rollback_metadata_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_memory_items_class_status
+                    ON memory_items(memory_class, status, updated_at)
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_items_class_key
+                    ON memory_items(memory_class, key)
+                    """
+                )
+                await db.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS token_usage (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         session_id TEXT NOT NULL,
@@ -211,6 +243,13 @@ class StructuredStore:
                         duration_ms REAL,
                         error_info TEXT,
                         compressed_meta_json TEXT,
+                        outcome_class TEXT,
+                        retryable INTEGER NOT NULL DEFAULT 0,
+                        breaker_weight INTEGER NOT NULL DEFAULT 0,
+                        side_effect_class TEXT,
+                        operation TEXT,
+                        trace_id TEXT,
+                        user_visible_summary TEXT,
                         created_at TEXT NOT NULL DEFAULT (datetime('now'))
                     )
                     """
@@ -332,6 +371,57 @@ class StructuredStore:
                     """
                     CREATE INDEX IF NOT EXISTS idx_repair_run_events_run
                     ON repair_run_events(run_id, created_at)
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS codex_jobs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        job_id TEXT NOT NULL UNIQUE,
+                        session_id TEXT NOT NULL,
+                        operation TEXT NOT NULL,
+                        prompt_summary TEXT NOT NULL DEFAULT '',
+                        working_directory TEXT NOT NULL,
+                        trace_id TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        isolation_mode TEXT NOT NULL DEFAULT '',
+                        thread_id TEXT NOT NULL DEFAULT '',
+                        result_summary TEXT NOT NULL DEFAULT '',
+                        last_error TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        completed_at TEXT
+                    )
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_codex_jobs_session
+                    ON codex_jobs(session_id, updated_at)
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_codex_jobs_status
+                    ON codex_jobs(status, updated_at)
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS codex_job_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        job_id TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        summary TEXT NOT NULL DEFAULT '',
+                        payload_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_codex_job_events_job
+                    ON codex_job_events(job_id, created_at)
                     """
                 )
                 await db.execute(
@@ -465,6 +555,26 @@ class StructuredStore:
                 if "compressed_meta_json" not in tool_column_names:
                     await db.execute(
                         "ALTER TABLE tool_invocations ADD COLUMN compressed_meta_json TEXT"
+                    )
+                if "outcome_class" not in tool_column_names:
+                    await db.execute("ALTER TABLE tool_invocations ADD COLUMN outcome_class TEXT")
+                if "retryable" not in tool_column_names:
+                    await db.execute(
+                        "ALTER TABLE tool_invocations ADD COLUMN retryable INTEGER NOT NULL DEFAULT 0"
+                    )
+                if "breaker_weight" not in tool_column_names:
+                    await db.execute(
+                        "ALTER TABLE tool_invocations ADD COLUMN breaker_weight INTEGER NOT NULL DEFAULT 0"
+                    )
+                if "side_effect_class" not in tool_column_names:
+                    await db.execute("ALTER TABLE tool_invocations ADD COLUMN side_effect_class TEXT")
+                if "operation" not in tool_column_names:
+                    await db.execute("ALTER TABLE tool_invocations ADD COLUMN operation TEXT")
+                if "trace_id" not in tool_column_names:
+                    await db.execute("ALTER TABLE tool_invocations ADD COLUMN trace_id TEXT")
+                if "user_visible_summary" not in tool_column_names:
+                    await db.execute(
+                        "ALTER TABLE tool_invocations ADD COLUMN user_visible_summary TEXT"
                     )
                 if "session_id" not in reminder_column_names:
                     await db.execute(
@@ -657,6 +767,150 @@ class StructuredStore:
             value = str(row[1] or "")
             result.append((key, value))
         return result
+
+    async def save_memory_item(
+        self,
+        *,
+        memory_class: str,
+        key: str,
+        value: str,
+        source: str,
+        language: str = "zh",
+        confidence: float | None = None,
+        status: str = "active",
+        metadata_json: str = "{}",
+        rollback_metadata_json: str = "{}",
+        memory_id: str | None = None,
+    ) -> str:
+        await self.init()
+        normalized_class = str(memory_class or "").strip()
+        normalized_key = str(key or "").strip()
+        if not normalized_class:
+            raise ValueError("memory_class is required")
+        if not normalized_key:
+            raise ValueError("key is required")
+        resolved_id = str(memory_id or "").strip() or f"mem-{uuid4().hex}"
+        now = _now_iso()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO memory_items(
+                    memory_id,
+                    memory_class,
+                    key,
+                    value,
+                    language,
+                    source,
+                    confidence,
+                    status,
+                    metadata_json,
+                    rollback_metadata_json,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(memory_class, key) DO UPDATE SET
+                    value=excluded.value,
+                    language=excluded.language,
+                    source=excluded.source,
+                    confidence=excluded.confidence,
+                    status=excluded.status,
+                    metadata_json=excluded.metadata_json,
+                    rollback_metadata_json=excluded.rollback_metadata_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    resolved_id,
+                    normalized_class,
+                    normalized_key,
+                    str(value or ""),
+                    str(language or "zh").strip() or "zh",
+                    str(source or "").strip(),
+                    confidence,
+                    str(status or "active").strip() or "active",
+                    metadata_json,
+                    rollback_metadata_json,
+                    now,
+                    now,
+                ),
+            )
+            await db.commit()
+        return resolved_id
+
+    async def list_memory_items(
+        self,
+        *,
+        memory_class: str | None = None,
+        status: str | None = "active",
+    ) -> list[dict[str, Any]]:
+        await self.init()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if memory_class is not None:
+            clauses.append("memory_class = ?")
+            params.append(memory_class)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        query = """
+            SELECT
+                id,
+                memory_id,
+                memory_class,
+                key,
+                value,
+                language,
+                source,
+                confidence,
+                status,
+                metadata_json,
+                rollback_metadata_json,
+                created_at,
+                updated_at
+            FROM memory_items
+        """
+        if clauses:
+            query += f" WHERE {' AND '.join(clauses)}"
+        query += " ORDER BY updated_at DESC, id DESC"
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(query, tuple(params)) as cursor:
+                rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    def list_prompt_memory_sync(self, limit: int = 20) -> list[tuple[str, str]]:
+        if limit <= 0 or not self.db_path.exists():
+            return []
+        injectable_classes = ("user_profile", "interaction_policy", "knowledge_note", "sop")
+        placeholders = ",".join("?" for _ in injectable_classes)
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT key, value
+                    FROM memory_items
+                    WHERE status = 'active' AND memory_class IN ({placeholders})
+                    ORDER BY
+                        CASE memory_class
+                            WHEN 'interaction_policy' THEN 0
+                            WHEN 'user_profile' THEN 1
+                            WHEN 'sop' THEN 2
+                            ELSE 3
+                        END,
+                        updated_at DESC
+                    LIMIT ?
+                    """,
+                    (*injectable_classes, int(limit)),
+                ).fetchall()
+        except (sqlite3.Error, TypeError, ValueError):
+            return []
+        return [(str(row[0] or "").strip(), str(row[1] or "")) for row in rows if row and row[0]]
+
+    async def clear_memory_items(self) -> None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM memory_items")
+            await db.commit()
 
     async def ensure_semantic_vector_dimensions(self, dimensions: int) -> None:
         await self.init()
@@ -1095,6 +1349,13 @@ class StructuredStore:
         duration_ms: float | None,
         error_info: str | None,
         compressed_meta_json: str | None = None,
+        outcome_class: str | None = None,
+        retryable: bool = False,
+        breaker_weight: int = 0,
+        side_effect_class: str | None = None,
+        operation: str | None = None,
+        trace_id: str | None = None,
+        user_visible_summary: str | None = None,
     ) -> int | None:
         await self.init()
         await self.upsert_session(session_id)
@@ -1111,9 +1372,16 @@ class StructuredStore:
                     result_summary,
                     duration_ms,
                     error_info,
-                    compressed_meta_json
+                    compressed_meta_json,
+                    outcome_class,
+                    retryable,
+                    breaker_weight,
+                    side_effect_class,
+                    operation,
+                    trace_id,
+                    user_visible_summary
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -1125,6 +1393,13 @@ class StructuredStore:
                     duration_ms,
                     error_info,
                     compressed_meta_json,
+                    outcome_class,
+                    1 if retryable else 0,
+                    max(0, int(breaker_weight or 0)),
+                    side_effect_class,
+                    operation,
+                    trace_id,
+                    user_visible_summary,
                 ),
             )
             await db.commit()
@@ -1178,6 +1453,13 @@ class StructuredStore:
                     duration_ms,
                     error_info,
                     compressed_meta_json,
+                    outcome_class,
+                    retryable,
+                    breaker_weight,
+                    side_effect_class,
+                    operation,
+                    trace_id,
+                    user_visible_summary,
                     created_at
                 FROM tool_invocations
             """
@@ -1470,6 +1752,192 @@ class StructuredStore:
                 (status, str(last_error or ""), _now_iso(), task_id),
             )
             await db.commit()
+
+    async def create_codex_job(
+        self,
+        *,
+        job_id: str,
+        session_id: str,
+        operation: str,
+        prompt_summary: str,
+        working_directory: str,
+        trace_id: str,
+        status: str,
+        isolation_mode: str,
+        thread_id: str = "",
+        result_summary: str = "",
+        last_error: str = "",
+    ) -> None:
+        await self.init()
+        await self.upsert_session(session_id)
+        now = _now_iso()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO codex_jobs(
+                    job_id,
+                    session_id,
+                    operation,
+                    prompt_summary,
+                    working_directory,
+                    trace_id,
+                    status,
+                    isolation_mode,
+                    thread_id,
+                    result_summary,
+                    last_error,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(job_id) DO UPDATE SET
+                    session_id=excluded.session_id,
+                    operation=excluded.operation,
+                    prompt_summary=excluded.prompt_summary,
+                    working_directory=excluded.working_directory,
+                    trace_id=excluded.trace_id,
+                    status=excluded.status,
+                    isolation_mode=excluded.isolation_mode,
+                    thread_id=excluded.thread_id,
+                    result_summary=excluded.result_summary,
+                    last_error=excluded.last_error,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    job_id,
+                    session_id,
+                    operation,
+                    prompt_summary[:500],
+                    working_directory,
+                    trace_id,
+                    status,
+                    isolation_mode,
+                    thread_id,
+                    result_summary[:1000],
+                    last_error,
+                    now,
+                    now,
+                ),
+            )
+            await db.commit()
+
+    async def update_codex_job(
+        self,
+        *,
+        job_id: str,
+        status: str,
+        thread_id: str | None = None,
+        result_summary: str | None = None,
+        last_error: str | None = None,
+        completed_at: str | None = None,
+    ) -> None:
+        await self.init()
+        updates = ["status = ?", "updated_at = ?"]
+        params: list[Any] = [status, _now_iso()]
+        if thread_id is not None:
+            updates.append("thread_id = ?")
+            params.append(thread_id)
+        if result_summary is not None:
+            updates.append("result_summary = ?")
+            params.append(result_summary[:1000])
+        if last_error is not None:
+            updates.append("last_error = ?")
+            params.append(last_error)
+        if completed_at is not None:
+            updates.append("completed_at = ?")
+            params.append(completed_at)
+        params.append(job_id)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                f"UPDATE codex_jobs SET {', '.join(updates)} WHERE job_id = ?",
+                tuple(params),
+            )
+            await db.commit()
+
+    async def get_codex_job(self, job_id: str) -> dict[str, Any] | None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT
+                    id,
+                    job_id,
+                    session_id,
+                    operation,
+                    prompt_summary,
+                    working_directory,
+                    trace_id,
+                    status,
+                    isolation_mode,
+                    thread_id,
+                    result_summary,
+                    last_error,
+                    created_at,
+                    updated_at,
+                    completed_at
+                FROM codex_jobs
+                WHERE job_id = ?
+                LIMIT 1
+                """,
+                (job_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def append_codex_job_event(
+        self,
+        *,
+        job_id: str,
+        event_type: str,
+        summary: str = "",
+        payload_json: str = "{}",
+    ) -> None:
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO codex_job_events(
+                    job_id,
+                    event_type,
+                    summary,
+                    payload_json,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (job_id, event_type, summary[:1000], payload_json, _now_iso()),
+            )
+            await db.commit()
+
+    async def list_codex_job_events(
+        self,
+        job_id: str,
+        *,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        await self.init()
+        params: list[Any] = [job_id]
+        query = """
+            SELECT
+                id,
+                job_id,
+                event_type,
+                summary,
+                payload_json,
+                created_at
+            FROM codex_job_events
+            WHERE job_id = ?
+            ORDER BY created_at ASC, id ASC
+        """
+        if limit is not None and limit > 0:
+            query += " LIMIT ?"
+            params.append(limit)
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(query, tuple(params)) as cursor:
+                rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
 
     async def create_repair_run(
         self,

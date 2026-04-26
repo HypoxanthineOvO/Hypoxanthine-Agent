@@ -41,6 +41,59 @@ def test_tool_level_breaker_fuses_tool_for_session() -> None:
     assert allowed_other is True
 
 
+def test_zero_weight_outcomes_do_not_increment_breaker_counts() -> None:
+    breaker = CircuitBreaker(_config())
+
+    for _ in range(10):
+        breaker.record_outcome(
+            tool_name="read_file",
+            session_id="s1",
+            skill_name="filesystem",
+            breaker_weight=0,
+        )
+
+    allowed, reason = breaker.can_execute("read_file", "s1", "filesystem")
+    assert allowed is True
+    assert reason == ""
+
+
+def test_weighted_outcomes_fuse_only_when_threshold_reached() -> None:
+    breaker = CircuitBreaker(_config())
+
+    breaker.record_outcome(
+        tool_name="exec_command",
+        session_id="s1",
+        skill_name="exec",
+        breaker_weight=2,
+    )
+    allowed_before, reason_before = breaker.can_execute("exec_command", "s1", "exec")
+    assert allowed_before is True
+    assert reason_before == ""
+
+    breaker.record_outcome(
+        tool_name="exec_command",
+        session_id="s1",
+        skill_name="exec",
+        breaker_weight=1,
+    )
+    allowed_after, reason_after = breaker.can_execute("exec_command", "s1", "exec")
+    assert allowed_after is False
+    assert "disabled" in reason_after.lower()
+
+
+def test_session_failure_count_resets_on_success() -> None:
+    breaker = CircuitBreaker(_config())
+
+    for index in range(5):
+        breaker.record_failure(tool_name=f"tool_{index}", session_id="s1")
+        breaker.record_success(tool_name=f"tool_{index}", session_id="s1")
+
+    allowed, reason = breaker.can_execute("another_tool", "s1")
+
+    assert allowed is True
+    assert reason == ""
+
+
 def test_tool_level_breaker_recovers_after_cooldown() -> None:
     clock = Clock()
     breaker = CircuitBreaker(_config(), now_fn=clock.now)
@@ -57,6 +110,8 @@ def test_tool_level_breaker_recovers_after_cooldown() -> None:
     allowed_after, reason_after = breaker.can_execute("exec_command", "s1")
     assert allowed_after is True
     assert reason_after == ""
+
+
 def test_session_level_breaker_blocks_all_tools_for_session() -> None:
     clock = Clock()
     breaker = CircuitBreaker(_config(), now_fn=clock.now)

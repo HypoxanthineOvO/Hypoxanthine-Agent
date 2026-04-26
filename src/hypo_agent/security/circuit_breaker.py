@@ -115,6 +115,7 @@ class CircuitBreaker:
             self._skill_fused.discard(skill_key)
             self._skill_fused_until.pop(skill_key, None)
         if session_id:
+            self._session_failures[session_id] = 0
             self._session_blocked_until.pop(session_id, None)
 
     def record_failure(
@@ -123,11 +124,29 @@ class CircuitBreaker:
         session_id: str | None,
         skill_name: str | None = None,
     ) -> None:
+        self.record_outcome(
+            tool_name=tool_name,
+            session_id=session_id,
+            skill_name=skill_name,
+            breaker_weight=1,
+        )
+
+    def record_outcome(
+        self,
+        *,
+        tool_name: str,
+        session_id: str | None,
+        skill_name: str | None = None,
+        breaker_weight: int = 1,
+    ) -> None:
+        weight = max(0, int(breaker_weight or 0))
+        if weight <= 0:
+            return
         now = self._now_fn()
         cooldown_deadline = now + timedelta(seconds=self.config.cooldown_seconds)
 
         tool_key = (session_id, tool_name)
-        next_tool_count = self._tool_failures.get(tool_key, 0) + 1
+        next_tool_count = self._tool_failures.get(tool_key, 0) + weight
         self._tool_failures[tool_key] = next_tool_count
         if next_tool_count >= self.config.tool_level_max_failures:
             self._tool_fused.add(tool_key)
@@ -143,7 +162,7 @@ class CircuitBreaker:
         normalized_skill = self._normalize_skill_name(skill_name)
         if self.config.skill_level_enabled and normalized_skill:
             skill_key = (session_id, tool_name, normalized_skill)
-            next_skill_count = self._skill_failures.get(skill_key, 0) + 1
+            next_skill_count = self._skill_failures.get(skill_key, 0) + weight
             self._skill_failures[skill_key] = next_skill_count
             threshold = self._skill_failure_threshold()
             if next_skill_count >= threshold:
@@ -161,7 +180,7 @@ class CircuitBreaker:
         if session_id is None:
             return
 
-        next_session_count = self._session_failures.get(session_id, 0) + 1
+        next_session_count = self._session_failures.get(session_id, 0) + weight
         self._session_failures[session_id] = next_session_count
         if next_session_count >= self.config.session_level_max_failures:
             self._session_blocked_until[session_id] = cooldown_deadline

@@ -5,12 +5,25 @@ import json
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Awaitable, Callable, Literal
+from uuid import uuid4
 
 import structlog
 import yaml
 
 from hypo_agent.exceptions import HypoAgentError
 from hypo_agent.models import SkillOutput
+from hypo_agent.core.skill_contracts import (
+    SkillContract,
+    build_acceptance_report,
+    build_contract_from_skill,
+)
+from hypo_agent.core.tool_outcome import (
+    ToolOutcome,
+    blocked_precheck_outcome,
+    classify_tool_outcome,
+    policy_block_outcome,
+    unknown_tool_outcome,
+)
 from hypo_agent.security.permission_manager import PermissionManager
 from hypo_agent.skills.base import BaseSkill
 
@@ -147,6 +160,12 @@ class SkillManager:
 
     def registration_snapshot(self) -> list[dict[str, Any]]:
         return self.list_skills()
+
+    def get_skill_contracts(self) -> list[SkillContract]:
+        return [build_contract_from_skill(skill) for skill in self._skills.values()]
+
+    def get_skill_acceptance_report(self) -> dict[str, Any]:
+        return build_acceptance_report(self.get_skill_contracts())
 
     def get_skill_catalog(self) -> str:
         items = self.list_skills()
@@ -343,7 +362,10 @@ class SkillManager:
                     skill_name=effective_skill_name,
                     reason=reason,
                 )
+                operation = self._infer_operation(tool_name)
+                outcome = policy_block_outcome(reason, operation=operation)
                 blocked = SkillOutput(status="error", error_info=reason)
+                self._attach_outcome_metadata(blocked, outcome, self._new_trace_id())
                 invocation_id = await self._record_tool_invocation(
                     tool_name=tool_name,
                     params=params,
@@ -353,6 +375,8 @@ class SkillManager:
                     result=None,
                     error_info=reason,
                     duration_ms=self._duration_ms(started_at),
+                    outcome=outcome,
+                    trace_id=str(blocked.metadata["trace_id"]),
                 )
                 self._attach_invocation_id(blocked, invocation_id)
                 return blocked
@@ -370,8 +394,11 @@ class SkillManager:
                     skill_name=effective_skill_name,
                     reason=reason,
                 )
+                operation = self._infer_operation(tool_name)
+                outcome = blocked_precheck_outcome(reason, operation=operation)
                 status = "fused" if self._is_fused_reason(reason) else "error"
                 blocked = SkillOutput(status=status, error_info=reason)
+                self._attach_outcome_metadata(blocked, outcome, self._new_trace_id())
                 invocation_id = await self._record_tool_invocation(
                     tool_name=tool_name,
                     params=params,
@@ -381,6 +408,8 @@ class SkillManager:
                     result=None,
                     error_info=reason,
                     duration_ms=self._duration_ms(started_at),
+                    outcome=outcome,
+                    trace_id=str(blocked.metadata["trace_id"]),
                 )
                 self._attach_invocation_id(blocked, invocation_id)
                 return blocked
@@ -388,10 +417,13 @@ class SkillManager:
         skill = self._tool_to_skill.get(tool_name)
         builtin = self._builtin_tools.get(tool_name)
         if skill is None and builtin is None:
+            operation = self._infer_operation(tool_name)
+            outcome = unknown_tool_outcome(tool_name, operation=operation)
             result = SkillOutput(
                 status="error",
                 error_info=f"Unknown tool '{tool_name}'",
             )
+            self._attach_outcome_metadata(result, outcome, self._new_trace_id())
             logger.warning(
                 "skill.invoke.fail",
                 tool_name=tool_name,
@@ -409,6 +441,8 @@ class SkillManager:
                 result=None,
                 error_info=result.error_info,
                 duration_ms=self._duration_ms(started_at),
+                outcome=outcome,
+                trace_id=str(result.metadata["trace_id"]),
             )
             self._attach_invocation_id(result, invocation_id)
             return result
@@ -423,6 +457,7 @@ class SkillManager:
             operation = self._infer_operation(tool_name)
             allowed, reason = self._permission_manager.check_permission(path, operation)
             if not allowed:
+                outcome = policy_block_outcome(reason, operation=operation)
                 logger.warning(
                     "skill.invoke.blocked.permission",
                     tool_name=tool_name,
@@ -436,6 +471,7 @@ class SkillManager:
                     status="error",
                     error_info=f"Permission denied: {reason}",
                 )
+                self._attach_outcome_metadata(blocked, outcome, self._new_trace_id())
                 invocation_id = await self._record_tool_invocation(
                     tool_name=tool_name,
                     params=params,
@@ -445,6 +481,8 @@ class SkillManager:
                     result=None,
                     error_info=reason,
                     duration_ms=self._duration_ms(started_at),
+                    outcome=outcome,
+                    trace_id=str(blocked.metadata["trace_id"]),
                 )
                 self._attach_invocation_id(blocked, invocation_id)
                 return blocked
@@ -471,8 +509,20 @@ class SkillManager:
                 error=str(exc),
             )
             if self._circuit_breaker is not None:
-                self._breaker_record_failure(tool_name, session_id, effective_skill_name)
+                outcome = classify_tool_outcome(
+                    status="error",
+                    error_info=str(exc),
+                    operation=self._infer_operation(tool_name),
+                )
+                self._breaker_record_outcome(tool_name, session_id, effective_skill_name, outcome)
+            else:
+                outcome = classify_tool_outcome(
+                    status="error",
+                    error_info=str(exc),
+                    operation=self._infer_operation(tool_name),
+                )
             result = SkillOutput(status="error", error_info=str(exc))
+            self._attach_outcome_metadata(result, outcome, self._new_trace_id())
             logger.warning(
                 "skill.invoke.fail",
                 tool_name=tool_name,
@@ -490,13 +540,24 @@ class SkillManager:
                 result=None,
                 error_info=result.error_info,
                 duration_ms=self._duration_ms(started_at),
+                outcome=outcome,
+                trace_id=str(result.metadata["trace_id"]),
             )
             self._attach_invocation_id(result, invocation_id)
             return result
 
         if not isinstance(result, SkillOutput):
+            outcome = classify_tool_outcome(
+                status="error",
+                error_info=(
+                    f"Skill '{skill.name}' returned invalid output"
+                    if skill is not None
+                    else f"Builtin tool '{tool_name}' returned invalid output"
+                ),
+                operation=self._infer_operation(tool_name),
+            )
             if self._circuit_breaker is not None:
-                self._breaker_record_failure(tool_name, session_id, effective_skill_name)
+                self._breaker_record_outcome(tool_name, session_id, effective_skill_name, outcome)
             normalized = SkillOutput(
                 status="error",
                 error_info=(
@@ -505,6 +566,7 @@ class SkillManager:
                     else f"Builtin tool '{tool_name}' returned invalid output"
                 ),
             )
+            self._attach_outcome_metadata(normalized, outcome, self._new_trace_id())
             logger.warning(
                 "skill.invoke.fail",
                 tool_name=tool_name,
@@ -522,15 +584,23 @@ class SkillManager:
                 result=None,
                 error_info=normalized.error_info,
                 duration_ms=self._duration_ms(started_at),
+                outcome=outcome,
+                trace_id=str(normalized.metadata["trace_id"]),
             )
             self._attach_invocation_id(normalized, invocation_id)
             return normalized
 
+        outcome = classify_tool_outcome(
+            status=result.status,
+            error_info=result.error_info,
+            operation=self._infer_operation(tool_name),
+        )
+        self._attach_outcome_metadata(result, outcome, self._new_trace_id())
         if self._circuit_breaker is not None:
             if result.status == "success":
                 self._breaker_record_success(tool_name, session_id, effective_skill_name)
             else:
-                self._breaker_record_failure(tool_name, session_id, effective_skill_name)
+                self._breaker_record_outcome(tool_name, session_id, effective_skill_name, outcome)
                 allowed_after, reason_after = self._breaker_can_execute(
                     tool_name,
                     session_id,
@@ -538,6 +608,7 @@ class SkillManager:
                 )
                 if (not allowed_after) and self._is_fused_reason(reason_after):
                     result = SkillOutput(status="fused", error_info=reason_after)
+                    self._attach_outcome_metadata(result, outcome, self._new_trace_id())
 
         if result.status == "success":
             logger.info(
@@ -565,6 +636,8 @@ class SkillManager:
             result=result.result,
             error_info=result.error_info,
             duration_ms=self._duration_ms(started_at),
+            outcome=outcome,
+            trace_id=str(result.metadata["trace_id"]),
         )
         self._attach_invocation_id(result, invocation_id)
         return result
@@ -598,6 +671,8 @@ class SkillManager:
         result: Any,
         error_info: str | None,
         duration_ms: float,
+        outcome: ToolOutcome,
+        trace_id: str,
     ) -> int | None:
         if self._structured_store is None or not session_id:
             return None
@@ -614,6 +689,13 @@ class SkillManager:
                 duration_ms=duration_ms,
                 error_info=error_info,
                 compressed_meta_json=None,
+                outcome_class=outcome.outcome_class,
+                retryable=outcome.retryable,
+                breaker_weight=outcome.breaker_weight,
+                side_effect_class=outcome.side_effect_class,
+                operation=outcome.operation,
+                trace_id=trace_id,
+                user_visible_summary=outcome.user_visible_summary,
             )
         except (OSError, RuntimeError, TypeError, ValueError) as exc:  # pragma: no cover - defensive safeguard
             logger.warning(
@@ -679,6 +761,51 @@ class SkillManager:
             self._circuit_breaker.record_failure(tool_name, session_id, skill_name)
         except TypeError:
             self._circuit_breaker.record_failure(tool_name, session_id)
+
+    def _breaker_record_outcome(
+        self,
+        tool_name: str,
+        session_id: str | None,
+        skill_name: str,
+        outcome: ToolOutcome,
+    ) -> None:
+        assert self._circuit_breaker is not None
+        recorder = getattr(self._circuit_breaker, "record_outcome", None)
+        if callable(recorder):
+            try:
+                recorder(
+                    tool_name=tool_name,
+                    session_id=session_id,
+                    skill_name=skill_name,
+                    breaker_weight=outcome.breaker_weight,
+                )
+                return
+            except TypeError:
+                recorder(
+                    tool_name=tool_name,
+                    session_id=session_id,
+                    breaker_weight=outcome.breaker_weight,
+                )
+                return
+        for _ in range(max(0, int(outcome.breaker_weight))):
+            self._breaker_record_failure(tool_name, session_id, skill_name)
+
+    def _attach_outcome_metadata(
+        self,
+        output: SkillOutput,
+        outcome: ToolOutcome,
+        trace_id: str,
+    ) -> None:
+        output.metadata["outcome_class"] = outcome.outcome_class
+        output.metadata["retryable"] = outcome.retryable
+        output.metadata["breaker_weight"] = outcome.breaker_weight
+        output.metadata["side_effect_class"] = outcome.side_effect_class
+        output.metadata["operation"] = outcome.operation
+        output.metadata["trace_id"] = trace_id
+        output.metadata["user_visible_summary"] = outcome.user_visible_summary
+
+    def _new_trace_id(self) -> str:
+        return f"trace-{uuid4().hex}"
 
     def _normalize_invocation_status(self, status: str) -> str:
         lowered = status.lower()

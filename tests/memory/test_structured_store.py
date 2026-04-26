@@ -138,6 +138,13 @@ def test_structured_store_records_tool_invocations(tmp_path) -> None:
             duration_ms=12.5,
             error_info="",
             compressed_meta_json='{"cache_id":"abc","original_chars":1000,"compressed_chars":120}',
+            outcome_class="success",
+            retryable=False,
+            breaker_weight=0,
+            side_effect_class="execute",
+            operation="execute",
+            trace_id="trace-1",
+            user_visible_summary="命令已完成",
         )
 
         rows = await store.list_tool_invocations(session_id="s1")
@@ -154,6 +161,51 @@ def test_structured_store_records_tool_invocations(tmp_path) -> None:
         assert row["compressed_meta_json"] == (
             '{"cache_id":"abc","original_chars":1000,"compressed_chars":120}'
         )
+        assert row["outcome_class"] == "success"
+        assert row["retryable"] == 0
+        assert row["breaker_weight"] == 0
+        assert row["side_effect_class"] == "execute"
+        assert row["operation"] == "execute"
+        assert row["trace_id"] == "trace-1"
+        assert row["user_visible_summary"] == "命令已完成"
+
+    asyncio.run(_run())
+
+
+def test_structured_store_migrates_legacy_tool_invocation_trace_columns(tmp_path) -> None:
+    db_path = tmp_path / "hypo.db"
+
+    async def _run() -> None:
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute(
+                """
+                CREATE TABLE tool_invocations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    tool_name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            await db.commit()
+
+        store = StructuredStore(db_path=db_path)
+        await store.init()
+
+        async with aiosqlite.connect(db_path) as db:
+            async with db.execute("PRAGMA table_info(tool_invocations)") as cursor:
+                columns = {str(row[1]) for row in await cursor.fetchall()}
+
+        assert {
+            "outcome_class",
+            "retryable",
+            "breaker_weight",
+            "side_effect_class",
+            "operation",
+            "trace_id",
+            "user_visible_summary",
+        }.issubset(columns)
 
     asyncio.run(_run())
 
