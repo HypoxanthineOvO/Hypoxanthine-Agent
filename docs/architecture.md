@@ -122,6 +122,7 @@ graph LR
 - **LLM Reasoning**：由 Model Router 选定的模型执行推理。
 - **Skill Execution**：如果 LLM 返回工具调用请求，通过 Skill Manager 执行，结果回馈给 LLM 继续推理（标准的 ReAct 循环）。
 - **Codex Session Overlay**：普通 assistant 回复在出站阶段可附加当前 attached Codex task 状态栏；slash `/codex` 自身回复不附加，避免重复。
+- **R6 Non-Blocking Runtime**：可通过 `HYPO_NONBLOCKING_RUNTIME=1` 启用 tracked work item runtime。用户消息会进入 per-session priority queue，并受 global semaphore 控制；同一 session 保持顺序，不同 session 可并发执行，状态通过 additive `work_status` event 暴露。详见 `docs/architecture/nonblocking-message-runtime.md`。
 
 **② Model Router（多模型路由器）**
 
