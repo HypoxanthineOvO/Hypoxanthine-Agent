@@ -17,6 +17,10 @@ hypo_info_digest:
   enabled: true
   interval_minutes: 480
   time: "09:00,21:00"
+memory_gc:
+  enabled: true
+  mode: cron
+  cron: "0 4 * * *"
 subscription:
   enabled: true
 wewe_rss:

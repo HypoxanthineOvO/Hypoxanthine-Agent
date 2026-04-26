@@ -196,6 +196,39 @@ def _parse_fixed_times(raw: str) -> list[tuple[int, int]]:
     return parsed
 
 
+def _register_memory_gc_job(
+    *,
+    scheduler: Any | None,
+    memory_gc: Any | None,
+    memory_gc_cfg: Any | None,
+) -> None:
+    if scheduler is None or memory_gc is None:
+        return
+    runner = getattr(memory_gc, "run_background", None)
+    if not callable(runner):
+        runner = getattr(memory_gc, "run", None)
+    if not callable(runner):
+        return
+
+    if memory_gc_cfg is None:
+        if hasattr(scheduler, "register_cron_job"):
+            scheduler.register_cron_job("memory_gc", "0 4 * * *", runner)
+        return
+
+    if not bool(getattr(memory_gc_cfg, "enabled", False)):
+        return
+    mode = str(getattr(memory_gc_cfg, "mode", "cron") or "cron").strip().lower()
+    if mode == "cron" and hasattr(scheduler, "register_cron_job"):
+        cron = str(getattr(memory_gc_cfg, "cron", "") or "").strip() or "0 4 * * *"
+        scheduler.register_cron_job("memory_gc", cron, runner)
+    elif hasattr(scheduler, "register_interval_job"):
+        scheduler.register_interval_job(
+            "memory_gc",
+            int(getattr(memory_gc_cfg, "interval_minutes", 1440) or 1440),
+            runner,
+        )
+
+
 def _feishu_chat_binding_key(session_id: str) -> str:
     normalized_session_id = str(session_id or "main").strip() or "main"
     return f"{FEISHU_CHAT_BINDING_KEY_PREFIX}{normalized_session_id}"
@@ -912,6 +945,7 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
         sop_manager=deps.sop_manager,
         skill_catalog=skill_catalog,
         coder_task_service=deps.coder_task_service,
+        nonblocking_runtime_enabled=os.getenv("HYPO_NONBLOCKING_RUNTIME", "").strip() == "1",
     )
 
 
@@ -1316,16 +1350,23 @@ def create_app(
                                 tasks_cfg.heartbeat.interval_minutes,
                                 resolved_deps.heartbeat_service.run,
                             )
+                    _register_memory_gc_job(
+                        scheduler=resolved_deps.scheduler,
+                        memory_gc=resolved_deps.memory_gc,
+                        memory_gc_cfg=tasks_cfg.memory_gc,
+                    )
+                else:
+                    _register_memory_gc_job(
+                        scheduler=resolved_deps.scheduler,
+                        memory_gc=resolved_deps.memory_gc,
+                        memory_gc_cfg=None,
+                    )
             else:
                 app.state.tasks_config = None
-            if (
-                resolved_deps.memory_gc is not None
-                and hasattr(resolved_deps.scheduler, "register_cron_job")
-            ):
-                resolved_deps.scheduler.register_cron_job(
-                    "memory_gc",
-                    "0 4 * * *",
-                    resolved_deps.memory_gc.run,
+                _register_memory_gc_job(
+                    scheduler=resolved_deps.scheduler,
+                    memory_gc=resolved_deps.memory_gc,
+                    memory_gc_cfg=None,
                 )
         await app.state.pipeline.start_event_consumer()
         if resolved_deps.repair_service is not None:

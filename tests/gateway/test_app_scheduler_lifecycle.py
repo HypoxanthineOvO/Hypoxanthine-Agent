@@ -23,6 +23,8 @@ class RecordingScheduler:
         self.stopped = 0
         self.interval_jobs: list[tuple[str, int]] = []
         self.cron_jobs: list[tuple[str, str]] = []
+        self.interval_callables = {}
+        self.cron_callables = {}
         self.is_running = False
 
     async def start(self) -> None:
@@ -34,12 +36,14 @@ class RecordingScheduler:
         self.is_running = False
 
     def register_interval_job(self, job_id: str, minutes: int, coro, *, replace_existing: bool = True):
-        del coro, replace_existing
+        del replace_existing
         self.interval_jobs.append((job_id, minutes))
+        self.interval_callables[job_id] = coro
 
     def register_cron_job(self, job_id: str, cron: str, coro, *, replace_existing: bool = True):
-        del coro, replace_existing
+        del replace_existing
         self.cron_jobs.append((job_id, cron))
+        self.cron_callables[job_id] = coro
 
 
 class RecordingPipeline:
@@ -545,6 +549,46 @@ def test_app_registers_memory_gc_cron_job(tmp_path) -> None:
 
     with TestClient(app):
         assert ("memory_gc", "0 4 * * *") in scheduler.cron_jobs
+
+
+def test_app_registers_memory_gc_interval_background_job_from_tasks_config(tmp_path) -> None:
+    scheduler = RecordingScheduler()
+    pipeline = RecordingPipeline()
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "tasks.yaml").write_text(
+        """
+heartbeat:
+  enabled: false
+memory_gc:
+  enabled: true
+  mode: interval
+  interval_minutes: 17
+""".strip(),
+        encoding="utf-8",
+    )
+
+    class DummyMemoryGC:
+        async def run(self) -> dict:
+            return {"processed_count": 0, "skipped_count": 0}
+
+        async def run_background(self) -> dict:
+            return {"status": "scheduled"}
+
+    memory_gc = DummyMemoryGC()
+    deps = AppDeps(
+        session_memory=SessionMemory(sessions_dir=tmp_path / "sessions", buffer_limit=20),
+        structured_store=StructuredStore(db_path=tmp_path / "hypo.db"),
+        scheduler=scheduler,
+        event_queue=DummyEventQueue(),
+    )
+    deps.memory_gc = memory_gc
+    app = create_app(auth_token="test-token", pipeline=pipeline, deps=deps)
+    app.state.config_dir = config_dir
+
+    with TestClient(app):
+        assert ("memory_gc", 17) in scheduler.interval_jobs
+        assert scheduler.interval_callables["memory_gc"] == memory_gc.run_background
 
 
 def test_app_lifespan_starts_and_stops_napcat_websocket_client(

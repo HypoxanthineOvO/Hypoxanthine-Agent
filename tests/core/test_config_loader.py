@@ -280,6 +280,29 @@ hypo_info_digest:
     assert tasks.hypo_info_digest.time == "09:00,21:00"
 
 
+def test_load_tasks_config_accepts_memory_gc_schedule(tmp_path: Path) -> None:
+    tasks_yaml = tmp_path / "tasks.yaml"
+    tasks_yaml.write_text(
+        """
+heartbeat:
+  enabled: false
+memory_gc:
+  enabled: true
+  mode: interval
+  interval_minutes: 30
+  max_rounds: 1
+""".strip(),
+        encoding="utf-8",
+    )
+
+    tasks = load_tasks_config(tasks_yaml)
+
+    assert tasks.memory_gc.enabled is True
+    assert tasks.memory_gc.mode == "interval"
+    assert tasks.memory_gc.interval_minutes == 30
+    assert tasks.memory_gc.max_rounds == 1
+
+
 def test_load_tasks_config_accepts_wewe_rss_schedule(tmp_path: Path) -> None:
     tasks_yaml = tmp_path / "tasks.yaml"
     tasks_yaml.write_text(

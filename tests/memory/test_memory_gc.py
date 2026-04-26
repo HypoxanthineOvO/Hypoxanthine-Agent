@@ -91,6 +91,52 @@ def test_memory_gc_summarizes_inactive_session_to_l3_and_marks_processed(tmp_pat
     asyncio.run(_run())
 
 
+def test_memory_gc_redacts_sensitive_session_text_before_llm_summary(tmp_path: Path) -> None:
+    async def _run() -> None:
+        sessions_dir = tmp_path / "memory" / "sessions"
+        knowledge_dir = tmp_path / "memory" / "knowledge"
+        store = StructuredStore(db_path=tmp_path / "memory" / "hypo.db")
+        await store.init()
+        await store.upsert_session("secret-session")
+        session_memory = SessionMemory(sessions_dir=sessions_dir, buffer_limit=20)
+        for index, text in enumerate(
+            [
+                "auth token=SECRET_TOKEN_SHOULD_NOT_LEAK",
+                "cookie=SECRET_COOKIE_SHOULD_NOT_LEAK",
+                "用户偏好：回复使用中文",
+                "一次普通确认",
+                "另一次普通确认",
+            ]
+        ):
+            session_memory.append(
+                Message(
+                    text=text,
+                    sender="user",
+                    session_id="secret-session",
+                    timestamp=datetime(2026, 3, 1, 9, index, tzinfo=UTC),
+                )
+            )
+
+        router = StubModelRouter(text="# 会话摘要\n\n- 用户偏好中文。")
+        gc = MemoryGC(
+            session_memory=session_memory,
+            structured_store=store,
+            semantic_memory=StubSemanticMemory(),
+            model_router=router,
+            knowledge_dir=knowledge_dir,
+            now_fn=lambda: datetime(2026, 3, 15, 4, 0, tzinfo=UTC),
+        )
+
+        await gc.run()
+
+        prompt = router.calls[0]["messages"][0]["content"]
+        assert "SECRET_TOKEN_SHOULD_NOT_LEAK" not in prompt
+        assert "SECRET_COOKIE_SHOULD_NOT_LEAK" not in prompt
+        assert "[已移除敏感凭据内容]" in prompt
+
+    asyncio.run(_run())
+
+
 def test_memory_gc_skips_recent_short_and_processed_sessions(tmp_path: Path) -> None:
     async def _run() -> None:
         sessions_dir = tmp_path / "memory" / "sessions"

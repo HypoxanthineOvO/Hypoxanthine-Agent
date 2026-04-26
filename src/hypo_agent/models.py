@@ -281,6 +281,15 @@ class HypoInfoDigestTaskConfig(TaskScheduleConfig):
     time: str | None = None
 
 
+class MemoryGCTaskConfig(TaskScheduleConfig):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    mode: Literal["interval", "cron"] = "cron"
+    cron: str | None = "0 4 * * *"
+    interval_minutes: int = Field(default=1440, ge=1)
+
+
 class EmailStoreTaskConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -296,6 +305,7 @@ class TasksConfig(BaseModel):
     heartbeat: HeartbeatTaskConfig = Field(default_factory=HeartbeatTaskConfig)
     email_store: EmailStoreTaskConfig = Field(default_factory=EmailStoreTaskConfig)
     hypo_info_digest: HypoInfoDigestTaskConfig = Field(default_factory=HypoInfoDigestTaskConfig)
+    memory_gc: MemoryGCTaskConfig = Field(default_factory=MemoryGCTaskConfig)
     subscription: TaskScheduleConfig = Field(default_factory=TaskScheduleConfig)
     wewe_rss: TaskScheduleConfig = Field(default_factory=TaskScheduleConfig)
 

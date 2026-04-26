@@ -1,18 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 import inspect
 import json
 from pathlib import Path
+import re
 from typing import Any
 from urllib.parse import unquote
 
 import structlog
 
+from hypo_agent.memory.consolidation import MemoryConsolidationService
 from hypo_agent.models import Message
 
 logger = structlog.get_logger("hypo_agent.memory.gc")
 _MEMORY_GC_ERRORS = (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError)
+_SENSITIVE_MODEL_TEXT_RE = re.compile(
+    r"(token|cookie|password|passwd|secret|api[_-]?key|authorization|auth|credential)",
+    re.IGNORECASE,
+)
 
 
 class MemoryGC:
@@ -27,6 +34,9 @@ class MemoryGC:
         sessions_dir: Path | str | None = None,
         active_window_days: int = 7,
         min_message_count: int = 5,
+        backup_dir: Path | str | None = None,
+        enable_consolidation: bool = True,
+        consolidation_timeout_seconds: int = 120,
         now_fn=None,
     ) -> None:
         self.session_memory = session_memory
@@ -41,12 +51,23 @@ class MemoryGC:
         )
         self.active_window_days = max(1, int(active_window_days))
         self.min_message_count = max(1, int(min_message_count))
+        self.backup_dir = Path(backup_dir) if backup_dir is not None else None
+        self.enable_consolidation = bool(enable_consolidation)
+        self.consolidation_timeout_seconds = max(1, int(consolidation_timeout_seconds))
         self._now_fn = now_fn or (lambda: datetime.now(UTC).replace(microsecond=0))
         self.last_run_at: str | None = None
         self.last_result: dict[str, Any] | None = None
+        self._background_task: asyncio.Task[Any] | None = None
 
     async def run(self) -> dict[str, Any]:
         await self.structured_store.init()
+        consolidation: dict[str, Any] | None = None
+        if self.enable_consolidation:
+            try:
+                consolidation = await self._run_consolidation()
+            except _MEMORY_GC_ERRORS as exc:
+                logger.exception("memory_gc.consolidation_failed")
+                consolidation = {"error": type(exc).__name__, "message": str(exc)}
         created_files: list[str] = []
         skipped_count = 0
         error_count = 0
@@ -76,6 +97,7 @@ class MemoryGC:
             "skipped_count": skipped_count,
             "error_count": error_count,
             "created_files": created_files,
+            "consolidation": consolidation,
             "last_run_at": self._now_iso(),
         }
         self.last_run_at = summary["last_run_at"]
@@ -89,6 +111,26 @@ class MemoryGC:
             "last_run_at": self.last_run_at,
             "processed_count": int((self.last_result or {}).get("processed_count") or 0),
             "skipped_count": int((self.last_result or {}).get("skipped_count") or 0),
+        }
+
+    async def run_background(self) -> dict[str, Any]:
+        if self._background_task is not None and not self._background_task.done():
+            return {"status": "already_running"}
+
+        async def _runner() -> None:
+            try:
+                await asyncio.wait_for(self.run(), timeout=self.consolidation_timeout_seconds)
+            except TimeoutError:
+                logger.warning(
+                    "memory_gc.background_timeout",
+                    timeout_seconds=self.consolidation_timeout_seconds,
+                )
+
+        self._background_task = asyncio.create_task(_runner(), name="memory-gc")
+        self._background_task.add_done_callback(self._log_background_task_error)
+        return {
+            "status": "scheduled",
+            "timeout_seconds": self.consolidation_timeout_seconds,
         }
 
     async def _process_session_file(self, session_file: Path) -> str | None:
@@ -146,7 +188,7 @@ class MemoryGC:
     async def _summarize_session(self, session_id: str, messages: list[Message]) -> str:
         lightweight_model = self.model_router.get_model_for_task("lightweight")
         transcript = "\n".join(
-            f"[{message.sender}] {str(message.text or '').strip()}"
+            f"[{message.sender}] {self._safe_model_text(str(message.text or '').strip())}"
             for message in messages
             if str(message.text or "").strip()
         )
@@ -174,6 +216,32 @@ class MemoryGC:
         if not summary.startswith("#"):
             summary = f"# 会话摘要\n\n{summary}"
         return summary.rstrip() + "\n"
+
+    async def _run_consolidation(self) -> dict[str, Any]:
+        service = MemoryConsolidationService(
+            session_memory=self.session_memory,
+            structured_store=self.structured_store,
+            knowledge_dir=self.knowledge_dir,
+            sessions_dir=self.sessions_dir,
+            backup_dir=self.backup_dir,
+            active_window_days=self.active_window_days,
+            min_message_count=self.min_message_count,
+            now_fn=self._now_fn,
+        )
+        return await service.run(apply=True)
+
+    def _safe_model_text(self, text: str) -> str:
+        if _SENSITIVE_MODEL_TEXT_RE.search(text):
+            return "[已移除敏感凭据内容]"
+        return text
+
+    def _log_background_task_error(self, task: asyncio.Task[Any]) -> None:
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is None:
+            return
+        logger.exception("memory_gc.background_failed", error=str(error))
 
     def _summary_file_path(self, session_id: str) -> Path:
         safe_session_id = "".join(
