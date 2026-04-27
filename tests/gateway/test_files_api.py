@@ -88,3 +88,21 @@ def test_files_api_serves_file_content_when_authorized(tmp_path) -> None:
 
     assert response.status_code == 200
     assert response.text == "hello-world"
+
+
+def test_files_api_named_route_serves_file_with_download_filename(tmp_path) -> None:
+    file_path = tmp_path / "allowed" / "hello.txt"
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text("hello-world", encoding="utf-8")
+
+    client = _build_client(tmp_path)
+    with client:
+        response = client.get(
+            "/api/files/notion-export.md",
+            params={"path": str(file_path)},
+            headers={"Authorization": "Bearer test-token"},
+        )
+
+    assert response.status_code == 200
+    assert response.text == "hello-world"
+    assert 'filename="notion-export.md"' in response.headers["content-disposition"]

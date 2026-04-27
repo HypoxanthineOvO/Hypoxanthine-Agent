@@ -234,17 +234,18 @@ def _blocks_from_message(message: Message) -> list[ContentBlock]:
     if text:
         blocks.extend(_blocks_from_text(text))
 
+    attachment_keys = _attachment_dedupe_keys(message.attachments)
     blocks.extend(_blocks_from_attachments(message.attachments))
 
     legacy_image = str(message.image or "").strip()
-    if legacy_image:
+    if legacy_image and ("image", legacy_image) not in attachment_keys:
         blocks.append(ImageAttachmentBlock(url=legacy_image))
 
     for attachment_type, raw_url in (
         ("file", str(message.file or "").strip()),
         ("audio", str(message.audio or "").strip()),
     ):
-        if raw_url:
+        if raw_url and (attachment_type, raw_url) not in attachment_keys:
             blocks.append(
                 FileAttachmentBlock(
                     attachment_type=attachment_type,  # type: ignore[arg-type]
@@ -252,6 +253,16 @@ def _blocks_from_message(message: Message) -> list[ContentBlock]:
                 )
             )
     return blocks
+
+
+def _attachment_dedupe_keys(attachments: list[Attachment]) -> set[tuple[str, str]]:
+    keys: set[tuple[str, str]] = set()
+    for attachment in attachments:
+        attachment_type = str(attachment.type or "").strip().lower()
+        raw_url = str(attachment.url or "").strip()
+        if attachment_type and raw_url:
+            keys.add((attachment_type, raw_url))
+    return keys
 
 
 def _blocks_from_text(text: str) -> list[ContentBlock]:

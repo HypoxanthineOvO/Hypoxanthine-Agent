@@ -17,6 +17,25 @@ async def serve_file(
     request: Request,
     path: str = Query(..., min_length=1),
 ):
+    return _serve_file_response(request, path=path)
+
+
+@router.get("/files/{filename:path}")
+async def serve_named_file(
+    request: Request,
+    filename: str,
+    path: str = Query(..., min_length=1),
+):
+    download_filename = Path(str(filename or "")).name or None
+    return _serve_file_response(request, path=path, download_filename=download_filename)
+
+
+def _serve_file_response(
+    request: Request,
+    *,
+    path: str,
+    download_filename: str | None = None,
+):
     require_api_token(request)
 
     permission_manager = getattr(request.app.state, "permission_manager", None)
@@ -52,5 +71,6 @@ async def serve_file(
         path=path,
         resolved_path=str(resolved),
         size_bytes=resolved.stat().st_size,
+        download_filename=download_filename,
     )
-    return FileResponse(path=resolved)
+    return FileResponse(path=resolved, filename=download_filename)

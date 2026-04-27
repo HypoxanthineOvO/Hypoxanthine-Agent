@@ -15,7 +15,7 @@ from pathlib import Path
 import random
 import re
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -390,6 +390,7 @@ class QQBotChannelService:
                         msg_id=msg_id,
                         file_source=file_source,
                         file_type=self._segment_file_type(segment),
+                        file_name=str(segment.get("name") or "").strip() or None,
                         fallback_text=self._segment_file_fallback_text(segment),
                     )
             if pending_text:
@@ -484,6 +485,7 @@ class QQBotChannelService:
                                 msg_id=msg_id,
                                 file_source=file_source,
                                 file_type=self._segment_file_type(segment),
+                                file_name=str(segment.get("name") or "").strip() or None,
                                 fallback_text=self._segment_file_fallback_text(segment),
                             )
                         delivered_segment_count += 1
@@ -787,22 +789,27 @@ class QQBotChannelService:
                 )
                 segments.append(rendered)
 
+        attachment_keys: set[tuple[str, str]] = set()
         for attachment in message.attachments:
+            raw_source = str(attachment.url or "").strip()
+            attachment_type = str(attachment.type or "").strip().lower()
+            if attachment_type and raw_source:
+                attachment_keys.add((attachment_type, raw_source))
             if attachment.type == "image":
                 segments.append(
                     {
                         "type": "image",
-                        "source": str(attachment.url or "").strip(),
+                        "source": raw_source,
                         "name": attachment.filename,
-                        "fallback_text": self._image_fallback_text(str(attachment.url or "")),
+                        "fallback_text": self._image_fallback_text(raw_source),
                     }
                 )
                 continue
-            label = attachment.filename or Path(str(attachment.url or "")).name or attachment.type
+            label = attachment.filename or Path(raw_source).name or attachment.type
             segments.append(
                 {
                     "type": "file",
-                    "source": str(attachment.url or "").strip(),
+                    "source": raw_source,
                     "name": label,
                     "mime_type": attachment.mime_type,
                     "attachment_type": attachment.type,
@@ -810,7 +817,7 @@ class QQBotChannelService:
             )
 
         legacy_image = str(message.image or "").strip()
-        if legacy_image:
+        if legacy_image and ("image", legacy_image) not in attachment_keys:
             segments.append(
                 {
                     "type": "image",
@@ -823,7 +830,7 @@ class QQBotChannelService:
             ("file", str(message.file or "").strip()),
             ("audio", str(message.audio or "").strip()),
         ):
-            if raw_url:
+            if raw_url and (label, raw_url) not in attachment_keys:
                 file_label = Path(raw_url).name or label
                 segments.append(
                     {
@@ -1044,6 +1051,7 @@ class QQBotChannelService:
         file_source: str,
         file_type: int,
         fallback_text: str,
+        file_name: str | None = None,
     ) -> None:
         if route_kind != "c2c":
             logger.warning("qq_bot.file.fallback_to_text", openid=openid, route_kind=route_kind)
@@ -1066,6 +1074,7 @@ class QQBotChannelService:
                 text=None,
                 file_source=file_source,
                 file_type=file_type,
+                file_name=file_name,
             )
         except (httpx.HTTPStatusError, httpx.TransportError, httpx.TimeoutException, OSError, ValueError) as exc:
             logger.warning("qq_bot.file.fallback_to_text", openid=openid, error=str(exc))
@@ -1149,6 +1158,18 @@ class QQBotChannelService:
             params["token"] = self.public_file_token
         return f"{self.public_base_url}/api/files?{urlencode(params)}"
 
+    def _local_file_public_url(self, file_source: str, *, file_name: str | None = None) -> str | None:
+        if not self.public_base_url:
+            return None
+        resolved = Path(str(file_source or "").strip()).expanduser().resolve(strict=False)
+        if not resolved.exists() or not resolved.is_file():
+            return None
+        params = {"path": str(resolved)}
+        if self.public_file_token:
+            params["token"] = self.public_file_token
+        download_name = Path(str(file_name or "")).name or resolved.name or "file"
+        return f"{self.public_base_url}/api/files/{quote(download_name, safe='')}?{urlencode(params)}"
+
     def _persist_data_url_image(self, image_source: str) -> str | None:
         if not _DATA_URL_PATTERN.match(image_source):
             return None
@@ -1182,6 +1203,7 @@ class QQBotChannelService:
         image_source: str | None = None,
         file_source: str | None = None,
         file_type: int = 4,
+        file_name: str | None = None,
     ) -> None:
         for attempt in range(2):
             try:
@@ -1225,6 +1247,7 @@ class QQBotChannelService:
                         openid=openid,
                         file_source=file_source,
                         file_type=file_type,
+                        file_name=file_name,
                     )
                     await self._request_json(
                         "POST",
@@ -1305,6 +1328,7 @@ class QQBotChannelService:
         openid: str,
         file_source: str,
         file_type: int,
+        file_name: str | None = None,
     ) -> str:
         upload_bodies: list[dict[str, Any]] = []
 
@@ -1312,7 +1336,7 @@ class QQBotChannelService:
         if _HTTP_URL_PATTERN.match(file_source):
             upload_bodies.append({"file_type": resolved_file_type, "srv_send_msg": False, "url": file_source})
         else:
-            local_public_url = self._local_image_public_url(file_source)
+            local_public_url = self._local_file_public_url(file_source, file_name=file_name)
             if local_public_url:
                 upload_bodies.append({"file_type": resolved_file_type, "srv_send_msg": False, "url": local_public_url})
 

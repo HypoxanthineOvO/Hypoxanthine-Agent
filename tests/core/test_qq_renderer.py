@@ -66,6 +66,37 @@ def test_qq_renderer_preserves_attachment_images() -> None:
     assert segments[-1] == {"type": "image", "source": "/tmp/cat.png", "name": "cat.png"}
 
 
+def test_qq_renderer_deduplicates_attachment_and_legacy_file() -> None:
+    renderer = QQRenderer()
+    message = Message(
+        text="已导出",
+        sender="assistant",
+        session_id="main",
+        attachments=[
+            Attachment(
+                type="file",
+                url="/tmp/notion-export.md",
+                filename="notion-export.md",
+                mime_type="text/markdown",
+            )
+        ],
+        file="/tmp/notion-export.md",
+    )
+
+    segments = asyncio.run(renderer.render(message))
+
+    file_segments = [segment for segment in segments if segment["type"] == "file"]
+    assert file_segments == [
+        {
+            "type": "file",
+            "source": "/tmp/notion-export.md",
+            "name": "notion-export.md",
+            "mime_type": "text/markdown",
+            "attachment_type": "file",
+        }
+    ]
+
+
 def test_qq_renderer_falls_back_to_text_when_image_rendering_fails() -> None:
     image_renderer = StubImageRenderer(fail=True)
     renderer = QQRenderer(image_renderer=image_renderer)
