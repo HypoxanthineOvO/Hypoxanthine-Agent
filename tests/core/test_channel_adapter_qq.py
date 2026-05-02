@@ -55,8 +55,11 @@ def test_format_with_table() -> None:
 
     segments = asyncio.run(adapter.format(message))
 
-    assert [segment["type"] for segment in segments] == ["text", "image", "text"]
-    assert renderer.calls[0][1] == "table"
+    # Table passed through as raw markdown text (merged with adjacent text)
+    text_segments = [s for s in segments if s["type"] == "text"]
+    all_text = "".join(s["data"]["text"] for s in text_segments)
+    assert "| A | B |" in all_text
+    assert renderer.calls == []  # No image rendering for tables
 
 
 def test_format_renderer_unavailable() -> None:
@@ -95,16 +98,14 @@ def test_format_multiple_blocks() -> None:
 
     segments = asyncio.run(adapter.format(message))
 
-    assert [segment["type"] for segment in segments] == [
-        "text",
-        "image",
-        "text",
-        "image",
-        "text",
-        "image",
-        "text",
-    ]
-    assert [item[1] for item in renderer.calls] == ["code", "table", "mermaid"]
+    # Code and mermaid rendered as images; table passed through as text
+    segment_types = [segment["type"] for segment in segments]
+    assert "image" in segment_types
+    assert [item[1] for item in renderer.calls] == ["code", "mermaid"]
+    # Table content present in text segments
+    text_segments = [s for s in segments if s["type"] == "text"]
+    all_text = "".join(s["data"]["text"] for s in text_segments)
+    assert "| X | Y |" in all_text
 
 
 def test_format_includes_file_attachments() -> None:

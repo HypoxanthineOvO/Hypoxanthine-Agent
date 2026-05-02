@@ -778,11 +778,10 @@ class QQBotChannelService:
                             }
                         )
                     continue
-                block_type = "table"
-                if block.type is BlockType.MATH_BLOCK:
-                    block_type = "math"
-                elif block.type is BlockType.MERMAID:
-                    block_type = "mermaid"
+                if block.type is BlockType.TABLE:
+                    segments.append({"type": "text", "text": block.content})
+                    continue
+                block_type = "math" if block.type is BlockType.MATH_BLOCK else "mermaid"
                 rendered = await self._render_markdown_block_image(
                     block.content,
                     block_type=block_type,

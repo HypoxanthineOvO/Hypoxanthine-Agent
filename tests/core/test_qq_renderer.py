@@ -37,7 +37,7 @@ def test_qq_renderer_renders_plain_text() -> None:
     assert segments == [{"type": "text", "text": "【你好】"}]
 
 
-def test_qq_renderer_outputs_image_segments_for_code_and_table_blocks() -> None:
+def test_qq_renderer_passes_through_markdown_table_as_text() -> None:
     image_renderer = StubImageRenderer()
     renderer = QQRenderer(image_renderer=image_renderer)
     message = Message(
@@ -48,8 +48,16 @@ def test_qq_renderer_outputs_image_segments_for_code_and_table_blocks() -> None:
 
     segments = asyncio.run(renderer.render(message))
 
-    assert [segment["type"] for segment in segments] == ["text", "image", "image", "text"]
-    assert image_renderer.calls == [("print('x')", "code"), ("| A | B |\n| --- | --- |\n| 1 | 2 |", "table")]
+    # Code block rendered as image, table passed through as raw markdown text
+    assert segments[0]["type"] == "text"
+    assert "前文" in segments[0]["text"]
+    assert segments[1]["type"] == "image"
+    assert image_renderer.calls == [("print('x')", "code")]
+    # Table and trailing text merged into one text segment (adjacent merge)
+    text_segments = [s for s in segments if s["type"] == "text"]
+    all_text = "".join(s["text"] for s in text_segments)
+    assert "| A | B |" in all_text
+    assert "后文" in all_text
 
 
 def test_qq_renderer_preserves_attachment_images() -> None:

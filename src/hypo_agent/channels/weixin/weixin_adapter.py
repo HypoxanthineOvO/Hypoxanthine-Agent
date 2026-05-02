@@ -709,7 +709,7 @@ class WeixinAdapter:
                     segments.append({"type": "text", "text": block.content})
                     continue
                 if block.type is BlockType.TABLE:
-                    segments.append({"type": "text", "text": table_to_key_value_text(block.content)})
+                    segments.append({"type": "text", "text": block.content})
                     continue
                 if block.type in {BlockType.MATH_BLOCK, BlockType.MERMAID}:
                     rendered = await self._render_markdown_block_image(

@@ -49,13 +49,12 @@ class WeixinRenderer:
                 pending_emoji = "" if consumed else pending_emoji
                 continue
             if isinstance(block, TableBlock):
-                consumed = await self._append_rendered_block(
-                    segments,
-                    content=block.markdown,
-                    block_type="table",
-                    pending_emoji=pending_emoji,
-                )
-                pending_emoji = "" if consumed else pending_emoji
+                table_text = block.markdown.strip()
+                if table_text:
+                    if pending_emoji:
+                        table_text = f"{pending_emoji} {table_text}"
+                        pending_emoji = ""
+                    self._append_text_segment(segments, table_text)
                 continue
             if isinstance(block, MathBlock):
                 consumed = await self._append_rendered_block(

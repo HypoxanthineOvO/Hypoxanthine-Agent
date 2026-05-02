@@ -84,7 +84,7 @@ def test_weixin_renderer_plaintext_fallback_uses_raw_code_and_table_text() -> No
     assert "1 | 2" in text
 
 
-def test_weixin_renderer_outputs_images_for_renderable_blocks() -> None:
+def test_weixin_renderer_passes_through_markdown_table_as_text() -> None:
     image_renderer = StubImageRenderer()
     renderer = WeixinRenderer(image_renderer=image_renderer)
 
@@ -98,8 +98,11 @@ def test_weixin_renderer_outputs_images_for_renderable_blocks() -> None:
         )
     )
 
-    assert [segment["type"] for segment in segments] == ["image", "image"]
-    assert image_renderer.calls == [("print('x')", "code"), ("| A | B |\n| --- | --- |\n| 1 | 2 |", "table")]
+    assert [segment["type"] for segment in segments] == ["image", "text"]
+    assert image_renderer.calls == [("print('x')", "code")]
+    table_segment = segments[1]
+    assert table_segment["type"] == "text"
+    assert "| A | B |" in table_segment["text"]
 
 
 def test_weixin_renderer_preserves_image_attachments() -> None:
