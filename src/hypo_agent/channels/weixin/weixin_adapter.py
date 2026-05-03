@@ -793,32 +793,34 @@ class WeixinAdapter:
         target_user_id: str,
         context_token: str,
     ) -> dict[str, object]:
-        item_list = await self._build_item_list(segments, target_user_id=target_user_id)
-        if not item_list:
+        batches = await self._build_item_batches(segments, target_user_id=target_user_id)
+        if not batches:
             return {"ret": 0}
 
-        try:
-            response = await self._client_send_item_list(
-                target_user_id=target_user_id,
-                item_list=item_list,
-                context_token=context_token or None,
-            )
-        except ILinkAPIError as exc:
-            if not self._is_retryable_send_error(exc):
-                raise
-            response = await self._handle_retryable_item_list_failure(
-                target_user_id=target_user_id,
-                item_list=item_list,
-                context_token=context_token,
-                fallback_text=self._segments_to_text(segments),
-                error=exc,
-            )
+        response: dict[str, object] = {"ret": 0}
+        for item_list in batches:
+            try:
+                response = await self._client_send_item_list(
+                    target_user_id=target_user_id,
+                    item_list=item_list,
+                    context_token=context_token or None,
+                )
+            except ILinkAPIError as exc:
+                if not self._is_retryable_send_error(exc):
+                    raise
+                response = await self._handle_retryable_item_list_failure(
+                    target_user_id=target_user_id,
+                    item_list=item_list,
+                    context_token=context_token,
+                    fallback_text=self._segments_to_text(segments),
+                    error=exc,
+                )
 
         await self._remember_context_token(context_token)
         self._record_message_sent()
         return response
 
-    async def _build_item_list(
+    async def _build_item_batches(
         self,
         segments: list[dict[str, Any]],
         *,

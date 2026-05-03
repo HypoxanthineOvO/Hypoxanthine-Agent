@@ -6,6 +6,12 @@ from types import SimpleNamespace
 
 from hypo_agent.channels.feishu_channel import FeishuChannel
 from hypo_agent.core.channel_dispatcher import ChannelDispatcher, ChannelRelayPolicy
+from hypo_agent.core.unified_message import (
+    ImageAttachmentBlock,
+    MessageProvenance,
+    TextBlock,
+    UnifiedMessage,
+)
 from hypo_agent.models import Message
 
 
@@ -200,6 +206,45 @@ def test_feishu_channel_pushes_image_attachments_for_proactive_message(tmp_path)
         assert api_client.create_calls[0]["msg_type"] == "interactive"
         assert api_client.create_calls[1]["msg_type"] == "image"
         assert json.loads(api_client.create_calls[1]["content"]) == {"image_key": "img_1"}
+
+    asyncio.run(_run())
+
+
+def test_feishu_channel_strips_markdown_image_ref_from_unified_text(tmp_path) -> None:
+    async def _run() -> None:
+        queue = QueueStub()
+        api_client = ApiClientStub()
+        image_path = tmp_path / "img_1.png"
+        image_path.write_bytes(b"fake-png")
+        channel = FeishuChannel(
+            app_id="app-id",
+            app_secret="app-secret",
+            message_queue=queue,
+            api_client=api_client,
+        )
+        channel.bind_chat_session(chat_id="oc_chat_123", session_id="main")
+
+        result = await channel.push_proactive(
+            UnifiedMessage(
+                message_type="ai_reply",
+                blocks=[
+                    TextBlock(text="请看结果"),
+                    ImageAttachmentBlock(url=str(image_path), filename="img_1.png"),
+                ],
+                provenance=MessageProvenance(source_channel="weixin"),
+                session_id="main",
+                channel="weixin",
+                sender="assistant",
+                raw_text=f"请看结果\n![img]({image_path})",
+                metadata={"feishu": {"chat_id": "oc_chat_123"}},
+            )
+        )
+
+        assert result.success is True
+        assert len(api_client.create_calls) == 2
+        card = json.loads(api_client.create_calls[0]["content"])
+        assert card["body"]["elements"][0]["content"] == "请看结果"
+        assert api_client.create_calls[1]["msg_type"] == "image"
 
     asyncio.run(_run())
 

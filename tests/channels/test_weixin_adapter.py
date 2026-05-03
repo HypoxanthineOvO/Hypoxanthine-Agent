@@ -375,6 +375,45 @@ def test_weixin_adapter_sends_text_plus_image_attachment_for_qr_handoff(tmp_path
         assert len(client.sent_images) == 1
         assert client.sent_images[0]["to_user_id"] == "user@im.wechat"
         assert client.sent_images[0]["encrypt_query_param"] == "download-param-1"
+        assert len(client.raw_messages) == 2
+        assert client.raw_messages[0]["item_list"] == [
+            {"type": 1, "text_item": {"text": "已自动切换到浏览器二维码，请扫描新二维码。"}}
+        ]
+        assert client.raw_messages[1]["item_list"][0]["type"] == 2
+
+    asyncio.run(_run())
+
+
+def test_weixin_adapter_sends_image_without_context_token_when_only_attachment(tmp_path: Path) -> None:
+    async def _run() -> None:
+        image_path = tmp_path / "cat.png"
+        image_path.write_bytes(_PNG_1X1)
+        client = DummyClient()
+        adapter = WeixinAdapter(
+            client=client,
+            target_user_id="user@im.wechat",
+            send_delay_seconds=0,
+        )
+
+        await adapter.push(
+            Message(
+                sender="assistant",
+                session_id="main",
+                channel="system",
+                attachments=[
+                    {
+                        "type": "image",
+                        "url": str(image_path),
+                        "filename": "cat.png",
+                        "mime_type": "image/png",
+                    }
+                ],
+            )
+        )
+
+        assert client.sent == []
+        assert len(client.sent_images) == 1
+        assert client.sent_images[0]["context_token"] is None
 
     asyncio.run(_run())
 

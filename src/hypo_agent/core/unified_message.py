@@ -10,6 +10,7 @@ from hypo_agent.core.markdown_splitter import renderable_markdown_block, split_m
 from hypo_agent.models import Attachment, Message
 
 _FENCE_OPEN_RE = re.compile(r"^```(?P<lang>[a-zA-Z0-9_+-]*)[^\n]*$")
+_MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\((?P<content>[^)\r\n]+)\)")
 
 
 class MessageProvenance(BaseModel):
@@ -212,8 +213,12 @@ def message_from_unified(message: UnifiedMessage) -> Message:
         if block.attachment_type == "audio" and legacy_audio is None:
             legacy_audio = block.url
 
+    text = message.raw_text if message.raw_text is not None else message.plain_text() or None
+    if attachments:
+        text = _strip_embedded_attachment_refs(text, attachments=attachments) or text
+
     return Message(
-        text=message.raw_text if message.raw_text is not None else message.plain_text() or None,
+        text=text,
         attachments=attachments,
         image=legacy_image,
         file=legacy_file,
@@ -343,6 +348,36 @@ def _message_id_from_metadata(metadata: dict[str, Any]) -> str | None:
         if value:
             return value
     return None
+
+
+def _strip_embedded_attachment_refs(text: str | None, *, attachments: list[Attachment]) -> str | None:
+    raw_text = str(text or "")
+    if not raw_text:
+        return None
+
+    image_urls = {
+        str(attachment.url or "").strip()
+        for attachment in attachments
+        if attachment.type == "image" and str(attachment.url or "").strip()
+    }
+    if not image_urls:
+        return raw_text
+
+    def _replace(match: re.Match[str]) -> str:
+        content = str(match.group("content") or "").strip()
+        if content.startswith("<") and content.endswith(">"):
+            content = content[1:-1].strip()
+        if " " in content:
+            content = content.split(" ", 1)[0].strip()
+        if content in image_urls:
+            return ""
+        return match.group(0)
+
+    stripped = _MARKDOWN_IMAGE_RE.sub(_replace, raw_text)
+    stripped = re.sub(r"[ \t]+\n", "\n", stripped)
+    stripped = re.sub(r"\n{3,}", "\n\n", stripped)
+    stripped = re.sub(r" {2,}", " ", stripped)
+    return stripped.strip() or None
 
 
 def _normalized_channel_name(channel: str | None) -> str:
