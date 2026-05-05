@@ -1,0 +1,62 @@
+cycle: C3
+phase: P1_DISCOVER
+status: completed
+language: zh-CN
+updated_at: "2026-05-05T00:15:12+08:00"
+rounds_completed: 5
+minimum_rounds: 3
+user_end_signal: "要吧，然后开始拆"
+discover_summary:
+  category: "batch feature queue"
+  desired_effect: "Hypo-Agent can be called by external programs and agent skills to send text, images, and files to HYX; channel attachment delivery becomes reliable; Notion 计划通 becomes the heartbeat reminder source."
+  verification_method: "Use unit/integration tests plus real QQ, Weixin, Feishu, image generation, and Notion read-only smoke with [C3-SMOKE] guardrails."
+decisions:
+  - "C3 includes all three requested works and keeps Feature Queue order."
+  - "CLI focuses on direct command invocation and agent Skill invocation."
+  - "Token starts as single-token, with config/interface shape reserved for multi-token permissions and labels."
+  - "Default recipient is HYX; default channels are all enabled outbound channels; --channel can narrow the target."
+  - "CLI supports human-readable and JSON output."
+  - "dry-run is required."
+  - "Real smoke is allowed for QQ, Weixin, and Feishu, with [C3-SMOKE] prefix and strict message limits."
+  - "Notion is read-only."
+  - "Final execution should restart the Hypo-Agent service and use the new CLI to send HYX a completion report."
+requirements:
+  cli:
+    commands:
+      - "hypo-agent send --token ... --text ..."
+      - "hypo-agent send --token ... --image ./a.png --file ./report.pdf"
+      - "hypo-agent send --token ... --json payload.json"
+      - "cat payload.json | hypo-agent send --token ... --stdin"
+    inputs:
+      - text
+      - image
+      - multiple_images
+      - file
+      - multiple_files
+      - json_file
+      - stdin_json
+    outputs:
+      - pretty
+      - json
+    safety:
+      - token_redaction
+      - dry_run
+      - per_channel_results
+      - c3_smoke_prefix
+  delivery:
+    image_policy: "Send images as image attachments, separately from ordinary files."
+    file_policy: "Send ordinary files directly without suffix-specific special casing when the channel supports files."
+    large_file_policy: "Return a clear error, or use an accessible link fallback when already supported."
+    success_policy: "Partial channel success is allowed, but every channel result must be reported."
+  notion:
+    path: "Hypoxanthine's Home / HYX的计划通 / 研一下 / 月份子页面 / 日期一级标题 / item"
+    summary:
+      - completion_rate
+      - done_items
+      - undone_items
+      - important_items_from_red_or_bold_annotations
+risks:
+  - "Channel attachment capabilities differ across QQ, Weixin, and Feishu."
+  - "Default all-channel send can misfire without dry-run and smoke guardrails."
+  - "Notion rich_text color/bold annotations must be parsed from block metadata, not plain text."
+  - "Tokens must not be stored in generated Skill files or logs."

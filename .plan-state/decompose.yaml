@@ -1,198 +1,54 @@
-phase: decompose
-mode: interactive
-project: Hypo-Agent
-strategy: append_refactor_implementation_after_completed_audit
-updated_at: "2026-04-26T11:54:08+00:00"
-append_mode:
-  enabled: true
-  preserve_existing_prompts:
-    - .pipeline/prompts/001-audit-baseline-observability.md
-    - .pipeline/prompts/002-audit-skills-memory-pipeline.md
-    - .pipeline/prompts/003-audit-skill-acceptance-webui.md
-    - .pipeline/prompts/004-audit-synthesis-refactor-roadmap.md
-  first_new_prompt_number: 005
-planning_decisions:
-  r1_r2: "Do not skip reliability foundation."
-  codex: "Introduce Codex earlier, with best-effort isolation from the user's external Codex history."
-  codex_main_session_delivery: "Push concrete progress/results into main conversation, but allow transport-only/non-L1-persisted messages."
-  memory_migration: "Full classifier-based automatic migration with periodic backups and rollback metadata."
-  webui: "Not urgent; defer until backend reliability, Codex lane, and memory foundations are in place."
+cycle:
+  number: 1
+  name: "新 Cycle"
+strategy: "evidence_first_serial_refactor"
+recommended_route: "先总体架构审计和探针，再按证据重构。"
 milestones:
-  - id: R1
-    prompt_number: "005"
-    prompt_file: .pipeline/prompts/005-refactor-outcome-trace-breaker.md
-    name: "Outcome Taxonomy, Trace Schema, And Breaker Accounting"
-    objective: "Stop recoverable model/user/policy/external errors from fusing tools, and create a structured trace foundation used by later Codex, Skill, and message-runtime work."
-    implementation_scope:
-      - Add a typed tool outcome taxonomy and mapping layer.
-      - Extend invocation/trace persistence with outcome_class, retryable, breaker_weight, side_effect_class, operation, trace_id, and user_visible_summary.
-      - Rewrite breaker accounting to count final weighted outcomes, not every intermediate attempt.
-      - Ensure unknown tools, invalid args, missing files, and policy blocks produce repair hints without disabling real tools.
-      - Keep backward compatibility for existing status-based readers.
-    test_spec:
-      - "Unknown tool name records model_error and does not fuse any real tool."
-      - "Permission denial records policy_block with breaker_weight=0."
-      - "External timeout records external_unavailable and uses service/backoff behavior."
-      - "Retry success does not leave breaker failure state."
-      - "Existing skill-manager and circuit-breaker tests still pass."
-    expected_artifacts:
-      - Updated backend implementation and migrations.
-      - Focused unit tests for taxonomy, persistence, retry, and breaker behavior.
-      - "Documentation commit required: R1[doc]: document outcome taxonomy and trace schema."
-    migration_risk: "Low-medium; requires schema migration while preserving old status fields."
-    rollback: "Feature flag or compatibility path falls back to legacy status counters."
-
-  - id: R2
-    prompt_number: "006"
-    prompt_file: .pipeline/prompts/006-refactor-skill-contracts-probes.md
-    name: "Skill Contracts And Acceptance Probes"
-    objective: "Make Skill pass/fail status operationally meaningful and small-model-friendly."
-    implementation_scope:
-      - Add or formalize skill manifests/contracts for operation, side effects, config requirements, timeout, retry, and repair hints.
-      - Add deterministic test-mode probes that cannot touch production QQ or production port.
-      - Split unit, mocked contract, test-mode probe, and optional integration gates.
-      - Add schema-bound validators for fragile raw tools, especially Notion.
-      - Keep existing Skills available while marking raw/debug-only paths explicitly.
-    test_spec:
-      - "Per-skill manifest validation passes."
-      - "Notion schema validation catches missing/wrong property names before remote calls."
-      - "HYPO_TEST_MODE probes refuse production port and connected QQ."
-      - "Skill acceptance command reports unit/contract/probe layers separately."
-    expected_artifacts:
-      - Skill contract model and generated/hand-authored manifests.
-      - Probe CLI/test additions.
-      - "Documentation commit required: R2[doc]: document skill acceptance policy."
-    migration_risk: "Medium; contracts may expose existing undocumented behavior."
-    rollback: "Keep legacy skill registration path while contract gate is warning-only, then tighten."
-
-  - id: R3
-    prompt_number: "007"
-    prompt_file: .pipeline/prompts/007-refactor-codex-isolated-execution-lane.md
-    name: "Codex Isolated Execution Lane"
-    objective: "Introduce first-class Codex job/session execution for code, command, and repair workflows without polluting the user's external Codex history."
-    implementation_scope:
-      - Probe and implement isolated Codex home/config/history behavior through codex_app_server AppServerConfig env/cwd/launch_args/config_overrides.
-      - If full external-history isolation is unsupported, record a clear limitation and use the strongest available isolation.
-      - Unify or bridge existing CodexBridge, repair_runs, coder_tasks, and CoderTaskService concepts into a coherent Codex job lane.
-      - Persist codex_job/session metadata, status, thread_id, working_dir, trace_id, external_history_isolation mode, and rollback/error state.
-      - Push progress/final summaries to the main conversation as transient or non-L1-persisted messages where appropriate.
-      - Provide high-level operations such as inspect_repo, apply_patch_task, run_verification, diagnose_failure, summarize_diff.
-    test_spec:
-      - "CodexBridge startup receives isolated env/config/cwd when configured."
-      - "Submitting a Codex job creates a persisted job with trace_id and thread_id."
-      - "Progress/result push reaches main session transport without writing raw Codex transcript into L1 history."
-      - "Abort interrupts an active Codex turn and marks terminal status."
-      - "Repair workflow can use native Codex thread continuation where available."
-    expected_artifacts:
-      - Codex lane backend service/job model.
-      - Slash/tool adapter updates for high-level Codex operations.
-      - "Documentation commit required: R3[doc]: document Codex isolation and job lane."
-    migration_risk: "Medium-high; depends on Codex SDK/CLI isolation behavior."
-    rollback: "Disable Codex lane and keep legacy Skills/CoderTaskService paths active."
-
-  - id: R4
-    prompt_number: "008"
-    prompt_file: .pipeline/prompts/008-refactor-typed-memory-auto-migration.md
-    name: "Typed Memory Store And Automatic Migration"
-    objective: "Replace generic preferences as the primary memory model with typed memory records and automatic classifier-based migration."
-    implementation_scope:
-      - Add typed memory tables/classes: user_profile, interaction_policy, operational_state, credentials_state, knowledge_note, sop.
-      - Implement periodic backup before migration and store rollback metadata.
-      - Build classifier-based migration from legacy preferences and relevant memory sources into typed records.
-      - Keep legacy preferences as compatibility read/write adapter during transition.
-      - Replace prompt injection to include only eligible user-facing memory classes.
-      - Enforce Chinese-first policy for user-facing memory summaries unless source content requires English.
-    test_spec:
-      - "Migration creates backup files before mutating memory."
-      - "Representative legacy keys classify into expected memory classes."
-      - "Runtime/auth state is not injected as high-priority user preference."
-      - "Rollback restores pre-migration state from backup."
-      - "Chinese-first memory item is saved and injected correctly."
-    expected_artifacts:
-      - Typed memory schema and migration code.
-      - Backup/rollback utilities.
-      - "Documentation commit required: R4[doc]: document typed memory migration and backup policy."
-    migration_risk: "High; automatic classification can misclassify without strong tests and rollback."
-    rollback: "Restore from timestamped backup and disable typed injection via feature flag."
-
-  - id: R5
-    prompt_number: "009"
-    prompt_file: .pipeline/prompts/009-refactor-async-memory-consolidation.md
-    name: "Async Memory Consolidation Pipeline"
-    objective: "Give the agent autonomous periodic memory cleanup and consolidation using the typed memory system."
-    implementation_scope:
-      - Upgrade MemoryGC from session-summary-only to typed candidate extraction, deduplication, merge/update/archive, and apply mode.
-      - Schedule consolidation with configurable cadence and backup before apply.
-      - Emit consolidation reports for observability.
-      - Integrate with typed memory store, semantic index eligibility, and Chinese-first policy.
-    test_spec:
-      - "Consolidation extracts typed candidates from session fixtures."
-      - "Duplicate/conflicting candidates are merged or archived deterministically."
-      - "Apply mode writes typed memory after backup."
-      - "Scheduler can run consolidation without blocking conversations."
-    expected_artifacts:
-      - Consolidation pipeline and scheduler wiring.
-      - Tests for extraction/classification/dedup/apply.
-      - "Documentation commit required: R5[doc]: document memory consolidation lifecycle."
-    migration_risk: "Medium-high; autonomous writes require backup and clear logs."
-    rollback: "Disable scheduler/apply mode and restore memory from backup."
-
-  - id: R6
-    prompt_number: "010"
-    prompt_file: .pipeline/prompts/010-refactor-nonblocking-message-runtime.md
-    name: "Non-Blocking Message Runtime"
-    objective: "Prevent one stuck request from blocking unrelated messages while preserving same-session ordering."
-    implementation_scope:
-      - Replace inline single-consumer processing with tracked work items.
-      - Add per-session executor/queue and global concurrency semaphore.
-      - Put scheduled/proactive events on lower-priority lane.
-      - Add cancellation, timeout, terminal status events, and trace_id propagation.
-      - Ensure Codex job progress and Memory consolidation events use the same status model where practical.
-    test_spec:
-      - "Slow session A does not block session B."
-      - "Same-session messages stay ordered or visibly queued."
-      - "Cancellation emits terminal status and releases capacity."
-      - "Scheduled events do not starve user messages."
-      - "Default HYPO_TEST_MODE smoke still passes."
-    expected_artifacts:
-      - Event/runtime refactor and status event protocol.
-      - Concurrency tests and smoke validation.
-      - "Documentation commit required: R6[doc]: document message job runtime."
-    migration_risk: "High; touches central message execution semantics."
-    rollback: "Feature flag routes events through legacy single consumer."
-
-  - id: R7
-    prompt_number: "011"
-    prompt_file: .pipeline/prompts/011-refactor-webui-performance-memory-ui.md
-    name: "WebUI Performance And Semantic Memory UI"
-    objective: "Improve long-session usability and expose typed memory/Codex job state clearly, after backend foundations exist."
-    implementation_scope:
-      - Buffer streaming assistant chunks and commit at controlled cadence.
-      - Cache markdown rendering by message id/version and defer KaTeX/Mermaid work.
-      - Virtualize long chat/tool/job histories.
-      - Add or refine Codex job panel/status display without forcing raw output into chat history.
-      - Replace primary Memory UI with semantic typed-memory management; keep raw SQLite as admin/debug.
-    test_spec:
-      - "Long streamed markdown test stays responsive."
-      - "Tool/Codex event burst does not render thousands of durable rows."
-      - "Typed memory CRUD UI tests pass."
-      - "Playwright screenshot/performance smoke passes in test mode."
-    expected_artifacts:
-      - Frontend performance changes and semantic memory/Codex views.
-      - Frontend unit and Playwright tests.
-      - "Documentation commit required: R7[doc]: document WebUI performance and memory/Codex UI."
-    migration_risk: "Medium; UI behavior changes but backend state is already established."
-    rollback: "Disable virtualization/chunk buffering flags and fall back to legacy views."
-validation_chain:
-  default_backend:
-    - "uv run pytest tests/skills/test_exec_skill.py tests/skills/test_tmux_skill.py tests/skills/test_log_inspector_skill.py tests/core/test_progressive_disclosure.py -q"
-  default_frontend:
-    - "cd web && npm run test -- --run src/utils/__tests__/markdownRenderer.spec.ts src/views/__tests__/ChatView.spec.ts"
-  full_test_mode:
-    - "bash test_run.sh"
-    - "HYPO_TEST_MODE=1 uv run python scripts/agent_cli.py --port 8766 smoke"
-production_acceptance:
-  default: false
-  note: "Production/deployment validation must be explicitly requested and must not be mixed with default test-mode smoke."
-open_questions:
-  - "User confirmation to proceed to P3 Generate and create .pipeline/prompts/005-011."
+  - id: M1
+    prompt: ".pipeline/prompts/001-architecture-first-principles-audit.md"
+    name: "总体架构审判"
+    objective: "从第一性原理审查当前系统的抽象、边界、状态模型、错误恢复、可观测性和测试闭环。"
+    kind: analysis
+    validation: "证据表、故障路径图、设计缺陷清单。"
+  - id: M2
+    prompt: ".pipeline/prompts/002-resource-reference-resolution.md"
+    name: "资源引用统一模型"
+    objective: "建立文件、附件、URL、网页、导出物的统一 ResourceRef/ResourceResolver。"
+    kind: refactor
+    validation: "本地文件、上传文件、模糊文件名、URL 场景测试。"
+  - id: M3
+    prompt: ".pipeline/prompts/003-tool-contract-recovery-loop.md"
+    name: "工具调用契约与恢复循环"
+    objective: "在工具调用前后加入参数校验、补全、歧义追问、失败分型、重试和替代路径。"
+    kind: refactor
+    validation: "工具调用回放、缺参/错参/歧义注入测试。"
+  - id: M4
+    prompt: ".pipeline/prompts/004-webpage-reading-architecture.md"
+    name: "网页阅读架构重做"
+    objective: "构建 HTTP reader、浏览器渲染、cookie/session、fallback、错误分型的网页读取链路。"
+    kind: refactor
+    validation: "普通网页、知乎、动态页面、登录态 smoke。"
+  - id: M5
+    prompt: ".pipeline/prompts/005-channel-file-delivery.md"
+    name: "渠道文件能力"
+    objective: "统一 outbound attachment contract，并补齐 QQ/微信/飞书文件发送适配和能力声明。"
+    kind: refactor
+    validation: "本机模拟和可用时真实渠道验收。"
+  - id: M6
+    prompt: ".pipeline/prompts/006-agent-active-recovery-state-machine.md"
+    name: "Agent 主动性状态机"
+    objective: "让 Agent 在 search/ask/retry/verify 状态中主动解决歧义、失败和不确定性。"
+    kind: refactor
+    validation: "找文件、读网页、修参数、确认结果的失败恢复场景。"
+  - id: M7
+    prompt: ".pipeline/prompts/007-frontend-backend-contract-observability.md"
+    name: "前后端契约与可观测性"
+    objective: "整理 API/WebSocket contract，补齐 WebUI 候选确认、工具状态、错误恢复和 trace 可视化。"
+    kind: refactor
+    validation: "API 契约测试、Playwright、长任务状态测试。"
+  - id: M8
+    prompt: ".pipeline/prompts/008-tiered-testing-release-acceptance.md"
+    name: "分级测试与上线验收"
+    objective: "建立功能性测试和真实场景验收分层矩阵，形成上线闸门。"
+    kind: validation
+    validation: "全量测试与本机近真实 E2E 验收包。"

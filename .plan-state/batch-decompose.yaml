@@ -1,0 +1,86 @@
+cycle: C3
+phase: P2_DECOMPOSE
+status: confirmed
+language: zh-CN
+updated_at: "2026-05-05T00:15:12+08:00"
+decompose_mode: upfront
+milestones:
+  - id: M0
+    feature_ids:
+      - F1
+      - F2
+      - F3
+    name: "C3 契约与安全护栏"
+    prompt_file: "001-c3-contract-safety-guardrails.md"
+    category: design
+    validation:
+      - "Contract doc exists."
+      - "Payload and result schema tests fail before implementation and pass after schema scaffolding."
+  - id: M1
+    feature_ids:
+      - F1
+    name: "CLI 入口与程序化输入"
+    prompt_file: "002-agent-cli-programmatic-input.md"
+    category: feature
+    validation:
+      - "CLI unit tests cover text/image/file/json/stdin/channel/token/dry-run/output modes."
+  - id: M2
+    feature_ids:
+      - F1
+      - F2
+    name: "统一 Outbound Send Service"
+    prompt_file: "003-outbound-send-service.md"
+    category: feature
+    validation:
+      - "Mock channels receive normalized outbound messages."
+      - "Per-channel results preserve partial failures."
+  - id: M3
+    feature_ids:
+      - F2
+    name: "附件投递修复：图片与普通文件"
+    prompt_file: "004-attachment-delivery-image-file-fixes.md"
+    category: bugfix
+    validation:
+      - "Fixed image, generated image, and ordinary file tests pass."
+      - "QQ/Weixin duplicate-image regressions are covered."
+  - id: M4
+    feature_ids:
+      - F1
+    name: "Agent Skill 包装"
+    prompt_file: "005-agent-cli-skill-wrappers.md"
+    category: feature
+    validation:
+      - "Claude/Codex/OpenCode Skill wrappers exist and expose send_to_hyx guidance."
+      - "No token is hard-coded."
+  - id: M5
+    feature_ids:
+      - F3
+    name: "Notion 计划通页面读取器"
+    prompt_file: "006-notion-plan-page-reader.md"
+    category: feature
+    validation:
+      - "Fixture tests cover page tree traversal and today's item extraction."
+      - "Real read-only Notion smoke can be run."
+  - id: M6
+    feature_ids:
+      - F3
+    name: "计划通摘要与心跳接入"
+    prompt_file: "007-plan-summary-heartbeat-integration.md"
+    category: feature
+    validation:
+      - "Heartbeat snapshot uses plan summary."
+      - "Important red/bold items are surfaced separately."
+  - id: M7
+    feature_ids:
+      - F1
+      - F2
+      - F3
+    name: "C3 端到端验收、服务重启与完成报告"
+    prompt_file: "008-c3-e2e-acceptance-restart-report.md"
+    category: acceptance
+    validation:
+      - "Real channel smoke sends one text, one image, and one small file per allowed channel."
+      - "Real image generation output delivery is verified."
+      - "Real Notion read-only today summary is verified."
+      - "Hypo-Agent service is restarted after implementation."
+      - "The new CLI sends HYX a completion report."

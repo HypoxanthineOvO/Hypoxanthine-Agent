@@ -1,70 +1,58 @@
-phase: discover
-mode: interactive
-project: Hypo-Agent
-request_summary: >
-  Revise the completed audit-only Hypo-Workflow pipeline into a staged
-  refactor implementation plan, using the full audit roadmap and
-  .plan-state/refactor-roadmap.yaml as the primary inputs.
-plan_context:
-  planning_started_at: "2026-04-26T09:16:01+00:00"
-  append_mode: true
-  existing_completed_prompts:
-    - .pipeline/prompts/001-audit-baseline-observability.md
-    - .pipeline/prompts/002-audit-skills-memory-pipeline.md
-    - .pipeline/prompts/003-audit-skill-acceptance-webui.md
-    - .pipeline/prompts/004-audit-synthesis-refactor-roadmap.md
-  next_prompt_number: 005
-  source_reports:
-    - docs/reports/2026-04-26-hypo-agent-full-audit-and-refactor-roadmap.md
-    - .plan-state/refactor-roadmap.yaml
-evidence:
-  tool_invocation_counts:
-    success: 4967
-    error: 240
-    blocked: 29
-    fused: 22
-    timeout: 8
-  high_risk_clusters:
-    - run_command failures and timeouts
-    - read_file permission/fused failures
-    - notion_query_db schema and availability failures
-    - web_search timeout failures
-    - unknown tool names such as execread_file
-  implementation_observations:
-    - EventQueue is single unbounded asyncio.Queue.
-    - ChatPipeline event consumer awaits full user-message processing before reading next event.
-    - MemorySkill exposes only save_preference/get_preference.
-    - preferences table currently mixes personal facts, runtime state, auth state, and rules.
-    - WebUI text messages rerender markdown and post-process math/mermaid on text changes.
-recommendation: audit_only_first_then_refactor
-user_decisions:
-  route:
-    preference: early_codex_with_external_history_isolation
-    notes: >
-      User prefers introducing Codex earlier. "No pollution" means Hypo-Agent
-      Codex calls must not pollute the user's Codex session/history visible
-      from other Codex clients. Hypo-Agent should still push concrete progress
-      and results into the main conversation, but those push messages may be
-      transient / not persisted into L1 history.
-  r1_r2:
-    preference: do_not_skip
-    notes: "Keep the reliability foundation work; do not jump straight to Codex-only migration."
-  webui:
-    preference: not_urgent
-    notes: "Defer WebUI performance/semantic UI behind backend reliability, Codex lane, and memory foundations."
-  memory_migration:
-    preference: full_classifier_automatic_migration
-    notes: >
-      User prefers the more automatic path: periodically back up existing
-      memory/preference data, run classifier-based typed migration broadly,
-      and rely on backups/rollback rather than manual review as the primary
-      gate. User can manually clean old backup files.
-repo_findings:
-  codex_existing:
-    - src/hypo_agent/channels/codex_bridge.py already wraps codex_app_server AsyncCodex and supports submit, continue_thread, inspect_thread, abort, and per-run in-memory thread state.
-    - src/hypo_agent/channels/coder/coder_task_service.py already has coder_tasks, attach/detach, status, abort, and legacy Hypo-Coder task behavior.
-    - StructuredStore already has coder_tasks, repair_runs, repair_run_events, and codex_thread_id persistence.
-    - codex_app_server.AppServerConfig supports env, cwd, launch_args_override, and config_overrides, so implementation can probe isolated CODEX_HOME/config behavior before falling back.
-unresolved_questions:
-  - Confirm whether Discover is sufficient and planning may proceed to P2 Decompose.
-  - Decide whether to keep planning milestone count around 6-7 or compress into fewer larger milestones.
+workflow_kind: analysis
+analysis_kind:
+  - repo_system
+  - root_cause
+language: zh-CN
+cycle:
+  number: 1
+  name: "新 Cycle"
+task:
+  title: "全系统第一性原理代码审查与架构优化"
+  category: "architecture_review_then_refactor"
+  desired_effect: >
+    Review the whole Hypo-Agent system from first principles, then refactor the
+    architecture so resource access, tool invocation, webpage reading, channel
+    file delivery, frontend state, backend orchestration, and verification form
+    one recoverable and observable system.
+  implementation_after_review: true
+  refactor_scope: "all_modules_allowed"
+user_requirements:
+  - "审查后直接修改，不停留在报告层。"
+  - "审查范围包括前端、后端、工具调用、网页阅读、渠道、模型路由、状态、错误恢复和测试。"
+  - "从总体架构到局部模块审查，反复追问设计是否合理，而不是只检查实现。"
+  - "模型/Agent 遇到歧义、缺参、访问失败时，应自动搜索、追问、重试、替代路径和验证。"
+  - "文件定位应支持自动搜索候选和必要追问。"
+  - "所有工具都应避免傻报错，应进入统一恢复策略。"
+  - "知乎等动态或登录态网页需要尽量通过模拟浏览器读取，允许 cookie/session。"
+  - "QQ、微信、飞书需要支持发送文件或明确的能力声明与验收路径。"
+  - "可以大范围重构，但上线前必须严格测试。"
+observed_failure_clusters:
+  - id: resource_location
+    summary: "用户提到文件时系统不知道文件在哪。"
+  - id: tool_arguments
+    summary: "工具参数经常传错，缺少调用前校验和恢复。"
+  - id: channel_file_delivery
+    summary: "QQ/微信/飞书发送文件能力最近一直没有打通。"
+  - id: webpage_reading
+    summary: "知乎等网页经常读不到，用户需要重复发送。"
+  - id: cross_entrypoint_behavior
+    summary: "问题跨 WebUI、QQ、微信、飞书、CLI/OpenCode 等入口出现。"
+verification_policy:
+  functional_gates:
+    - unit_tests
+    - integration_tests
+    - contract_tests
+    - failure_injection
+    - tool_call_replay
+    - webui_playwright
+  acceptance_gates:
+    - real_or_near_real_local_e2e
+    - webpage_real_url_smoke
+    - browser_cookie_session_smoke
+    - qq_wechat_feishu_file_delivery_smoke
+  note: "真实场景测试用于上线验收，不作为每次开发迭代的硬依赖。"
+constraints:
+  - "默认在本机测试环境运行。"
+  - "真实渠道、登录态网页、cookie/session 使用必须与安全边界和本地配置隔离。"
+  - "上线前必须跑分级测试矩阵。"
+open_questions: []
