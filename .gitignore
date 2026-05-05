@@ -24,6 +24,11 @@ web/.vite/
 
 config/secrets.yaml
 
+# Runtime artifacts
+logs/*.log
+output/
+tmp/
+
 # Runtime memory (defaults to ./memory; override via HYPO_MEMORY_DIR)
 memory/
 !memory/
