@@ -219,16 +219,27 @@ def test_repo_models_config_routes_fast_tool_model_and_local_utility_models() ->
         Path(__file__).resolve().parents[2] / "config" / "secrets.yaml",
     )
 
-    assert runtime.default_model == "DeepSeekV4"
-    assert runtime.task_routing["chat"] == "DeepSeekV4"
-    assert runtime.task_routing["reasoning"] == "DeepSeekV4"
-    assert runtime.task_routing["lightweight"] == "GenesiQWen35BA3B"
-    assert runtime.task_routing["compression"] == "GenesiQWen35BA3B"
-    assert runtime.task_routing["heartbeat"] == "DeepSeekV4"
-    assert runtime.task_routing["vision"] == "GPT"
+    assert runtime.default_model == "MimoV25Flash"
+    assert runtime.task_routing["chat"] == "MimoV25Flash"
+    assert runtime.task_routing["reasoning"] == "MimoV25Pro"
+    assert runtime.task_routing["lightweight"] == "MimoV25Flash"
+    assert runtime.task_routing["compression"] == "MimoV25Flash"
+    assert runtime.task_routing["heartbeat"] == "MimoV25Flash"
+    assert runtime.task_routing["vision"] == "MimoV2Omni"
+    assert runtime.models["MimoV25Flash"].litellm_model == "openai/mimo-v2.5"
+    assert runtime.models["MimoV25Flash"].provider == "MimoTokenPlan"
+    assert runtime.models["MimoV25Flash"].fallback == "DeepSeekV4"
+    assert runtime.models["MimoV25Pro"].litellm_model == "openai/mimo-v2.5-pro"
+    assert runtime.models["MimoV25Pro"].provider == "MimoTokenPlan"
+    assert runtime.models["MimoV25Pro"].fallback == "MimoV25Flash"
+    assert runtime.models["MimoV2Omni"].litellm_model == "openai/mimo-v2-omni"
+    assert runtime.models["MimoV2Omni"].provider == "MimoTokenPlan"
     assert runtime.models["DeepSeekV4"].litellm_model == "deepseek/deepseek-v4-flash"
     assert runtime.models["DeepSeekV4"].provider == "Deepseek"
     assert runtime.models["DeepSeekV4"].fallback == "GPT"
+    assert runtime.models["DeepSeekV4Pro"].litellm_model == "deepseek/deepseek-v4-pro"
+    assert runtime.models["DeepSeekV4Pro"].provider == "Deepseek"
+    assert runtime.models["DeepSeekV4Pro"].fallback == "DeepSeekV4"
     assert runtime.models["GPT"].fallback == "GPTMini"
     assert runtime.models["GPTMini"].fallback == "CodingPlanAuto"
     assert runtime.models["GenesiQWen35BA3B"].litellm_model == "openai/qwen3.6-35b"
@@ -237,10 +248,9 @@ def test_repo_models_config_routes_fast_tool_model_and_local_utility_models() ->
     assert runtime.models["EdenQwen"].litellm_model == "ollama_chat/qwen3.5:27b"
     assert runtime.models["EdenQwen"].provider == "Eden"
     assert runtime.models["EdenQwen"].fallback == "CodingPlanAuto"
-    assert runtime.models["GeminiFlash"].fallback == "EdenQwen"
-    assert runtime.models["Claude"].litellm_model == "anthropic/claude-opus-4-5-thinking"
-    assert runtime.models["Claude"].provider == "VSPLab_Claude"
-    assert runtime.models["Claude"].fallback == "EdenQwen"
+    assert "GeminiFlash" not in runtime.models
+    assert "Claude" not in runtime.models
+    assert "GenesisQwen122B" not in runtime.models
 
 
 def test_load_tasks_config_accepts_heartbeat_email_store_and_hypo_info_digest(tmp_path: Path) -> None:
@@ -404,6 +414,10 @@ services:
     integration_secret: secret_xxx
     default_workspace: Hypo
     todo_database_id: todo-db
+    plan_page_id: plan-page
+    plan_title: HYX的计划通
+    plan_root_title: Hypoxanthine's Home
+    plan_semester_title: 研一下
     proxy_url: http://127.0.0.1:7890
     timeout_ms: 60000
     api_timeout_seconds: 30
@@ -419,6 +433,10 @@ services:
     assert secrets.services.notion.integration_secret == "secret_xxx"
     assert secrets.services.notion.default_workspace == "Hypo"
     assert secrets.services.notion.todo_database_id == "todo-db"
+    assert secrets.services.notion.plan_page_id == "plan-page"
+    assert secrets.services.notion.plan_title == "HYX的计划通"
+    assert secrets.services.notion.plan_root_title == "Hypoxanthine's Home"
+    assert secrets.services.notion.plan_semester_title == "研一下"
     assert secrets.services.notion.proxy_url == "http://127.0.0.1:7890"
     assert secrets.services.notion.timeout_ms == 60000
     assert secrets.services.notion.api_timeout_seconds == 30

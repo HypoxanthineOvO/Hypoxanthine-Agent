@@ -134,6 +134,23 @@ def test_skill_manager_invokes_registered_tool() -> None:
     assert result.result == {"echo": "hello"}
 
 
+def test_skill_manager_returns_recovery_action_for_missing_required_argument() -> None:
+    skill = FileReadSkill()
+    manager = SkillManager()
+    manager.register(skill)
+
+    result = asyncio.run(manager.invoke("read_file", {}, session_id="s1"))
+
+    assert result.status == "error"
+    assert skill.calls == 0
+    assert "path" in result.error_info
+    assert result.metadata["recovery_action"]["type"] == "ask_user"
+    assert result.metadata["recovery_action"]["reason"] == "missing_required_arguments"
+    assert result.metadata["missing_fields"] == ["path"]
+    assert result.metadata["outcome_class"] == "user_input_error"
+    assert result.metadata["retryable"] is True
+
+
 def test_skill_manager_aclose_closes_registered_skills() -> None:
     class ClosableSkill(EchoSkill):
         def __init__(self) -> None:
@@ -289,7 +306,7 @@ def test_skill_manager_records_circuit_breaker_success_and_failure() -> None:
     manager.register(FailingSkill())
 
     success = asyncio.run(manager.invoke("echo", {"text": "ok"}, session_id="s1"))
-    failure = asyncio.run(manager.invoke("always_fail", {}, session_id="s1"))
+    failure = asyncio.run(manager.invoke("always_fail", {"text": "bad"}, session_id="s1"))
 
     assert success.status == "success"
     assert failure.status == "error"
