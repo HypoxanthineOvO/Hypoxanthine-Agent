@@ -3,6 +3,12 @@ import type { CoderTaskRow } from "@/composables/useSessionHistory";
 
 defineProps<{
   tasks: CoderTaskRow[];
+  open: boolean;
+}>();
+
+defineEmits<{
+  close: [];
+  open: [];
 }>();
 
 const isAttached = (task: CoderTaskRow): boolean => task.attached === true || task.attached === 1;
@@ -10,12 +16,41 @@ const isDone = (task: CoderTaskRow): boolean => task.done === true || task.done 
 </script>
 
 <template>
-  <aside v-if="tasks.length > 0" class="codex-job-panel" data-testid="codex-job-panel">
+  <button
+    v-if="tasks.length > 0 && !open"
+    type="button"
+    class="codex-job-trigger"
+    data-testid="codex-job-trigger"
+    aria-haspopup="dialog"
+    aria-controls="codex-job-panel"
+    @click="$emit('open')"
+  >
+    <span>Codex Jobs</span>
+    <strong>{{ tasks.length }}</strong>
+  </button>
+
+  <aside
+    v-if="tasks.length > 0 && open"
+    id="codex-job-panel"
+    class="codex-job-panel"
+    data-testid="codex-job-panel"
+    role="dialog"
+    aria-label="Codex Jobs"
+  >
     <header>
       <div>
         <p>Codex Jobs</p>
         <strong>{{ tasks.length }} active/history</strong>
       </div>
+      <button
+        type="button"
+        class="codex-job-close"
+        data-testid="codex-job-close"
+        aria-label="Close Codex Jobs"
+        @click="$emit('close')"
+      >
+        ×
+      </button>
     </header>
     <div class="job-list">
       <article v-for="task in tasks.slice(0, 4)" :key="task.task_id" class="job-row">
@@ -39,9 +74,48 @@ const isDone = (task: CoderTaskRow): boolean => task.done === true || task.done 
   background: color-mix(in srgb, var(--surface) 88%, transparent);
   border: 1px solid color-mix(in srgb, var(--panel-edge) 85%, transparent);
   border-radius: 8px;
+  box-shadow: 0 18px 50px color-mix(in srgb, black 38%, transparent);
   display: grid;
   gap: 0.65rem;
+  max-height: min(520px, calc(100vh - 10rem));
+  overflow: auto;
   padding: 0.75rem;
+  position: absolute;
+  right: 1.2rem;
+  top: 5.8rem;
+  width: min(420px, calc(100% - 2.4rem));
+  z-index: 15;
+}
+
+.codex-job-trigger {
+  align-items: center;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  border: 1px solid color-mix(in srgb, var(--panel-edge) 78%, transparent);
+  border-radius: 999px;
+  box-shadow: 0 12px 32px color-mix(in srgb, black 28%, transparent);
+  color: var(--text);
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 800;
+  gap: 0.45rem;
+  padding: 0.42rem 0.72rem;
+  position: absolute;
+  right: 1.2rem;
+  top: 5.8rem;
+  z-index: 10;
+}
+
+.codex-job-trigger strong {
+  align-items: center;
+  background: color-mix(in srgb, var(--brand) 32%, transparent);
+  border-radius: 999px;
+  display: inline-flex;
+  height: 1.25rem;
+  justify-content: center;
+  min-width: 1.25rem;
+  padding: 0 0.32rem;
 }
 
 header {
@@ -64,6 +138,22 @@ header p {
 
 header strong {
   font-size: 0.88rem;
+}
+
+.codex-job-close {
+  align-items: center;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--panel-edge) 78%, transparent);
+  border-radius: 999px;
+  color: var(--text);
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-size: 1rem;
+  height: 1.8rem;
+  justify-content: center;
+  line-height: 1;
+  width: 1.8rem;
 }
 
 .job-list {
@@ -132,6 +222,17 @@ small {
 }
 
 @media (max-width: 767px) {
+  .codex-job-panel,
+  .codex-job-trigger {
+    right: 1rem;
+    top: 8.25rem;
+  }
+
+  .codex-job-panel {
+    max-height: min(460px, calc(100vh - 11rem));
+    width: calc(100% - 2rem);
+  }
+
   .job-row {
     grid-template-columns: 1fr;
   }

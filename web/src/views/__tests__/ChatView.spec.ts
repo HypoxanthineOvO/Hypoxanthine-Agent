@@ -511,7 +511,7 @@ describe("ChatView", () => {
     expect(wrapper.text()).not.toContain("checking files");
   });
 
-  it("renders codex job status panel from session coder task history", async () => {
+  it("renders codex jobs behind an explicit entry and closeable drawer", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/sessions/main/messages")) {
@@ -559,10 +559,22 @@ describe("ChatView", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "http://localhost:8000/api/sessions/main/coder-tasks?token=test-token",
     );
-    expect(wrapper.text()).toContain("Codex Jobs");
-    expect(wrapper.text()).toContain("task-123");
-    expect(wrapper.text()).toContain("running");
-    expect(wrapper.text()).toContain("/repo/demo");
+    expect(wrapper.get('[data-testid="codex-job-trigger"]').text()).toContain("Codex Jobs");
+    expect(wrapper.find('[data-testid="codex-job-panel"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("task-123");
+
+    await wrapper.get('[data-testid="codex-job-trigger"]').trigger("click");
+    await flushUi();
+
+    expect(wrapper.get('[data-testid="codex-job-panel"]').text()).toContain("task-123");
+    expect(wrapper.get('[data-testid="codex-job-panel"]').text()).toContain("running");
+    expect(wrapper.get('[data-testid="codex-job-panel"]').text()).toContain("/repo/demo");
+
+    await wrapper.get('[data-testid="codex-job-close"]').trigger("click");
+    await flushUi();
+
+    expect(wrapper.find('[data-testid="codex-job-panel"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="codex-job-trigger"]').exists()).toBe(true);
   });
 
   it("paginates long chat history so only the latest messages render initially", async () => {

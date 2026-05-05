@@ -52,6 +52,7 @@ const activeSessionId = ref(resolveInitialSessionId());
 const retryingFailedMessage = ref(false);
 const visibleMessageLimit = ref(MESSAGE_PAGE_SIZE);
 const codexTasks = ref<CoderTaskRow[]>([]);
+const codexJobsOpen = ref(false);
 const { toggleMode } = useThemeMode();
 
 const normalizedApiBase = computed(() => {
@@ -232,6 +233,10 @@ useHotkey([
   {
     combo: "escape",
     handler: () => {
+      if (codexJobsOpen.value) {
+        codexJobsOpen.value = false;
+        return;
+      }
       if (composerExpanded.value) {
         composerExpanded.value = false;
         return;
@@ -281,7 +286,12 @@ onUnmounted(() => {
       @retry="reconnectNow"
     />
 
-    <CodexJobPanel :tasks="codexTasks" />
+    <CodexJobPanel
+      :tasks="codexTasks"
+      :open="codexJobsOpen"
+      @open="codexJobsOpen = true"
+      @close="codexJobsOpen = false"
+    />
 
     <main ref="messagesRef" class="message-list" aria-live="polite">
       <button
@@ -339,6 +349,7 @@ onUnmounted(() => {
   min-height: 0;
   overflow: hidden;
   padding: 1.2rem;
+  position: relative;
   width: 100%;
 }
 .chat-header,
