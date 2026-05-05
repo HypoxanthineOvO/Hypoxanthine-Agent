@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.6.0 - 2026-05-05
+
+### Highlights
+
+- Added robust agent recovery for tool calls and model fallback, including collapsed retryable tool states, user-facing final failure summaries, and clearer tool display names.
+- Added QQ/Weixin/Feishu outbound delivery capability handling, QQ Bot inbound text+image attachment parsing, and the `hypo-agent send` outbound CLI/API path.
+- Added the GPT-Image-2 image generation skill with generation/editing tools, channel intent handling, history tracking, and audit coverage.
+- Added a dedicated Notion Plan skill for HYX 计划通, including structure discovery, academic semester month-year inference, item parsing, dry-run previews, idempotent insertion, and corrected duplicate/month targeting.
+- Added OpenCode/Hypo-Workflow adapter artifacts, architecture notes, acceptance runbooks, and release batching reports.
+
+### Validation
+
+- `uv run pytest -q`: passed.
+- `cd web && npm test -- --run`: 21 files / 110 tests passed.
+- `cd web && npm run build`: passed.
+- `hypo-workflow sync --repair`: completed with `errors:0`; one non-blocking derived warning remains for `.pipeline/reports.compact.md` source discovery.
+- Production health after restart: backend `http://127.0.0.1:8765` and frontend `http://127.0.0.1:5178` returned `200`.
+
 ## v1.5.0-m15-r7 - 2026-04-26
 
 ### Highlights
