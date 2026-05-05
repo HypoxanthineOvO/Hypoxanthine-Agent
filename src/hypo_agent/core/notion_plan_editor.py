@@ -21,16 +21,22 @@ class ParsedPlanItem:
     display_time_range: str
     target_date: date
     sort_key: tuple[int, int, int]
+    important: bool = False
     confidence: float = 1.0
     warnings: list[str] = field(default_factory=list)
 
     @property
     def display_text(self) -> str:
-        return f"{self.display_time_range} {self.title}".strip() if self.display_time_range else self.title
+        return f"{self.title}（{self.display_time_range}）" if self.display_time_range else self.title
+
+    @property
+    def summary_text(self) -> str:
+        text = self.display_text
+        return f"**{text}**" if self.important else text
 
     @property
     def user_text(self) -> str:
-        return f"{self.target_date.month}/{self.target_date.day} {self.display_text}".strip()
+        return f"{self.target_date.month}/{self.target_date.day} {self.summary_text}".strip()
 
 
 @dataclass(slots=True)
@@ -51,6 +57,7 @@ class PlannedInsertion:
     insert_after_block_id: str
     insert_after_title: str
     insert_before_title: str
+    target_semester_title: str = ""
     existing_titles: list[str] = field(default_factory=list)
     skipped_existing: bool = False
 
@@ -58,13 +65,22 @@ class PlannedInsertion:
     def insertion_text(self) -> str:
         if self.skipped_existing:
             return "已存在，跳过重复写入"
-        if self.insert_after_title and self.insert_before_title:
-            return f"位于 {self.insert_after_title} 与 {self.insert_before_title} 之间"
-        if self.insert_after_title:
-            return f"位于 {self.insert_after_title} 之后"
         if self.insert_before_title:
-            return f"位于 {self.insert_before_title} 之前"
-        return "位于当天列表开头"
+            return f"{self.insert_before_title}之前"
+        if self.insert_after_title:
+            return f"{self.insert_after_title}之后"
+        return "当天列表开头"
+
+    @property
+    def location_text(self) -> str:
+        location_parts = [
+            self.target_semester_title.strip(),
+            self.target_month_title.strip(),
+            self.target_date_heading.strip(),
+        ]
+        location = "/".join(part for part in location_parts if part)
+        insertion = self.insertion_text.strip()
+        return f"{location} {insertion}".strip() if insertion else location
 
 
 @dataclass(slots=True)
@@ -75,7 +91,7 @@ class PlanPreviewResult:
     @property
     def human_summary(self) -> str:
         lines = [
-            f"{plan.item.user_text} -> {plan.target_month_title} / {plan.target_date_heading} / {plan.insertion_text}"
+            f"{plan.item.user_text} -> {plan.location_text}"
             for plan in self.planned
         ]
         lines.extend(
@@ -104,7 +120,7 @@ class PlanAddResult:
                 sections.append(f"计划通已存在，跳过重复：{plan.item.user_text}")
             else:
                 sections.append(f"已加入计划通：{plan.item.user_text}")
-            sections.append(f"插入位置：\n{plan.target_month_title} / {plan.target_date_heading} / {plan.insertion_text}")
+            sections.append(f"插入位置：{plan.location_text}")
             if plan.existing_titles:
                 sections.append("当天日程：\n" + "\n".join(f"- {title}" for title in plan.existing_titles))
         if self.failed_items:
@@ -120,8 +136,11 @@ _DATE_PREFIX_RE = re.compile(
     r"^\s*(?:(?P<year>\d{4})[/-])?(?P<month>\d{1,2})(?:[/-]|月)(?P<day>\d{1,2})(?:日)?\s*(?P<rest>.*)$"
 )
 _TIME_RANGE_RE = re.compile(
-    r"^(?P<start>\d{1,2}:\d{2})\s*[-~～]\s*(?:(?P<end_month>\d{1,2})(?:[/-]|月)(?P<end_day>\d{1,2})(?:日)?\s*)?(?P<end>\d{1,2}:\d{2})\s*(?P<title>.+)$"
+    r"^(?P<period>上午|下午|晚上|早上|中午|凌晨)?\s*(?P<start>\d{1,2}:\d{2})\s*(?P<sep>[-~～–—])\s*"
+    r"(?:(?P<end_month>\d{1,2})(?:[/-]|月)(?P<end_day>\d{1,2})(?:日)?\s*)?"
+    r"(?P<end>\d{1,2}:\d{2})\s*[,，、]?\s*(?P<title>.+)$"
 )
+_TIME_POINT_RE = re.compile(r"^(?P<period>上午|下午|晚上|早上|中午|凌晨)?\s*(?P<time>\d{1,2}:\d{2})\s*[,，、]?\s*(?P<title>.+)$")
 _TIME_RE = re.compile(r"(?P<hour>\d{1,2}):(?P<minute>\d{2})")
 
 
@@ -167,19 +186,31 @@ def _parse_plan_item_line(line: str, *, default_year: int) -> ParsedPlanItem | N
     end_date: date | None = None
     display_time = ""
     title = rest
+    rest, important = _extract_importance(rest)
     time_match = _TIME_RANGE_RE.match(rest)
     if time_match is not None:
-        start_time = _normalize_time(str(time_match.group("start") or ""))
-        end_time = _normalize_time(str(time_match.group("end") or ""))
+        period = str(time_match.group("period") or "")
+        start_time = _normalize_time(str(time_match.group("start") or ""), period=period)
+        end_time = _normalize_time(str(time_match.group("end") or ""), period=period)
+        separator = str(time_match.group("sep") or "-")
         end_month = time_match.group("end_month")
         end_day = time_match.group("end_day")
         if end_month and end_day:
             end_date = date(year, int(end_month), int(end_day))
-            display_time = f"{start_time}-{int(end_month)}/{int(end_day)} {end_time}"
+            display_time = f"{start_time}{separator}{int(end_month)}/{int(end_day)} {end_time}"
         else:
             end_date = start_date
-            display_time = f"{start_time}-{end_time}"
+            display_time = f"{start_time}{separator}{end_time}"
         title = str(time_match.group("title") or "").strip()
+    else:
+        point_match = _TIME_POINT_RE.match(rest)
+        if point_match is not None:
+            start_time = _normalize_time(str(point_match.group("time") or ""), period=str(point_match.group("period") or ""))
+            display_time = start_time
+            title = str(point_match.group("title") or "").strip()
+    title, title_important = _extract_importance(title)
+    important = important or title_important
+    title = _normalize_title_text(title)
     if not title:
         return None
     return ParsedPlanItem(
@@ -192,14 +223,46 @@ def _parse_plan_item_line(line: str, *, default_year: int) -> ParsedPlanItem | N
         display_time_range=display_time,
         target_date=start_date,
         sort_key=_sort_key(start_time, index_hint=0),
+        important=important,
     )
 
 
-def _normalize_time(value: str) -> str:
+def _extract_importance(text: str) -> tuple[str, bool]:
+    value = str(text or "").strip()
+    important = False
+    patterns = [
+        r"(?<!\S)[\[\(（【]?重要[\]\)）】]?[！!。.]*(?!\S)",
+        r"^[\[\(（【]?重要[\]\)）】]?[！!。.]*[：:\s，,、]+",
+        r"[\s，,、]+[\[\(（【]?重要[\]\)）】]?[！!。.]*$",
+    ]
+    for pattern in patterns:
+        next_value = re.sub(pattern, " ", value).strip()
+        if next_value != value:
+            important = True
+            value = next_value
+    return re.sub(r"\s+", " ", value).strip(), important
+
+
+def _normalize_title_text(text: str) -> str:
+    value = re.sub(r"\s+", " ", str(text or "").strip())
+    value = re.sub(r"(?<=[\u4e00-\u9fff])(?=[A-Za-z])", " ", value)
+    value = re.sub(r"(?<=[A-Za-z])(?=[\u4e00-\u9fff])", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _normalize_time(value: str, *, period: str = "") -> str:
     match = _TIME_RE.match(str(value or "").strip())
     if match is None:
         return str(value or "").strip()
-    return f"{int(match.group('hour')):02d}:{int(match.group('minute')):02d}"
+    hour = int(match.group("hour"))
+    minute = int(match.group("minute"))
+    if period in {"下午", "晚上"} and hour < 12:
+        hour += 12
+    elif period == "中午" and hour < 11:
+        hour += 12
+    elif period == "凌晨" and hour == 12:
+        hour = 0
+    return f"{hour}:{minute:02d}"
 
 
 def _sort_key(time_text: str, *, index_hint: int) -> tuple[int, int, int]:
@@ -255,7 +318,7 @@ class NotionPlanEditor:
                     )
                 await self._client.append_blocks(
                     plan.target_month_page_id,
-                    [_todo_block(plan.item.display_text)],
+                    [_todo_block(plan.item.display_text, bold=plan.item.important)],
                     after=plan.insert_after_block_id or None,
                 )
                 self._written_keys.add((plan.item.target_date.isoformat(), _normalize_item_text(plan.item.display_text)))
@@ -374,6 +437,7 @@ class NotionPlanEditor:
             insert_after_block_id=after_id,
             insert_after_title=after_title,
             insert_before_title=before_title,
+            target_semester_title=str(month_info.get("semester") or ""),
             existing_titles=existing,
             skipped_existing=normalized_key in self._written_keys
             or any(_normalize_item_text(title) == normalized_key[1] for title in existing),
@@ -594,16 +658,16 @@ def _block_text(block: dict[str, Any]) -> str:
     return "".join(parts).strip()
 
 
-def _todo_block(text: str) -> dict[str, Any]:
-    return {"object": "block", "type": "to_do", "to_do": {"checked": False, "rich_text": [_rich_text(text)]}}
+def _todo_block(text: str, *, bold: bool = False) -> dict[str, Any]:
+    return {"object": "block", "type": "to_do", "to_do": {"checked": False, "rich_text": [_rich_text(text, bold=bold)]}}
 
 
 def _heading_block(text: str) -> dict[str, Any]:
     return {"object": "block", "type": "heading_1", "heading_1": {"rich_text": [_rich_text(text)]}}
 
 
-def _rich_text(text: str) -> dict[str, Any]:
-    return {"type": "text", "text": {"content": text}, "plain_text": text, "annotations": {}}
+def _rich_text(text: str, *, bold: bool = False) -> dict[str, Any]:
+    return {"type": "text", "text": {"content": text}, "plain_text": text, "annotations": {"bold": bold}}
 
 
 def _normalize_item_text(text: str) -> str:

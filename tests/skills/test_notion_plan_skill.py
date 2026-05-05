@@ -66,5 +66,5 @@ def test_notion_plan_add_items_returns_replay_summary(tmp_path) -> None:
     result = asyncio.run(_run())
 
     assert result.status == "success"
-    assert "已加入计划通：5/8 10:30-11:30 普拉提训练" in str(result.result)
-    assert "插入位置：\n2026年5月 / 5月8日" in str(result.result)
+    assert "已加入计划通：5/8 普拉提训练（10:30-11:30）" in str(result.result)
+    assert "插入位置：2026年5月/5月8日" in str(result.result)

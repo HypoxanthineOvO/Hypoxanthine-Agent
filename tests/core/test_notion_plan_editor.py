@@ -14,12 +14,12 @@ class RecordingPlanClient:
         self.children: dict[str, list[dict]] = {
             "plan": [
                 {"id": "term-heading", "type": "heading_1", "heading_1": {"rich_text": [_rt("研一下")]}},
-                {"id": "month-may", "type": "child_page", "child_page": {"title": "2026年5月"}},
+                {"id": "month-may", "type": "child_page", "child_page": {"title": "五月"}},
             ],
             "month-may": [
                 {"id": "h-0508", "type": "heading_1", "heading_1": {"rich_text": [_rt("5月8日")]}},
-                {"id": "todo-0900", "type": "to_do", "to_do": {"checked": False, "rich_text": [_rt("09:00-10:00 组会")]}},
-                {"id": "todo-1400", "type": "to_do", "to_do": {"checked": False, "rich_text": [_rt("14:00-15:00 阅读")]}},
+                {"id": "todo-0900", "type": "to_do", "to_do": {"checked": False, "rich_text": [_rt("组会（09:00-10:00）")]}},
+                {"id": "todo-1400", "type": "to_do", "to_do": {"checked": False, "rich_text": [_rt("阅读（14:00-15:00）")]}},
                 {"id": "todo-note", "type": "to_do", "to_do": {"checked": False, "rich_text": [_rt("整理材料")]}},
                 {"id": "h-0509", "type": "heading_1", "heading_1": {"rich_text": [_rt("5月9日")]}},
             ],
@@ -69,18 +69,24 @@ def test_parse_plan_items_supports_multi_item_no_time_and_cross_day() -> None:
 
     result = parse_plan_items(
         "5/8 10:30-11:30 普拉提训练\n"
+        "5/8 11:00 抗焦虑药\n"
+        "5月9日上午9:30–10:15，信院国际评估Student Poster讲解，重要！！\n"
         "5/8 整理材料\n"
         "5/8 22:00-5/9 01:00 写作",
         default_year=2026,
     )
 
     assert result.failed_items == []
-    assert [(item.title, item.target_date.isoformat(), item.display_time_range) for item in result.items] == [
-        ("普拉提训练", "2026-05-08", "10:30-11:30"),
-        ("整理材料", "2026-05-08", ""),
-        ("写作", "2026-05-08", "22:00-5/9 01:00"),
+    assert [(item.title, item.target_date.isoformat(), item.display_time_range, item.display_text) for item in result.items] == [
+        ("普拉提训练", "2026-05-08", "10:30-11:30", "普拉提训练（10:30-11:30）"),
+        ("抗焦虑药", "2026-05-08", "11:00", "抗焦虑药（11:00）"),
+        ("信院国际评估 Student Poster 讲解", "2026-05-09", "9:30–10:15", "信院国际评估 Student Poster 讲解（9:30–10:15）"),
+        ("整理材料", "2026-05-08", "", "整理材料"),
+        ("写作", "2026-05-08", "22:00-5/9 1:00", "写作（22:00-5/9 1:00）"),
     ]
-    assert result.items[1].sort_key > result.items[0].sort_key
+    assert result.items[2].important is True
+    assert result.items[2].user_text == "5/9 **信院国际评估 Student Poster 讲解（9:30–10:15）**"
+    assert result.items[3].sort_key > result.items[0].sort_key
 
 
 def test_plan_editor_preview_locates_insert_position_and_missing_date() -> None:
@@ -103,12 +109,12 @@ def test_plan_editor_preview_locates_insert_position_and_missing_date() -> None:
     assert result.planned[0].target_month_page_id == "month-may"
     assert result.planned[0].date_block_id == "h-0508"
     assert result.planned[0].insert_after_block_id == "todo-0900"
-    assert result.planned[0].insert_before_title == "14:00-15:00 阅读"
-    assert "位于 09:00-10:00 组会 与 14:00-15:00 阅读 之间" in result.human_summary
+    assert result.planned[0].insert_before_title == "阅读（14:00-15:00）"
+    assert "5/8 普拉提训练（10:30-11:30） -> 2026年5月/5月8日 阅读（14:00-15:00）之前" in result.human_summary
 
     first = asyncio.run(editor.preview_add_items(parse_plan_items("5/8 08:00-09:00 跑步", default_year=2026).items))
     assert first.planned[0].insert_after_block_id == "h-0508"
-    assert first.planned[0].insert_before_title == "09:00-10:00 组会"
+    assert first.planned[0].insert_before_title == "组会（09:00-10:00）"
 
     missing_date = asyncio.run(editor.preview_add_items(parse_plan_items("5/10 08:00-09:00 跑步", default_year=2026).items))
     assert missing_date.planned[0].date_needs_create is True
@@ -124,7 +130,7 @@ def test_plan_editor_writes_successful_items_and_skips_duplicates(tmp_path) -> N
         json.dumps(
             {
                 "structure_version": 2,
-                "month_pages": [{"year": 2026, "month": 5, "page_id": "month-may", "title": "2026年5月"}],
+                "month_pages": [{"year": 2026, "month": 5, "page_id": "month-may", "title": "五月", "semester": "研一下"}],
                 "date_heading_format": "{month}月{day}日",
             },
             ensure_ascii=False,
@@ -138,25 +144,30 @@ def test_plan_editor_writes_successful_items_and_skips_duplicates(tmp_path) -> N
         default_year=2026,
     )
 
-    result = asyncio.run(editor.add_items(parse_plan_items("5/8 10:30-11:30 普拉提训练\nbad line", default_year=2026)))
+    result = asyncio.run(editor.add_items(parse_plan_items("5/8 10:30-11:30 普拉提训练\n5/8 11:00 重要 抗焦虑药\nbad line", default_year=2026)))
 
-    assert result.success_count == 1
+    assert result.success_count == 2
     assert result.failure_count == 1
     assert client.append_calls[0]["page_id"] == "month-may"
     assert client.append_calls[0]["after"] == "todo-0900"
     inserted = client.append_calls[0]["blocks"][0]
     assert inserted["type"] == "to_do"
-    assert inserted["to_do"]["rich_text"][0]["text"]["content"] == "10:30-11:30 普拉提训练"
-    assert "已加入计划通：5/8 10:30-11:30 普拉提训练" in result.human_summary
+    assert inserted["to_do"]["rich_text"][0]["text"]["content"] == "普拉提训练（10:30-11:30）"
+    important = client.append_calls[1]["blocks"][0]
+    assert important["to_do"]["rich_text"][0]["text"]["content"] == "抗焦虑药（11:00）"
+    assert important["to_do"]["rich_text"][0]["annotations"]["bold"] is True
+    assert "已加入计划通：5/8 普拉提训练（10:30-11:30）" in result.human_summary
+    assert "已加入计划通：5/8 **抗焦虑药（11:00）**" in result.human_summary
+    assert "插入位置：研一下/五月/5月8日 阅读（14:00-15:00）之前" in result.human_summary
 
     duplicate = asyncio.run(editor.add_items(parse_plan_items("5/8 10:30-11:30 普拉提训练", default_year=2026)))
     assert duplicate.skipped_count == 1
-    assert len(client.append_calls) == 1
+    assert len(client.append_calls) == 2
     assert duplicate.human_summary == "\n\n".join(
         [
-            "计划通已存在，跳过重复：5/8 10:30-11:30 普拉提训练",
-            "插入位置：\n2026年5月 / 5月8日 / 已存在，跳过重复写入",
-            "当天日程：\n- 09:00-10:00 组会\n- 14:00-15:00 阅读\n- 整理材料",
+            "计划通已存在，跳过重复：5/8 普拉提训练（10:30-11:30）",
+            "插入位置：研一下/五月/5月8日 已存在，跳过重复写入",
+            "当天日程：\n- 组会（09:00-10:00）\n- 阅读（14:00-15:00）\n- 整理材料",
         ]
     )
 
