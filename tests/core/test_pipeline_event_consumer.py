@@ -764,7 +764,7 @@ def test_pipeline_event_consumer_emits_error_for_unhandled_user_message_exceptio
         assert streamed[-1] == {
             "type": "error",
             "code": "LLM_RUNTIME_ERROR",
-            "message": "LLM 调用失败，请检查配置或稍后重试",
+            "message": "模型调用失败：bad upstream payload",
             "retryable": True,
             "session_id": "main",
         }

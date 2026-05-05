@@ -246,6 +246,71 @@ def test_qqbot_ws_client_dispatches_c2c_messages_to_pipeline(monkeypatch) -> Non
     assert inbound.metadata["qq"]["msg_id"] == "msg-001"
 
 
+def test_qqbot_ws_client_dispatches_c2c_text_and_image_to_pipeline(monkeypatch) -> None:
+    clear_qqbot_token_cache()
+    service = _service()
+    pipeline = QueuePipelineStub()
+    connection = FakeConnection(
+        [
+            {"op": 10, "d": {"heartbeat_interval": 60000}},
+            {"op": 0, "t": "READY", "s": 1, "d": {"session_id": "session-1"}},
+            {
+                "op": 0,
+                "t": "C2C_MESSAGE_CREATE",
+                "s": 2,
+                "d": {
+                    "id": "msg-img-001",
+                    "content": "<@!1029384756> 这图是什么",
+                    "timestamp": "2026-03-26T10:00:00+08:00",
+                    "author": {"user_openid": "OPENID-C2C-001"},
+                    "attachments": [
+                        {
+                            "url": "https://cdn.qq.test/cat.png",
+                            "filename": "cat.png",
+                            "content_type": "image/png",
+                        }
+                    ],
+                },
+            },
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/getAppAccessToken"):
+            return httpx.Response(200, json={"access_token": "token-1", "expires_in": 7200})
+        if request.url.path.endswith("/gateway"):
+            return httpx.Response(200, json={"url": "wss://gateway.qq.test"})
+        if str(request.url) == "https://cdn.qq.test/cat.png":
+            return httpx.Response(200, content=b"fake-image")
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    transport = httpx.MockTransport(handler)
+
+    class MockAsyncClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("hypo_agent.channels.qq_bot_channel.httpx.AsyncClient", MockAsyncClient)
+    monkeypatch.setattr(
+        "hypo_agent.gateway.qqbot_ws_client.websockets.connect",
+        lambda url, *args, **kwargs: connection,
+    )
+
+    client = QQBotWebSocketClient(
+        service_getter=lambda: service,
+        pipeline_getter=lambda: pipeline,
+    )
+
+    asyncio.run(client.run_once())
+
+    inbound = pipeline.inbounds[0]
+    assert inbound.text == "这图是什么"
+    assert len(inbound.attachments) == 1
+    assert inbound.attachments[0].type == "image"
+    assert inbound.metadata["qq"]["attachments_count"] == 1
+
+
 def test_qqbot_ws_client_resumes_existing_session(monkeypatch) -> None:
     clear_qqbot_token_cache()
     connection = FakeConnection([{"op": 10, "d": {"heartbeat_interval": 60000}}])

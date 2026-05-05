@@ -146,6 +146,118 @@ def test_qqbot_handle_event_accepts_c2c_message_and_strips_mentions(tmp_path: Pa
     assert inbound.channel == "qq"
     assert inbound.sender_id == "OPENID-C2C-001"
     assert inbound.metadata["qq"]["msg_id"] == "msg-001"
+    assert inbound.attachments == []
+
+
+def test_qqbot_handle_event_accepts_c2c_text_and_image(tmp_path: Path, monkeypatch) -> None:
+    from hypo_agent.channels.qq_bot_channel import QQBotChannelService
+
+    _, pipeline = _build_app(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://cdn.qq.test/cat.png"
+        return httpx.Response(200, content=b"fake-image")
+
+    class MockAsyncClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("hypo_agent.channels.qq_bot_channel.httpx.AsyncClient", MockAsyncClient)
+
+    payload = {
+        "op": 0,
+        "t": "C2C_MESSAGE_CREATE",
+        "d": {
+            "id": "msg-img-001",
+            "content": "<@!1029384756> 这图是什么",
+            "timestamp": "2026-03-26T10:00:00+08:00",
+            "author": {"user_openid": "OPENID-C2C-001"},
+            "attachments": [
+                {
+                    "url": "https://cdn.qq.test/cat.png",
+                    "filename": "cat.png",
+                    "content_type": "image/png",
+                }
+            ],
+        },
+    }
+    service = QQBotChannelService(app_id="1029384756", app_secret="bot-secret-xyz")
+
+    handled = asyncio.run(service.handle_event(payload, pipeline=pipeline))
+
+    assert handled is True
+    inbound = pipeline.inbounds[0]
+    assert inbound.text == "这图是什么"
+    assert len(inbound.attachments) == 1
+    assert inbound.attachments[0].type == "image"
+    assert inbound.attachments[0].filename == "cat.png"
+    assert Path(inbound.attachments[0].url).read_bytes() == b"fake-image"
+    assert inbound.metadata["qq"]["attachments_count"] == 1
+
+
+def test_qqbot_handle_event_accepts_image_without_text(tmp_path: Path, monkeypatch) -> None:
+    from hypo_agent.channels.qq_bot_channel import QQBotChannelService
+
+    _, pipeline = _build_app(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("download unavailable", request=request)
+
+    class MockAsyncClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("hypo_agent.channels.qq_bot_channel.httpx.AsyncClient", MockAsyncClient)
+
+    payload = {
+        "op": 0,
+        "t": "C2C_MESSAGE_CREATE",
+        "d": {
+            "id": "msg-img-002",
+            "content": "<@!1029384756>",
+            "timestamp": "2026-03-26T10:00:00+08:00",
+            "author": {"user_openid": "OPENID-C2C-001"},
+            "attachments": [{"url": "https://cdn.qq.test/cat.png", "filename": "cat.png"}],
+        },
+    }
+    service = QQBotChannelService(app_id="1029384756", app_secret="bot-secret-xyz")
+
+    handled = asyncio.run(service.handle_event(payload, pipeline=pipeline))
+
+    assert handled is True
+    inbound = pipeline.inbounds[0]
+    assert inbound.text == ""
+    assert len(inbound.attachments) == 1
+    assert inbound.attachments[0].url == "https://cdn.qq.test/cat.png"
+    assert inbound.metadata["qq"]["download_failed_attachments"]
+
+
+def test_qqbot_handle_event_records_unresolved_attachment_metadata(tmp_path: Path) -> None:
+    from hypo_agent.channels.qq_bot_channel import QQBotChannelService
+
+    _, pipeline = _build_app(tmp_path)
+    payload = {
+        "op": 0,
+        "t": "C2C_MESSAGE_CREATE",
+        "d": {
+            "id": "msg-img-003",
+            "content": "看一下",
+            "timestamp": "2026-03-26T10:00:00+08:00",
+            "author": {"user_openid": "OPENID-C2C-001"},
+            "attachments": [{"filename": "lost.png", "content_type": "image/png"}],
+        },
+    }
+    service = QQBotChannelService(app_id="1029384756", app_secret="bot-secret-xyz")
+
+    handled = asyncio.run(service.handle_event(payload, pipeline=pipeline))
+
+    assert handled is True
+    inbound = pipeline.inbounds[0]
+    assert inbound.attachments == []
+    assert inbound.metadata["qq"]["unresolved_attachments"][0]["filename"] == "lost.png"
+    assert inbound.metadata["qq"]["attachments_lost"] is True
 
 
 def test_qqbot_webhook_challenge_returns_signed_plain_token(tmp_path: Path) -> None:

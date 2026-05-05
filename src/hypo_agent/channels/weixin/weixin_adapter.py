@@ -17,7 +17,7 @@ from hypo_agent.channels.weixin.crypto import (
     generate_aes_key,
 )
 from hypo_agent.channels.weixin.ilink_client import ILinkAPIError, ILinkClient
-from hypo_agent.core.delivery import DeliveryResult
+from hypo_agent.core.delivery import ChannelCapability, DeliveryResult
 from hypo_agent.core.markdown_capability import WEIXIN_CAPABILITY
 from hypo_agent.core.markdown_splitter import BlockType, split_markdown
 from hypo_agent.core.platform_message_preparation import prepare_message_for_platform
@@ -42,6 +42,13 @@ _WEIXIN_ADAPTER_ERRORS = (
     TypeError,
     ValueError,
 )
+WEIXIN_ATTACHMENT_CAPABILITY = ChannelCapability(
+    channel="weixin",
+    supports_text=True,
+    supported_attachment_types={"image", "file", "video"},
+    max_attachment_bytes=25 * 1024 * 1024,
+    fallback_actions=["send_summary", "fallback_to_link"],
+)
 
 
 class WeixinAdapter:
@@ -65,6 +72,7 @@ class WeixinAdapter:
         self.send_delay_seconds = max(0.0, float(send_delay_seconds))
         self.markdown_enabled = bool(markdown_enabled)
         self.capability = WEIXIN_CAPABILITY
+        self.attachment_capability = WEIXIN_ATTACHMENT_CAPABILITY
         self._sleep = sleep_func
         self._on_message_sent = on_message_sent
         self._last_context_token = ""
@@ -825,25 +833,33 @@ class WeixinAdapter:
         segments: list[dict[str, Any]],
         *,
         target_user_id: str,
-    ) -> list[dict[str, Any]]:
-        item_list: list[dict[str, Any]] = []
+    ) -> list[list[dict[str, Any]]]:
+        batches: list[list[dict[str, Any]]] = []
+        current_batch: list[dict[str, Any]] = []
+
+        def flush_batch() -> None:
+            nonlocal current_batch
+            if current_batch:
+                batches.append(current_batch)
+                current_batch = []
+
         for segment in segments:
             segment_type = str(segment.get("type") or "").strip().lower()
             if segment_type == "text":
                 text = str(segment.get("text") or "")
                 for chunk in self._split_message(text, limit=self.message_limit):
                     if chunk.strip():
-                        item_list.append({"type": 1, "text_item": {"text": chunk}})
+                        current_batch.append({"type": 1, "text_item": {"text": chunk}})
                 continue
             if segment_type == "image":
                 raw = str(segment.get("source") or "").strip()
                 if not raw:
                     fallback_text = str(segment.get("fallback_text") or "").strip()
                     if fallback_text:
-                        item_list.append({"type": 1, "text_item": {"text": fallback_text}})
+                        current_batch.append({"type": 1, "text_item": {"text": fallback_text}})
                     continue
                 try:
-                    item_list.append(
+                    current_batch.append(
                         await self._build_image_item(
                             image_ref=raw,
                             target_user_id=target_user_id,
@@ -851,12 +867,12 @@ class WeixinAdapter:
                     )
                 except _WEIXIN_ADAPTER_ERRORS:
                     fallback_text = str(segment.get("fallback_text") or "").strip() or self._image_fallback_text(raw)
-                    item_list.append({"type": 1, "text_item": {"text": fallback_text}})
+                    current_batch.append({"type": 1, "text_item": {"text": fallback_text}})
                 continue
             if segment_type == "file":
                 label = str(segment.get("name") or Path(str(segment.get("source") or "")).name or "file").strip()
                 try:
-                    item_list.append(
+                    current_batch.append(
                         await self._build_file_item(
                             file_ref=str(segment.get("source") or "").strip(),
                             filename=label,
@@ -864,8 +880,9 @@ class WeixinAdapter:
                         )
                     )
                 except _WEIXIN_ADAPTER_ERRORS:
-                    item_list.append({"type": 1, "text_item": {"text": f"[文件] {label}"}})
-        return item_list
+                    current_batch.append({"type": 1, "text_item": {"text": f"[文件] {label}"}})
+        flush_batch()
+        return batches
 
     async def _build_image_item(
         self,

@@ -375,11 +375,12 @@ def test_weixin_adapter_sends_text_plus_image_attachment_for_qr_handoff(tmp_path
         assert len(client.sent_images) == 1
         assert client.sent_images[0]["to_user_id"] == "user@im.wechat"
         assert client.sent_images[0]["encrypt_query_param"] == "download-param-1"
-        assert len(client.raw_messages) == 2
+        assert len(client.raw_messages) == 1
         assert client.raw_messages[0]["item_list"] == [
-            {"type": 1, "text_item": {"text": "已自动切换到浏览器二维码，请扫描新二维码。"}}
+            {"type": 1, "text_item": {"text": "已自动切换到浏览器二维码，请扫描新二维码。"}},
+            client.raw_messages[0]["item_list"][1],
         ]
-        assert client.raw_messages[1]["item_list"][0]["type"] == 2
+        assert client.raw_messages[0]["item_list"][1]["type"] == 2
 
     asyncio.run(_run())
 

@@ -218,6 +218,10 @@ class NotionServiceConfig(BaseModel):
     integration_secret: str
     default_workspace: str = ""
     todo_database_id: str = ""
+    plan_page_id: str = ""
+    plan_title: str = "HYX的计划通"
+    plan_root_title: str = ""
+    plan_semester_title: str = ""
     proxy_url: str = ""
     timeout_ms: int = Field(default=60_000, ge=1000)
     api_timeout_seconds: float = Field(default=30.0, ge=1.0)

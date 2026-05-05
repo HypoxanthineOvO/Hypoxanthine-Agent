@@ -11,7 +11,7 @@ import sqlite3
 import shutil
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import structlog
@@ -53,6 +53,7 @@ from hypo_agent.core.model_router import ModelRouter
 from hypo_agent.core.antigravity_compat import log_antigravity_tool_name_audit
 from hypo_agent.core.narration_observer import NarrationObserver, is_local_vllm_model, probe_local_vllm_model
 from hypo_agent.core.output_compressor import OutputCompressor
+from hypo_agent.core.outbound_send import OutboundSendRequest, OutboundSendService
 from hypo_agent.core.pipeline import ChatPipeline
 from hypo_agent.core.persona import PersonaManager
 from hypo_agent.core.scheduler import SchedulerService
@@ -77,6 +78,7 @@ from hypo_agent.gateway.memory_api import router as memory_api_router
 from hypo_agent.gateway.sessions_api import router as sessions_api_router
 from hypo_agent.gateway.qqbot_ws_client import QQBotWebSocketClient
 from hypo_agent.gateway.upload_api import router as upload_api_router
+from hypo_agent.gateway.auth import require_api_token
 from hypo_agent.gateway.middleware import WsTokenAuthMiddleware
 from hypo_agent.gateway.qq_ws import router as qq_ws_router
 from hypo_agent.gateway.qq_ws_client import NapCatWebSocketClient
@@ -104,10 +106,12 @@ from hypo_agent.skills import (
     ExportSkill,
     FileSystemSkill,
     HeartbeatSnapshotSkill,
+    ImageGenSkill,
     InfoPortalSkill,
     InfoReachSkill,
     LogInspectorSkill,
     MemorySkill,
+    NotionPlanSkill,
     NotionSkill,
     ProbeSkill,
     ReminderSkill,
@@ -400,6 +404,21 @@ def _register_enabled_skills(
         except ValueError as exc:
             logger.warning("notion_skill.disabled", reason=str(exc))
 
+    if "notion_plan" in enabled_skills and notion_skill is not None:
+        try:
+            plan_cfg = getattr(notion_skill, "_plan_config", {})
+            _register(
+                NotionPlanSkill(
+                    notion_client=getattr(notion_skill, "_client"),
+                    plan_page_id=str(plan_cfg.get("plan_page_id") or ""),
+                    plan_title=str(plan_cfg.get("plan_title") or "HYX的计划通"),
+                    root_title=str(plan_cfg.get("plan_root_title") or ""),
+                    semester_title=str(plan_cfg.get("plan_semester_title") or ""),
+                )
+            )
+        except (AttributeError, ValueError) as exc:
+            logger.warning("notion_plan_skill.disabled", reason=str(exc))
+
     if "log_inspector" in enabled_skills and structured_store is not None:
         _register(
             LogInspectorSkill(
@@ -494,6 +513,9 @@ def _register_enabled_skills(
 
     if "memory" in enabled_skills and structured_store is not None:
         _register(MemorySkill(structured_store=structured_store))
+
+    if "image_gen" in enabled_skills:
+        _register(ImageGenSkill())
 
     logger.info(
         "skills.registered",
@@ -1543,6 +1565,27 @@ def create_app(
     @app.get("/api/health")
     async def api_health() -> dict[str, Any]:
         return _health_payload(app)
+
+    @app.post("/api/outbound/send")
+    async def api_outbound_send(request: Request) -> dict[str, Any]:
+        require_api_token(request)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            payload = {}
+        service = OutboundSendService(dispatcher=app.state.channel_relay)
+        result = await service.send(
+            OutboundSendRequest(
+                text=str(payload.get("text") or ""),
+                images=[str(item) for item in (payload.get("images") or [])],
+                files=[str(item) for item in (payload.get("files") or [])],
+                channels=[str(item) for item in (payload.get("channels") or [])],
+                dry_run=bool(payload.get("dry_run")),
+                session_id=str(payload.get("session_id") or "main"),
+                recipient=str(payload.get("recipient") or "hyx"),
+                metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+            )
+        )
+        return result.to_payload()
 
     def qq_runtime_connected() -> bool:
         service = getattr(app.state, "qq_channel_service", None)

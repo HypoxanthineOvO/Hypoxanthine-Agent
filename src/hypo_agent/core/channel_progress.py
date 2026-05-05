@@ -7,63 +7,10 @@ from typing import Any
 import structlog
 
 from hypo_agent.core.config_loader import load_narration_config
+from hypo_agent.core.tool_display import summarize_tool_failure, tool_display
 from hypo_agent.core.tool_narration import render_tool_narration
 
 logger = structlog.get_logger("hypo_agent.core.channel_progress")
-
-_TOOL_STATUS_TEMPLATES: dict[str, dict[str, str]] = {
-    "create_reminder": {
-        "start": "🔔 正在创建提醒...",
-        "ok": "✅ 提醒创建成功",
-        "fail": "❌ 创建提醒失败：{error}",
-    },
-    "list_reminders": {
-        "start": "📋 正在查询提醒列表...",
-        "ok": "📋 提醒列表已获取",
-        "fail": "❌ 查询提醒失败：{error}",
-    },
-    "delete_reminder": {
-        "start": "🗑️ 正在删除提醒...",
-        "ok": "✅ 提醒已删除",
-        "fail": "❌ 删除提醒失败：{error}",
-    },
-    "update_reminder": {
-        "start": "✏️ 正在更新提醒...",
-        "ok": "✅ 提醒已更新",
-        "fail": "❌ 更新提醒失败：{error}",
-    },
-    "snooze_reminder": {
-        "start": "💤 正在延后提醒...",
-        "ok": "✅ 提醒已延后",
-        "fail": "❌ 延后提醒失败：{error}",
-    },
-    "run_code": {
-        "start": "⚡ 正在执行代码...",
-        "ok": "✅ 代码执行完成",
-        "fail": "❌ 代码执行失败：{error}",
-    },
-    "exec_command": {
-        "start": "⚡ 正在执行命令...",
-        "ok": "✅ 命令执行完成",
-        "fail": "❌ 命令执行失败：{error}",
-    },
-    "search_web": {
-        "start": "🔍 正在搜索...",
-        "ok": "🔍 搜索完成",
-        "fail": "❌ 搜索失败：{error}",
-    },
-    "web_search": {
-        "start": "🔍 正在搜索...",
-        "ok": "🔍 搜索完成",
-        "fail": "❌ 搜索失败：{error}",
-    },
-    "_default": {
-        "start": "",
-        "ok": "✅ 处理完成",
-        "fail": "❌ 处理失败：{error}",
-    },
-}
-
 
 @lru_cache(maxsize=1)
 def _narration_config():
@@ -96,7 +43,7 @@ def summarize_channel_progress_event(
         return None, False
 
     tool_name = str(event.get("tool_name") or event.get("tool") or "").strip()
-    templates = _TOOL_STATUS_TEMPLATES.get(tool_name) or _TOOL_STATUS_TEMPLATES["_default"]
+    display = tool_display(str(event.get("display_name") or tool_name))
     narration_config = _narration_config()
 
     if event_type == "tool_call_start":
@@ -110,19 +57,41 @@ def summarize_channel_progress_event(
             )
             if rendered:
                 return rendered, False
-        return templates["start"], False
+        return display.running_text, False
 
     if event_type == "tool_call_result":
         status = str(event.get("status") or "").strip().lower()
         if status != "success":
             error = str(event.get("error") or event.get("error_info") or "处理失败").strip()
-            return templates["fail"].format(error=error), False
+            summary = str(event.get("summary") or "").strip()
+            if summary:
+                return summary, False
+            return summarize_tool_failure(
+                tool_name=tool_name,
+                error=error,
+                outcome_class=str(event.get("outcome_class") or "").strip() or None,
+                attempts=_int_or_none(event.get("attempts")),
+                retryable=event.get("retryable") if isinstance(event.get("retryable"), bool) else None,
+            ), False
         return None, False
 
     if event_type == "tool_call_error":
         if bool(event.get("will_retry")):
             return None, False
         error = str(event.get("error") or "处理失败").strip()
-        return templates["fail"].format(error=error), False
+        return summarize_tool_failure(
+            tool_name=tool_name,
+            error=error,
+            outcome_class=str(event.get("outcome_class") or "").strip() or None,
+            attempts=_int_or_none(event.get("attempts")),
+            retryable=event.get("retryable") if isinstance(event.get("retryable"), bool) else None,
+        ), False
 
     return None, False
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

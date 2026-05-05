@@ -15,7 +15,7 @@ from pathlib import Path
 import random
 import re
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, unquote, urlencode, urlparse
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -23,15 +23,15 @@ import httpx
 import structlog
 
 from hypo_agent.core.channel_progress import summarize_channel_progress_event
-from hypo_agent.core.delivery import DeliveryResult
+from hypo_agent.core.delivery import ChannelCapability, DeliveryResult
 from hypo_agent.core.markdown_capability import QQ_CAPABILITY
 from hypo_agent.core.markdown_splitter import BlockType, split_markdown
 from hypo_agent.core.qq_renderer import QQRenderer
 from hypo_agent.core.qq_text_renderer import downgrade_headings
-from hypo_agent.core.uploads import build_upload_path
+from hypo_agent.core.uploads import build_upload_path, classify_attachment_type, guess_mime_type, sanitize_upload_filename
 from hypo_agent.core.time_utils import normalize_utc_datetime, utc_now
 from hypo_agent.core.unified_message import UnifiedMessage, message_from_unified
-from hypo_agent.models import Message
+from hypo_agent.models import Attachment, Message
 
 logger = structlog.get_logger("hypo_agent.channels.qq_bot")
 _QQ_BOT_DELIVERY_ERRORS = (
@@ -56,6 +56,13 @@ _QQ_BOT_ATTACHMENT_FILE_TYPES = {
     "audio": 3,
     "file": 4,
 }
+QQ_BOT_ATTACHMENT_CAPABILITY = ChannelCapability(
+    channel="qq_bot",
+    supports_text=True,
+    supported_attachment_types={"image", "file", "audio", "video"},
+    max_attachment_bytes=25 * 1024 * 1024,
+    fallback_actions=["fallback_to_link", "send_summary"],
+)
 _markdown_available = True
 
 
@@ -116,6 +123,15 @@ def _extract_markdown_image_ref(markdown_line: str) -> str:
     return content
 
 
+def _filename_from_url(url: str | None) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    name = Path(unquote(parsed.path or "")).name
+    return sanitize_upload_filename(name) if name else ""
+
+
 def _is_markdown_send_denied(exc: httpx.HTTPStatusError) -> bool:
     detail_parts = [str(exc)]
     response = getattr(exc, "response", None)
@@ -145,6 +161,7 @@ class QQBotInboundEvent:
     content: str
     msg_id: str
     timestamp: datetime
+    attachment_descriptors: list[dict[str, Any]] | None = None
     guild_id: str | None = None
     raw_event: dict[str, Any] | None = None
 
@@ -182,6 +199,7 @@ class QQBotChannelService:
         self.markdown_mode = str(markdown_mode or "native").strip().lower() or "native"
         self.markdown_template_id = str(markdown_template_id or "").strip()
         self.capability = QQ_CAPABILITY
+        self.attachment_capability = QQ_BOT_ATTACHMENT_CAPABILITY
         self.image_renderer = image_renderer
         self.renderer = QQRenderer(image_renderer=image_renderer)
         self._last_message_at: datetime | None = None
@@ -258,8 +276,10 @@ class QQBotChannelService:
                 openid=inbound_event.openid,
             )
 
+        attachments, attachment_meta = await self._materialize_inbound_attachments(inbound_event)
         inbound = Message(
             text=inbound_event.content,
+            attachments=attachments,
             sender="user",
             session_id=self.default_session_id,
             channel="qq",
@@ -272,6 +292,7 @@ class QQBotChannelService:
                     "msg_id": inbound_event.msg_id,
                     "openid": inbound_event.openid,
                     "guild_id": inbound_event.guild_id,
+                    **attachment_meta,
                 }
             },
         )
@@ -648,9 +669,139 @@ class QQBotChannelService:
             content=content,
             msg_id=msg_id,
             timestamp=_parse_timestamp(str(data.get("timestamp") or "")),
+            attachment_descriptors=self._extract_inbound_attachment_descriptors(data),
             guild_id=guild_id,
             raw_event=data,
         )
+
+    def _extract_inbound_attachment_descriptors(self, data: Mapping[str, Any]) -> list[dict[str, Any]]:
+        descriptors: list[dict[str, Any]] = []
+
+        raw_attachments = data.get("attachments")
+        if isinstance(raw_attachments, list):
+            for item in raw_attachments:
+                if isinstance(item, Mapping):
+                    descriptor = self._normalize_inbound_attachment_descriptor(item)
+                    if descriptor:
+                        descriptors.append(descriptor)
+
+        for key in ("image", "media", "file_image"):
+            raw = data.get(key)
+            if isinstance(raw, Mapping):
+                descriptor = self._normalize_inbound_attachment_descriptor(raw)
+                if descriptor:
+                    descriptors.append(descriptor)
+            elif isinstance(raw, str) and raw.strip():
+                descriptors.append({"url": raw.strip(), "filename": _filename_from_url(raw), "source": key})
+
+        return descriptors
+
+    def _normalize_inbound_attachment_descriptor(self, item: Mapping[str, Any]) -> dict[str, Any] | None:
+        url = str(
+            item.get("url")
+            or item.get("download_url")
+            or item.get("file_url")
+            or item.get("image_url")
+            or item.get("proxy_url")
+            or ""
+        ).strip()
+        filename = str(
+            item.get("filename")
+            or item.get("name")
+            or item.get("file_name")
+            or _filename_from_url(url)
+            or ""
+        ).strip()
+        mime_type = str(item.get("mime_type") or item.get("content_type") or "").strip()
+        size_raw = item.get("size") if item.get("size") is not None else item.get("size_bytes")
+        try:
+            size_bytes = int(size_raw) if size_raw is not None else None
+        except (TypeError, ValueError):
+            size_bytes = None
+        if not url and not filename and not mime_type:
+            return None
+        return {
+            "url": url,
+            "filename": filename,
+            "mime_type": mime_type,
+            "size_bytes": size_bytes,
+            "raw": dict(item),
+        }
+
+    async def _materialize_inbound_attachments(
+        self,
+        inbound_event: QQBotInboundEvent,
+    ) -> tuple[list[Attachment], dict[str, Any]]:
+        descriptors = list(inbound_event.attachment_descriptors or [])
+        attachments: list[Attachment] = []
+        unresolved: list[dict[str, Any]] = []
+        download_failed: list[dict[str, Any]] = []
+
+        for descriptor in descriptors:
+            raw_url = str(descriptor.get("url") or "").strip()
+            filename = sanitize_upload_filename(
+                str(descriptor.get("filename") or "").strip()
+                or _filename_from_url(raw_url)
+                or "qqbot-attachment.bin"
+            )
+            mime_type = guess_mime_type(filename, str(descriptor.get("mime_type") or "").strip() or None)
+            attachment_type = classify_attachment_type(mime_type=mime_type, filename=filename)
+            size_bytes = descriptor.get("size_bytes")
+            local_url = ""
+            if raw_url and _HTTP_URL_PATTERN.match(raw_url):
+                try:
+                    local_url, size_bytes = await self._download_inbound_attachment(
+                        raw_url,
+                        filename=filename,
+                        declared_size=size_bytes,
+                    )
+                except _QQ_BOT_DELIVERY_ERRORS as exc:
+                    logger.warning("qq_bot.inbound_attachment.download_failed", url=raw_url, error=str(exc))
+                    download_failed.append({"url": raw_url, "error": str(exc)})
+            elif raw_url:
+                local_url = raw_url
+
+            final_url = local_url or raw_url
+            if not final_url:
+                unresolved.append({"filename": filename, "mime_type": mime_type})
+                continue
+            attachments.append(
+                Attachment(
+                    type=attachment_type,
+                    url=final_url,
+                    filename=filename,
+                    mime_type=mime_type,
+                    size_bytes=size_bytes if isinstance(size_bytes, int) else None,
+                )
+            )
+
+        metadata: dict[str, Any] = {"attachments_count": len(attachments)}
+        if unresolved:
+            metadata["unresolved_attachments"] = unresolved
+        if download_failed:
+            metadata["download_failed_attachments"] = download_failed
+        if descriptors and not attachments:
+            metadata["attachments_lost"] = True
+        return attachments, metadata
+
+    async def _download_inbound_attachment(
+        self,
+        url: str,
+        *,
+        filename: str,
+        declared_size: Any,
+    ) -> tuple[str, int | None]:
+        target = build_upload_path(f"qqbot-inbound-{filename}")
+        async with httpx.AsyncClient(timeout=self.request_timeout_seconds) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            content = response.content
+        target.write_bytes(content)
+        if isinstance(declared_size, int):
+            size = declared_size
+        else:
+            size = len(content)
+        return str(target), size
 
     async def _run_pipeline_for_user(
         self,

@@ -421,10 +421,57 @@ export function useChatSocket(options: UseChatSocketOptions) {
     if (summary) {
       return summary;
     }
+    const displayName = payload.display_name?.trim() || humanizeToolName(payload.tool_name);
     if (payload.status === "success") {
-      return `${payload.tool_name} 已完成`;
+      return payload.success_text?.trim() || `${displayName} 已完成`;
     }
-    return `${payload.tool_name} 调用失败`;
+    const attempts = payload.attempts ?? Number(payload.metadata?.attempts ?? 0);
+    const outcome = payload.outcome_class || String(payload.metadata?.outcome_class ?? "");
+    const details = [
+      attempts > 1 ? `已尝试 ${attempts} 次` : "",
+      outcome ? `错误类别：${outcome}` : "",
+      payload.error_info?.trim() || "",
+    ].filter(Boolean);
+    return details.length > 0
+      ? `${displayName} 失败：${details.join("；")}`
+      : `${displayName} 失败`;
+  };
+
+  const humanizeToolName = (toolName: string | undefined): string => {
+    const normalized = String(toolName ?? "").trim();
+    if (!normalized) {
+      return "处理当前任务";
+    }
+    const known: Record<string, string> = {
+      read_file: "读取文件",
+      write_file: "写入文件",
+      list_directory: "查看目录",
+      scan_directory: "扫描目录",
+      exec_command: "执行命令",
+      run_code: "运行代码",
+      web_search: "搜索网页",
+      search_web: "搜索网页",
+      web_read: "阅读网页",
+      get_notion_todo_snapshot: "读取计划通",
+      notion_query_db: "查询 Notion",
+      notion_create_entry: "新建 Notion 记录",
+      notion_update_page: "更新 Notion 页面",
+      notion_export_page_markdown: "导出 Notion 页面",
+      generate_image: "生成图片",
+      edit_image: "编辑图片",
+    };
+    return known[normalized] ?? normalized.split("_").filter(Boolean).join(" ");
+  };
+
+  const toolProgressKey = (
+    payload: ToolCallStartEvent | ToolCallResultEvent | ToolCallErrorEvent,
+  ): string => {
+    const anyPayload = payload as unknown as Record<string, unknown>;
+    const explicit = String(
+      anyPayload.operation_id ?? anyPayload.trace_id ?? anyPayload.tool_call_id ?? "",
+    ).trim();
+    const toolName = "tool_name" in payload ? payload.tool_name : payload.tool;
+    return `tool:${explicit || toolName || "unknown"}`;
   };
 
   const buildProgressItem = (payload: IncomingWsEvent): PipelineProgressItem | null => {
@@ -479,31 +526,30 @@ export function useChatSocket(options: UseChatSocketOptions) {
     }
 
     if (isModelFallbackEvent(payload)) {
-      return {
-        event_type: payload.type,
-        text: `⚠️ ${payload.failed_model} 不可用（${payload.reason}），已切换到 ${payload.fallback_model}`,
-        timestamp: payload.timestamp,
-        status: "warning",
-      };
+      return null;
     }
 
     if (isModelFallbackExhaustedEvent(payload)) {
+      const chain = payload.attempted_chain?.map((attempt) => attempt.model).filter(Boolean).join(" -> ");
       return {
         event_type: payload.type,
-        text: "❌ 所有模型均不可用，请稍后再试",
+        text: payload.user_message?.trim()
+          || (chain ? `模型调用失败：已尝试 ${chain}` : "模型调用失败：所有备用模型均不可用"),
         timestamp: payload.timestamp,
         status: "error",
+        key: `model:${payload.requested_model ?? "fallback"}`,
       };
     }
 
     if (isToolCallStartEvent(payload)) {
+      const displayName = payload.display_name?.trim() || humanizeToolName(payload.tool_name);
       return {
         event_type: payload.type,
-        text: `正在调用 ${payload.tool_name}`,
+        text: payload.running_text?.trim() || `正在调用 ${displayName}`,
         timestamp: payload.timestamp,
         status: "running",
         tool: payload.tool_name,
-        key: `tool:${payload.tool_call_id}`,
+        key: toolProgressKey(payload),
       };
     }
 
@@ -514,19 +560,26 @@ export function useChatSocket(options: UseChatSocketOptions) {
         timestamp: payload.timestamp,
         status: payload.status === "success" ? "success" : "error",
         tool: payload.tool_name,
-        key: `tool:${payload.tool_call_id}`,
+        key: toolProgressKey(payload),
+        attempts: payload.attempts ?? Number(payload.metadata?.attempts ?? 0),
+        outcome_class: payload.outcome_class || String(payload.metadata?.outcome_class ?? ""),
       };
     }
 
     if (isToolCallErrorEvent(payload)) {
+      if (payload.will_retry || payload.retryable === true) {
+        return null;
+      }
+      const displayName = payload.display_name?.trim() || humanizeToolName(payload.tool);
       return {
         event_type: payload.type,
-        text: payload.will_retry
-          ? `${payload.tool} 调用失败，正在重试`
-          : `${payload.tool} 调用失败：${payload.error}`,
+        text: payload.summary?.trim() || `${displayName} 失败：${payload.error}`,
         timestamp: payload.timestamp,
-        status: payload.will_retry ? "running" : "error",
+        status: "error",
         tool: payload.tool,
+        key: toolProgressKey(payload),
+        attempts: payload.attempts,
+        outcome_class: payload.outcome_class,
       };
     }
 
@@ -600,6 +653,9 @@ export function useChatSocket(options: UseChatSocketOptions) {
               retryable: payload.retryable,
               error_code: payload.code,
               error_detail: payload.message,
+              requested_model: payload.requested_model,
+              task_type: payload.task_type,
+              attempted_chain: payload.attempted_chain,
             },
           });
           status.value = "error";

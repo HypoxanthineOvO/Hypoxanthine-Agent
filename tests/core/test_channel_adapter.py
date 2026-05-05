@@ -42,6 +42,47 @@ def test_webui_adapter_preserves_tool_result_fields() -> None:
     assert formatted["session_id"] == "s1"
 
 
+def test_webui_adapter_enriches_tool_start_with_display_name() -> None:
+    adapter = WebUIAdapter()
+    response = RichResponse(
+        tool_calls=[
+            {
+                "tool_name": "read_file",
+                "tool_call_id": "call_1",
+                "arguments": {"path": "missing.md"},
+            }
+        ],
+    )
+
+    formatted = asyncio.run(adapter.format(response, event_type="tool_call_start", session_id="s1"))
+
+    assert formatted["display_name"] == "读取文件"
+    assert formatted["running_text"] == "正在调用 读取文件"
+
+
+def test_webui_adapter_builds_final_tool_failure_summary() -> None:
+    adapter = WebUIAdapter()
+    response = RichResponse(
+        tool_calls=[
+            {
+                "tool_name": "notion_query_db",
+                "tool_call_id": "call_1",
+                "status": "error",
+                "result": None,
+                "error_info": "Could not find property with name or id: Status",
+                "metadata": {"attempts": 3},
+            }
+        ],
+    )
+
+    formatted = asyncio.run(adapter.format(response, event_type="tool_call_result", session_id="s1"))
+
+    assert formatted["display_name"] == "查询 Notion"
+    assert formatted["outcome_class"] == "schema_mismatch"
+    assert formatted["attempts"] == 3
+    assert "已尝试 3 次" in formatted["summary"]
+
+
 def test_webui_adapter_formats_assistant_chunk_from_rich_response() -> None:
     adapter = WebUIAdapter()
     response = RichResponse(text="chunk-1")

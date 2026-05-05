@@ -336,7 +336,7 @@ describe("useChatSocket", () => {
     expect(socket.messages.value).toHaveLength(3);
     const toolMessages = socket.messages.value.filter((message) => message.kind === "tool_call");
     const progressMessage = socket.messages.value.find((message) => message.kind === "pipeline_event");
-    expect(progressMessage?.text).toContain("exec_command 已完成");
+    expect(progressMessage?.text).toContain("执行命令 已完成");
     expect(toolMessages).toHaveLength(2);
     expect(toolMessages[0]?.event_type).toBe("tool_call_start");
     expect(toolMessages[0]?.tool_name).toBe("exec_command");
@@ -567,7 +567,7 @@ describe("useChatSocket", () => {
     );
 
     const progressMessage = socket.messages.value.find((message) => message.kind === "pipeline_event");
-    expect(progressMessage?.text).toContain("正在调用 web_search");
+    expect(progressMessage?.text).toContain("正在调用 搜索网页");
     vi.useRealTimers();
   });
 
@@ -610,8 +610,94 @@ describe("useChatSocket", () => {
     const progressMessage = socket.messages.value.find((message) => message.kind === "pipeline_event");
 
     expect(toolMessages).toHaveLength(1);
-    expect(progressMessage?.text).toContain("正在调用 web_search");
+    expect(progressMessage?.text).toContain("正在调用 搜索网页");
     expect(plainToolStatus).toHaveLength(0);
+  });
+
+  it("keeps retryable tool errors hidden inside the active progress item", () => {
+    const socket = useChatSocket({
+      url: "ws://localhost:8000/ws",
+      token: "abc123",
+      sessionId: ref("main"),
+    });
+    socket.connect();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+    ws.emitMessage(
+      JSON.stringify({
+        type: "tool_call_start",
+        tool_name: "read_file",
+        display_name: "读取文件",
+        tool_call_id: "call-1",
+        arguments: { path: "missing.md" },
+        session_id: "main",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "tool_call_error",
+        tool: "read_file",
+        display_name: "读取文件",
+        error: "File not found",
+        will_retry: true,
+        retryable: true,
+        session_id: "main",
+      }),
+    );
+
+    const progressMessages = socket.messages.value.filter((message) => message.kind === "pipeline_event");
+    expect(progressMessages).toHaveLength(1);
+    expect(progressMessages[0]?.text).toBe("正在调用 读取文件");
+    expect(progressMessages[0]?.text).not.toContain("失败");
+  });
+
+  it("shows one final tool failure summary with display name and attempts", () => {
+    const socket = useChatSocket({
+      url: "ws://localhost:8000/ws",
+      token: "abc123",
+      sessionId: ref("main"),
+    });
+    socket.connect();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) {
+      throw new Error("WebSocket was not created");
+    }
+    ws.emitOpen();
+    ws.emitMessage(
+      JSON.stringify({
+        type: "tool_call_start",
+        tool_name: "notion_query_db",
+        display_name: "查询 Notion",
+        tool_call_id: "call-1",
+        arguments: {},
+        session_id: "main",
+      }),
+    );
+    ws.emitMessage(
+      JSON.stringify({
+        type: "tool_call_result",
+        tool_name: "notion_query_db",
+        display_name: "查询 Notion",
+        tool_call_id: "call-1",
+        status: "error",
+        result: null,
+        error_info: "Could not find property with name or id: Status",
+        metadata: { attempts: 3, outcome_class: "schema_mismatch" },
+        attempts: 3,
+        outcome_class: "schema_mismatch",
+        session_id: "main",
+      }),
+    );
+
+    const progressMessage = socket.messages.value.find((message) => message.kind === "pipeline_event");
+    expect(progressMessage?.text).toContain("查询 Notion 失败");
+    expect(progressMessage?.text).toContain("已尝试 3 次");
+    expect(progressMessage?.text).toContain("schema_mismatch");
   });
 
   it("converts ws error events into retryable error cards for the active session only", () => {

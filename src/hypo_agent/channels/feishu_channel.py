@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 import structlog
 
 from hypo_agent.core.channel_progress import summarize_channel_progress_event
-from hypo_agent.core.delivery import DeliveryResult, combine_delivery_results
+from hypo_agent.core.delivery import ChannelCapability, DeliveryResult, combine_delivery_results
 from hypo_agent.core.feishu_adapter import FeishuAdapter
 from hypo_agent.core.rich_response import RichResponse
 from hypo_agent.core.time_utils import utc_isoformat, utc_now
@@ -24,6 +24,13 @@ from hypo_agent.models import Attachment, Message
 
 logger = structlog.get_logger("hypo_agent.channels.feishu")
 _FEISHU_RUNTIME_ERRORS = (OSError, RuntimeError, TypeError, ValueError)
+FEISHU_ATTACHMENT_CAPABILITY = ChannelCapability(
+    channel="feishu",
+    supports_text=True,
+    supported_attachment_types={"image", "file"},
+    max_attachment_bytes=30 * 1024 * 1024,
+    fallback_actions=["fallback_to_link", "send_summary"],
+)
 
 try:  # pragma: no cover - optional dependency during tests
     import lark_oapi as lark
@@ -165,6 +172,7 @@ class FeishuChannel:
             None if max_reconnect_retries is None else max(1, int(max_reconnect_retries))
         )
         self._adapter = FeishuAdapter()
+        self.attachment_capability = FEISHU_ATTACHMENT_CAPABILITY
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()

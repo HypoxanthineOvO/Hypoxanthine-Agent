@@ -18,6 +18,7 @@ except ImportError:  # pragma: no cover - optional runtime dependency
     OpenAIClientError = None
 
 from hypo_agent.core.pipeline import ChatPipeline
+from hypo_agent.core.model_router import ModelFallbackError
 from hypo_agent.core.time_utils import utc_isoformat, utc_now
 from hypo_agent.models import Message
 
@@ -127,11 +128,23 @@ def _build_error_event(session_id: str, exc: Exception) -> dict[str, object]:
             "session_id": session_id,
         }
 
+    if isinstance(exc, ModelFallbackError):
+        return {
+            "type": "error",
+            "code": "LLM_FALLBACK_EXHAUSTED",
+            "message": exc.user_message(),
+            "retryable": exc.retryable,
+            "session_id": session_id,
+            "requested_model": exc.requested_model,
+            "task_type": exc.task_type,
+            "attempted_chain": exc.attempted_chain,
+        }
+
     if isinstance(exc, (RuntimeError, *_LLM_RUNTIME_ERRORS)):
         return {
             "type": "error",
             "code": "LLM_RUNTIME_ERROR",
-            "message": "LLM 调用失败，请检查配置或稍后重试",
+            "message": f"模型调用失败：{str(exc).strip() or '未返回可用回复，请稍后重试。'}",
             "retryable": True,
             "session_id": session_id,
         }

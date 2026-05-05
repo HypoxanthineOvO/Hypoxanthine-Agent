@@ -42,6 +42,8 @@ export interface PipelineProgressItem {
   status?: string;
   tool?: string;
   key?: string;
+  attempts?: number;
+  outcome_class?: string;
 }
 
 export interface Message {
@@ -147,6 +149,8 @@ export interface ModelFallbackEvent {
   reason: string;
   fallback_model: string;
   requested_model?: string;
+  attempted_chain?: ModelAttempt[];
+  user_message?: string;
   session_id: string;
   timestamp?: string;
 }
@@ -156,8 +160,19 @@ export interface ModelFallbackExhaustedEvent {
   failed_model?: string;
   reason?: string;
   requested_model?: string;
+  attempted_chain?: ModelAttempt[];
+  user_message?: string;
   session_id: string;
   timestamp?: string;
+}
+
+export interface ModelAttempt {
+  model: string;
+  provider?: string | null;
+  error_class?: string;
+  reason?: string;
+  retryable?: boolean;
+  latency_ms?: number;
 }
 
 export interface ToolCallErrorEvent {
@@ -165,6 +180,12 @@ export interface ToolCallErrorEvent {
   tool: string;
   error: string;
   will_retry: boolean;
+  display_name?: string;
+  running_text?: string;
+  summary?: string;
+  attempts?: number;
+  outcome_class?: string;
+  retryable?: boolean;
   iteration?: number;
   session_id: string;
   timestamp?: string;
@@ -175,6 +196,8 @@ export interface ToolCallStartEvent {
   tool_name: string;
   tool_call_id: string;
   arguments: Record<string, unknown>;
+  display_name?: string;
+  running_text?: string;
   session_id: string;
   iteration?: number;
   timestamp?: string;
@@ -188,6 +211,12 @@ export interface ToolCallResultEvent {
   result: unknown;
   error_info: string | null;
   metadata: Record<string, unknown>;
+  display_name?: string;
+  success_text?: string;
+  failure_prefix?: string;
+  attempts?: number;
+  outcome_class?: string;
+  retryable?: boolean;
   session_id: string;
   compressed_meta?: CompressedMeta;
   attachments?: Attachment[];
@@ -203,6 +232,9 @@ export interface WsErrorEvent {
   message: string;
   retryable: boolean;
   session_id: string;
+  requested_model?: string;
+  task_type?: string;
+  attempted_chain?: ModelAttempt[];
 }
 
 export interface NarrationEvent {

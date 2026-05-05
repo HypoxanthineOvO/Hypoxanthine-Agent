@@ -195,13 +195,11 @@ def test_ws_sends_error_event_on_pipeline_runtime_error(app_factory) -> None:
         with client.websocket_connect("/ws?token=test-token") as ws:
             ws.send_json({"text": "hello", "sender": "user", "session_id": "s1"})
             event = ws.receive_json()
-            assert event == {
-                "type": "error",
-                "code": "LLM_RUNTIME_ERROR",
-                "message": "LLM 调用失败，请检查配置或稍后重试",
-                "retryable": True,
-                "session_id": "s1",
-            }
+            assert event["type"] == "error"
+            assert event["code"] == "LLM_RUNTIME_ERROR"
+            assert event["message"] == "模型调用失败：fallback chain exhausted"
+            assert event["retryable"] is True
+            assert event["session_id"] == "s1"
             with pytest.raises(WebSocketDisconnect) as exc_info:
                 ws.receive_json()
             assert exc_info.value.code == 1011
@@ -229,13 +227,12 @@ def test_ws_maps_provider_api_error_to_llm_runtime_error(app_factory) -> None:
         with client.websocket_connect("/ws?token=test-token") as ws:
             ws.send_json({"text": "hello", "sender": "user", "session_id": "s1"})
             event = ws.receive_json()
-            assert event == {
-                "type": "error",
-                "code": "LLM_RUNTIME_ERROR",
-                "message": "LLM 调用失败，请检查配置或稍后重试",
-                "retryable": True,
-                "session_id": "s1",
-            }
+            assert event["type"] == "error"
+            assert event["code"] == "LLM_RUNTIME_ERROR"
+            assert str(event["message"]).startswith("模型调用失败：")
+            assert "gateway returned html" in str(event["message"])
+            assert event["retryable"] is True
+            assert event["session_id"] == "s1"
             with pytest.raises(WebSocketDisconnect) as exc_info:
                 ws.receive_json()
             assert exc_info.value.code == 1011
