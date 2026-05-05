@@ -31,6 +31,7 @@ from hypo_agent.skills import (
     InfoPortalSkill,
     InfoReachSkill,
     MemorySkill,
+    NotionPlanSkill,
     NotionSkill,
     ProbeSkill,
     ReminderSkill,
@@ -151,6 +152,7 @@ def build_runtime_skill_manager(repo_root: Path) -> SkillManager:
                 AgentSearchSkill(),
                 InfoPortalSkill(info_client=object()),
                 NotionSkill(notion_client=object()),
+                NotionPlanSkill(notion_client=object(), plan_page_id="verify-plan"),
                 CoderSkill(coder_client=object()),
                 ProbeSkill(probe_server=ProbeServer(token="verify-token")),
                 InfoReachSkill(
