@@ -135,5 +135,6 @@ class NotionPlanSkill(BaseSkill):
             notion_client=self._client,
             plan_page_id=self.plan_page_id,
             default_year=self.now_fn().year,
+            semester_title=self.semester_title,
             structure_path=self.knowledge_dir / "structure.json",
         )

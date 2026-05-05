@@ -40,6 +40,30 @@ class RecordingPlanClient:
         return {"id": page_id, "title": title}
 
 
+class AcademicPlanClient:
+    def __init__(self) -> None:
+        self.children: dict[str, list[dict]] = {
+            "plan": [
+                {"id": "h-d2-down", "type": "heading_1", "heading_1": {"rich_text": [_rt("大二下")]}},
+                {"id": "may-d2", "type": "child_page", "child_page": {"title": "五月"}},
+                {"id": "h-grad1-down", "type": "heading_1", "heading_1": {"rich_text": [_rt("研一下")]}},
+                {"id": "jan-grad1", "type": "child_page", "child_page": {"title": "一月"}},
+                {"id": "may-grad1", "type": "child_page", "child_page": {"title": "五月"}},
+            ],
+            "may-d2": [
+                {"id": "h-old-0508", "type": "heading_1", "heading_1": {"rich_text": [_rt("5月8日")]}},
+                {"id": "old-item", "type": "to_do", "to_do": {"checked": False, "rich_text": [_rt("旧五月事项")]}},
+            ],
+            "may-grad1": [
+                {"id": "h-current-0508", "type": "heading_1", "heading_1": {"rich_text": [_rt("5月8日")]}},
+                {"id": "current-item", "type": "to_do", "to_do": {"checked": False, "rich_text": [_rt("CS110 Lab 11")]}},
+            ],
+        }
+
+    async def get_page_content(self, page_id: str) -> list[dict]:
+        return list(self.children[page_id])
+
+
 def test_parse_plan_items_supports_multi_item_no_time_and_cross_day() -> None:
     from hypo_agent.core.notion_plan_editor import parse_plan_items
 
@@ -99,6 +123,7 @@ def test_plan_editor_writes_successful_items_and_skips_duplicates(tmp_path) -> N
     structure_path.write_text(
         json.dumps(
             {
+                "structure_version": 2,
                 "month_pages": [{"year": 2026, "month": 5, "page_id": "month-may", "title": "2026年5月"}],
                 "date_heading_format": "{month}月{day}日",
             },
@@ -134,3 +159,28 @@ def test_plan_editor_writes_successful_items_and_skips_duplicates(tmp_path) -> N
             "当天日程：\n- 09:00-10:00 组会\n- 14:00-15:00 阅读\n- 整理材料",
         ]
     )
+
+
+def test_plan_editor_discovers_academic_semester_years_and_targets_current_may() -> None:
+    from hypo_agent.core.notion_plan_editor import NotionPlanEditor, parse_plan_items
+
+    client = AcademicPlanClient()
+    editor = NotionPlanEditor(notion_client=client, plan_page_id="plan", default_year=2026)
+
+    structure = asyncio.run(editor.discover_structure())
+
+    month_pages = {
+        (item["semester"], item["year"], item["month"]): item["page_id"]
+        for item in structure["month_pages"]
+    }
+    assert month_pages[("大二下", 2023, 5)] == "may-d2"
+    assert month_pages[("研一下", 2026, 1)] == "jan-grad1"
+    assert month_pages[("研一下", 2026, 5)] == "may-grad1"
+
+    preview = asyncio.run(
+        editor.preview_add_items(parse_plan_items("5/8 10:30-11:30 普拉提训练", default_year=2026).items)
+    )
+
+    assert preview.planned[0].target_month_page_id == "may-grad1"
+    assert preview.planned[0].date_block_id == "h-current-0508"
+    assert preview.planned[0].existing_titles == ["CS110 Lab 11"]

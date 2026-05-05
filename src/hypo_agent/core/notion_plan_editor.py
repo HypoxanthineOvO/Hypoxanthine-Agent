@@ -7,6 +7,8 @@ from pathlib import Path
 import re
 from typing import Any
 
+_STRUCTURE_VERSION = 2
+
 
 @dataclass(slots=True)
 class ParsedPlanItem:
@@ -214,12 +216,14 @@ class NotionPlanEditor:
         notion_client: Any,
         plan_page_id: str,
         default_year: int,
+        semester_title: str = "",
         structure: dict[str, Any] | None = None,
         structure_path: Path | str | None = None,
     ) -> None:
         self._client = notion_client
         self.plan_page_id = str(plan_page_id or "").strip()
         self.default_year = int(default_year)
+        self.semester_title = str(semester_title or "").strip()
         self.structure_path = Path(structure_path) if structure_path is not None else None
         self.structure = dict(structure or self._load_structure())
         self._written_keys: set[tuple[str, str]] = set()
@@ -263,23 +267,55 @@ class NotionPlanEditor:
 
     async def discover_structure(self) -> dict[str, Any]:
         plan_blocks = await self._client.get_page_content(self.plan_page_id)
+        anchors = self._academic_anchors()
         month_pages = []
+        current_semester = ""
+        current_start: date | None = None
         for block in plan_blocks:
-            if str(block.get("type") or "") != "child_page":
+            block_type = str(block.get("type") or "")
+            if block_type.startswith("heading_"):
+                text = _block_text(block)
+                start = _academic_term_start(text, anchors)
+                if start is not None:
+                    current_semester = text
+                    current_start = start
                 continue
+            if block_type != "child_page":
+                continue
+            page_id = str(block.get("id") or "").strip()
             title = str((block.get("child_page") or {}).get("title") or "").strip()
-            parsed = _parse_month_title(title, default_year=self.default_year)
+            child_start = _academic_term_start(title, anchors)
+            if child_start is not None and page_id:
+                month_pages.extend(
+                    await self._discover_month_pages_in_semester(
+                        page_id,
+                        semester=title,
+                        semester_start=child_start,
+                        order_offset=len(month_pages),
+                    )
+                )
+                continue
+            parsed = _parse_month_title(title, default_year=self.default_year, term_start=current_start)
             if parsed is None:
                 continue
             month_pages.append(
-                {"title": title, "page_id": str(block.get("id") or "").strip(), "year": parsed[0], "month": parsed[1]}
+                {
+                    "title": title,
+                    "page_id": page_id,
+                    "year": parsed[0],
+                    "month": parsed[1],
+                    "semester": current_semester,
+                    "semester_start": _year_month_text(current_start),
+                    "order": len(month_pages),
+                }
             )
         self.structure.update(
             {
+                "structure_version": _STRUCTURE_VERSION,
                 "plan_page_id": self.plan_page_id,
                 "month_pages": month_pages,
                 "date_heading_format": self.structure.get("date_heading_format") or "{month}月{day}日",
-                "academic_anchors": self.structure.get("academic_anchors") or {"大一上": "2021-09", "研一上": "2025-09"},
+                "academic_anchors": anchors,
             }
         )
         return dict(self.structure)
@@ -294,6 +330,7 @@ class NotionPlanEditor:
             "# Notion Plan Structure",
             "",
             f"- plan_page_id: {self.structure.get('plan_page_id') or self.plan_page_id}",
+            f"- structure_version: {self.structure.get('structure_version') or _STRUCTURE_VERSION}",
             f"- date_heading_format: {self.structure.get('date_heading_format') or '{month}月{day}日'}",
             "- academic_anchors:",
         ]
@@ -301,7 +338,8 @@ class NotionPlanEditor:
         lines.extend(f"  - {key}: {value}" for key, value in anchors.items())
         lines.extend(["", "## Month Pages", ""])
         month_lines = [
-            f"- {item.get('year')}-{int(item.get('month')):02d}: {item.get('title')} ({item.get('page_id')})"
+            f"- {item.get('year')}-{int(item.get('month')):02d}: {item.get('title')}"
+            f"{_semester_suffix(item)} ({item.get('page_id')})"
             for item in self.structure.get("month_pages", [])
             if isinstance(item, dict) and item.get("month")
         ]
@@ -348,10 +386,52 @@ class NotionPlanEditor:
         return {}
 
     def _month_info(self, target: date) -> dict[str, Any]:
+        candidates: list[dict[str, Any]] = []
         for item in self.structure.get("month_pages", []) or []:
             if isinstance(item, dict) and int(item.get("year") or 0) == target.year and int(item.get("month") or 0) == target.month:
-                return dict(item)
+                candidates.append(dict(item))
+        if self.semester_title:
+            for item in reversed(candidates):
+                if _norm(str(item.get("semester") or "")) == _norm(self.semester_title):
+                    return item
+        if candidates:
+            return candidates[-1]
         return {"title": f"{target.year}年{target.month}月", "page_id": ""}
+
+    async def _discover_month_pages_in_semester(
+        self,
+        page_id: str,
+        *,
+        semester: str,
+        semester_start: date,
+        order_offset: int,
+    ) -> list[dict[str, Any]]:
+        output: list[dict[str, Any]] = []
+        for block in await self._client.get_page_content(page_id):
+            if str(block.get("type") or "") != "child_page":
+                continue
+            title = str((block.get("child_page") or {}).get("title") or "").strip()
+            parsed = _parse_month_title(title, default_year=self.default_year, term_start=semester_start)
+            if parsed is None:
+                continue
+            output.append(
+                {
+                    "title": title,
+                    "page_id": str(block.get("id") or "").strip(),
+                    "year": parsed[0],
+                    "month": parsed[1],
+                    "semester": semester,
+                    "semester_start": _year_month_text(semester_start),
+                    "order": order_offset + len(output),
+                }
+            )
+        return output
+
+    def _academic_anchors(self) -> dict[str, str]:
+        anchors = self.structure.get("academic_anchors") if isinstance(self.structure.get("academic_anchors"), dict) else {}
+        merged = {"大一上": "2021-09", "研一上": "2025-09"}
+        merged.update({str(key): str(value) for key, value in anchors.items()})
+        return merged
 
     def _date_heading(self, target: date) -> str:
         return str(self.structure.get("date_heading_format") or "{month}月{day}日").format(
@@ -362,16 +442,27 @@ class NotionPlanEditor:
         if self.structure_path is None or not self.structure_path.exists():
             return {"month_pages": [], "date_heading_format": "{month}月{day}日", "academic_anchors": {"大一上": "2021-09", "研一上": "2025-09"}}
         payload = json.loads(self.structure_path.read_text(encoding="utf-8"))
-        return payload if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict):
+            return {}
+        if int(payload.get("structure_version") or 0) < _STRUCTURE_VERSION:
+            return {
+                "month_pages": [],
+                "date_heading_format": payload.get("date_heading_format") or "{month}月{day}日",
+                "academic_anchors": payload.get("academic_anchors") or {"大一上": "2021-09", "研一上": "2025-09"},
+            }
+        return payload
 
 
-def _parse_month_title(title: str, *, default_year: int) -> tuple[int, int] | None:
+def _parse_month_title(title: str, *, default_year: int, term_start: date | None = None) -> tuple[int, int] | None:
     match = re.search(r"(?:(?P<year>\d{4})年)?(?P<month>\d{1,2})月", title)
     if match is not None:
-        return int(match.group("year") or default_year), int(match.group("month"))
+        month = int(match.group("month"))
+        if match.group("year"):
+            return int(match.group("year")), month
+        return _month_year(month, default_year=default_year, term_start=term_start), month
     for token, month in {"一月": 1, "二月": 2, "三月": 3, "四月": 4, "五月": 5, "六月": 6, "七月": 7, "八月": 8, "九月": 9, "十月": 10, "十一月": 11, "十二月": 12}.items():
         if token in title:
-            return default_year, month
+            return _month_year(month, default_year=default_year, term_start=term_start), month
     return None
 
 
@@ -399,6 +490,73 @@ def _matches_date_heading(text: str, target: date) -> bool:
         "".join(candidate.split()).casefold() in compact
         for candidate in {f"{target.month}月{target.day}日", f"{target.month}/{target.day}", f"{target.month}-{target.day}", target.isoformat()}
     )
+
+
+def _month_year(month: int, *, default_year: int, term_start: date | None) -> int:
+    if term_start is None:
+        return default_year
+    if term_start.month >= 9 and month < term_start.month:
+        return term_start.year + 1
+    return term_start.year
+
+
+def _year_month_text(value: date | None) -> str:
+    if value is None:
+        return ""
+    return f"{value.year:04d}-{value.month:02d}"
+
+
+def _semester_suffix(item: dict[str, Any]) -> str:
+    semester = str(item.get("semester") or "").strip()
+    return f" [{semester}]" if semester else ""
+
+
+def _academic_term_start(title: str, anchors: dict[str, str]) -> date | None:
+    parsed = _parse_academic_term(title)
+    if parsed is None:
+        return None
+    target_track, target_year, target_half = parsed
+    for anchor_title, anchor_month in anchors.items():
+        anchor = _parse_academic_term(anchor_title)
+        if anchor is None:
+            continue
+        anchor_track, anchor_year, anchor_half = anchor
+        if anchor_track != target_track:
+            continue
+        match = re.match(r"^(?P<year>\d{4})-(?P<month>\d{1,2})$", str(anchor_month or "").strip())
+        if match is None:
+            continue
+        year = int(match.group("year"))
+        month = int(match.group("month"))
+        anchor_base_year = year - (1 if anchor_half == "下" and month <= 8 else 0)
+        base_year = anchor_base_year + (target_year - anchor_year)
+        if target_half == "上":
+            return date(base_year, 9, 1)
+        return date(base_year + 1, 3, 1)
+    return None
+
+
+def _parse_academic_term(title: str) -> tuple[str, int, str] | None:
+    match = re.search(r"(?P<track>[大研])(?P<year>[一二三四五六七八九十]+)(?P<half>[上下])", str(title or ""))
+    if match is None:
+        return None
+    year = _chinese_number(match.group("year"))
+    if year <= 0:
+        return None
+    return match.group("track"), year, match.group("half")
+
+
+def _chinese_number(text: str) -> int:
+    digits = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    value = str(text or "").strip()
+    if value == "十":
+        return 10
+    if value.startswith("十"):
+        return 10 + digits.get(value[-1], 0)
+    if "十" in value:
+        left, right = value.split("十", 1)
+        return digits.get(left, 0) * 10 + (digits.get(right, 0) if right else 0)
+    return digits.get(value, 0)
 
 
 def _insert_position(blocks: list[dict[str, Any]], item: ParsedPlanItem) -> tuple[str, str, str]:
