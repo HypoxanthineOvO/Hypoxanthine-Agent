@@ -66,15 +66,23 @@ class NotionClient:
     async def get_page_content(self, page_id: str) -> list[dict[str, Any]]:
         return await self._list_block_children_recursive(page_id)
 
-    async def append_blocks(self, page_id: str, blocks: list[dict[str, Any]]) -> None:
+    async def append_blocks(
+        self,
+        page_id: str,
+        blocks: list[dict[str, Any]],
+        *,
+        after: str | None = None,
+    ) -> None:
+        current_after = str(after or "").strip() or None
         for chunk in _chunked(blocks, 100):
+            kwargs: dict[str, Any] = {"block_id": page_id, "children": chunk}
+            if current_after:
+                kwargs["after"] = current_after
             await self._call_with_retry(
-                lambda chunk=chunk: self.client.blocks.children.append(
-                    block_id=page_id,
-                    children=chunk,
-                ),
+                lambda kwargs=kwargs: self.client.blocks.children.append(**kwargs),
                 action="append blocks",
             )
+            current_after = None
 
     async def delete_block(self, block_id: str) -> None:
         await self._call_with_retry(
@@ -135,15 +143,20 @@ class NotionClient:
         properties: dict[str, Any],
         children: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {"parent": parent, "properties": properties}
+        if children:
+            kwargs["children"] = children
         response = await self._call_with_retry(
-            lambda: self.client.pages.create(
-                parent=parent,
-                properties=properties,
-                children=children or None,
-            ),
+            lambda: self.client.pages.create(**kwargs),
             action="create page",
         )
         return response if isinstance(response, dict) else {}
+
+    async def create_child_page(self, parent_page_id: str, title: str) -> dict[str, Any]:
+        return await self.create_page(
+            parent={"page_id": parent_page_id},
+            properties={"title": [{"type": "text", "text": {"content": title}}]},
+        )
 
     async def search(
         self,
@@ -213,7 +226,11 @@ class NotionClient:
         for attempt in range(1, self.max_retries + 1):
             try:
                 return await self._call_with_timeout(operation, action=action)
-            except NotionTimeoutError:
+            except NotionTimeoutError as exc:
+                last_exc = exc
+                if attempt < self.max_retries:
+                    await asyncio.sleep(1)
+                    continue
                 raise
             except APIResponseError as exc:
                 last_exc = exc

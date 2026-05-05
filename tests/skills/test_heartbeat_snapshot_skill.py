@@ -354,6 +354,46 @@ def test_heartbeat_snapshot_skill_exposes_expected_tools() -> None:
     ]
 
 
+def test_heartbeat_snapshot_prefers_plan_snapshot_when_available() -> None:
+    class PlanNotionSkill:
+        async def get_plan_snapshot(self) -> dict:
+            return {
+                "available": True,
+                "completion_rate": "1/2",
+                "done_items": [{"title": "完成论文"}],
+                "undone_items": [{"title": "准备组会"}],
+                "important_items": [{"title": "准备组会"}],
+                "human_summary": "今日计划通完成率：1/2\n\n重要提醒：\n- 准备组会",
+            }
+
+    skill = HeartbeatSnapshotSkill(notion_skill=PlanNotionSkill())
+    result = asyncio.run(skill.execute("get_notion_todo_snapshot", {}))
+
+    assert result.status == "success"
+    assert result.result["source"] == "HYX的计划通"
+    assert result.result["pending_today"] == [{"title": "准备组会"}]
+    assert result.result["completed_today"] == [{"title": "完成论文"}]
+    assert result.result["high_priority_due_soon"] == [{"title": "准备组会"}]
+
+
+def test_heartbeat_snapshot_falls_back_to_todo_snapshot_when_plan_snapshot_fails() -> None:
+    class BrokenPlanNotionSkill(StubNotionSkill):
+        async def get_plan_snapshot(self) -> dict:
+            raise ValueError("Notion root page not found: Hypoxanthine's Home")
+
+    skill = HeartbeatSnapshotSkill(
+        notion_skill=BrokenPlanNotionSkill(),
+        now_iso_provider=lambda: "2026-04-05T12:00:00+08:00",
+    )
+
+    result = asyncio.run(skill.execute("get_notion_todo_snapshot", {}))
+
+    assert result.status == "success"
+    assert result.result["available"] is True
+    assert result.result["pending_today"][0]["title"] == "今天高优任务"
+    assert "今日相关未完成" in result.result["human_summary"]
+
+
 def test_heartbeat_snapshot_skill_returns_structured_sections(tmp_path: Path) -> None:
     people_index = tmp_path / "memory" / "people" / "index.md"
     people_index.parent.mkdir(parents=True, exist_ok=True)

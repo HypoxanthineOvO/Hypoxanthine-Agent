@@ -9,6 +9,8 @@ import platform
 import re
 from typing import Any, Awaitable, Callable
 
+import structlog
+
 from hypo_agent.core.config_loader import get_memory_dir
 from hypo_agent.core.notion_todo_binding import (
     discover_notion_todo_candidate,
@@ -18,6 +20,7 @@ from hypo_agent.models import SkillOutput
 from hypo_agent.skills.base import BaseSkill
 
 _LOAD_RE = re.compile(r"load average[s]?:\s*([0-9.]+),\s*([0-9.]+),\s*([0-9.]+)")
+logger = structlog.get_logger("hypo_agent.skills.heartbeat_snapshot")
 
 
 class HeartbeatSnapshotSkill(BaseSkill):
@@ -206,6 +209,22 @@ class HeartbeatSnapshotSkill(BaseSkill):
         notion_skill = self.notion_skill
         if notion_skill is None:
             return {"available": False, "error": "notion todo database is unavailable"}
+        plan_snapshot_getter = getattr(notion_skill, "get_plan_snapshot", None)
+        if callable(plan_snapshot_getter):
+            try:
+                plan_payload = plan_snapshot_getter()
+                if asyncio.iscoroutine(plan_payload):
+                    plan_payload = await plan_payload
+                if isinstance(plan_payload, dict) and bool(plan_payload.get("available", False)):
+                    return {
+                        **plan_payload,
+                        "source": "HYX的计划通",
+                        "pending_today": plan_payload.get("undone_items", []),
+                        "completed_today": plan_payload.get("done_items", []),
+                        "high_priority_due_soon": plan_payload.get("important_items", []),
+                    }
+            except Exception as exc:
+                logger.warning("heartbeat.plan_snapshot_failed_fallback", error=str(exc))
         todo_snapshot_getter = getattr(notion_skill, "get_todo_snapshot", None)
         if callable(todo_snapshot_getter):
             snapshot_payload = todo_snapshot_getter(

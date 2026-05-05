@@ -8,10 +8,12 @@ from hypo_agent.skills.exec_skill import ExecSkill
 from hypo_agent.skills.export_skill import ExportSkill
 from hypo_agent.skills.fs_skill import FileSystemSkill
 from hypo_agent.skills.heartbeat_snapshot_skill import HeartbeatSnapshotSkill
+from hypo_agent.skills.image_gen_skill import ImageGenSkill
 from hypo_agent.skills.info_portal_skill import InfoPortalSkill
 from hypo_agent.skills.info_reach_skill import InfoReachSkill
 from hypo_agent.skills.log_inspector_skill import LogInspectorSkill
 from hypo_agent.skills.memory_skill import MemorySkill
+from hypo_agent.skills.notion_plan_skill import NotionPlanSkill
 from hypo_agent.skills.probe_skill import ProbeSkill
 from hypo_agent.skills.reminder_skill import ReminderSkill
 from hypo_agent.skills.subscription.skill import SubscriptionSkill
@@ -35,8 +37,10 @@ __all__ = [
     "CoderSkill",
     "FileSystemSkill",
     "HeartbeatSnapshotSkill",
+    "ImageGenSkill",
     "MemorySkill",
     "NotionSkill",
+    "NotionPlanSkill",
     "ProbeSkill",
     "ReminderSkill",
     "SubscriptionSkill",

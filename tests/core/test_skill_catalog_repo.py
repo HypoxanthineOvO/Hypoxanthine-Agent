@@ -26,6 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
         ("info-portal", "今天有什么 AI 新闻", "info_today"),
         ("notion", "帮我在 Notion 创建一个页面", "notion_create_entry"),
         ("notion", "帮我把 Notion 页面转成 md 发给我", "notion_export_page_markdown"),
+        ("notion-plan", "把 5/8 10:30-11:30 普拉提训练 加到 Notion 计划通", "notion_plan_add_items"),
         ("coder", "提交一个代码任务给 Coder", "coder_submit_task"),
         ("probe", "看看探针设备列表", "probe_list_devices"),
         ("info-reach", "帮我订阅 LLM 相关资讯", "info_subscribe"),
@@ -94,6 +95,7 @@ def test_repo_skill_catalog_contains_all_phase1_phase2_skill_names() -> None:
         "agent-search",
         "info-portal",
         "notion",
+        "notion-plan",
         "coder",
         "probe",
         "info-reach",
@@ -107,4 +109,12 @@ def test_repo_skill_catalog_prioritizes_notion_for_plan_todo_queries() -> None:
     candidates = catalog.match_candidates("查看一下今天的计划通待办事项")
 
     assert candidates
-    assert candidates[0].name == "notion"
+    assert candidates[0].name == "notion-plan"
+
+
+def test_repo_skill_catalog_keeps_generic_notion_separate_from_notion_plan() -> None:
+    catalog = SkillCatalog(REPO_ROOT / "skills")
+    catalog.scan()
+
+    assert catalog.match_candidates("帮我在 Notion 创建一个页面")[0].name == "notion"
+    assert catalog.match_candidates("5/8 10:30-11:30 普拉提训练 加到计划通")[0].name == "notion-plan"

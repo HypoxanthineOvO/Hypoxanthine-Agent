@@ -130,9 +130,10 @@ class FakeNotionClient:
         properties: dict,
         children: list[dict] | None = None,
     ) -> dict:
-        self.create_calls.append(
-            {"parent": parent, "properties": properties, "children": children}
-        )
+        payload = {"parent": parent, "properties": properties}
+        if children is not None:
+            payload["children"] = children
+        self.create_calls.append(payload)
         return {
             "id": "new-page",
             "properties": {
@@ -214,6 +215,32 @@ services:
         "timeout_ms": 60000,
         "api_timeout_seconds": 30.0,
         "max_retries": 4,
+    }
+
+
+def test_notion_skill_loads_plan_reader_config(tmp_path: Path) -> None:
+    secrets_path = tmp_path / "secrets.yaml"
+    secrets_path.write_text(
+        """
+providers: {}
+services:
+  notion:
+    integration_secret: "secret_xxx"
+    plan_page_id: "plan-page"
+    plan_title: "计划页"
+    plan_root_title: "根页"
+    plan_semester_title: "当前学期"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    skill = NotionSkill(secrets_path=secrets_path, notion_client=FakeNotionClient())
+
+    assert skill._plan_config == {
+        "plan_page_id": "plan-page",
+        "plan_title": "计划页",
+        "plan_root_title": "根页",
+        "plan_semester_title": "当前学期",
     }
 
 
@@ -532,6 +559,26 @@ def test_create_entry_rejects_unknown_property_before_remote_api_call() -> None:
         assert "Wrong Status" in result.error_info
         assert "notion_get_schema" in result.error_info
         assert client.create_calls == []
+
+    asyncio.run(_run())
+
+
+def test_create_entry_with_empty_content_omits_children() -> None:
+    async def _run() -> None:
+        client = FakeNotionClient()
+        skill = NotionSkill(notion_client=client)
+
+        result = await skill.execute(
+            "notion_create_entry",
+            {
+                "database_id": "22222222222222222222222222222222",
+                "properties": '{"Name":"新条目"}',
+                "content": "",
+            },
+        )
+
+        assert result.status == "success"
+        assert "children" not in client.create_calls[0]
 
     asyncio.run(_run())
 

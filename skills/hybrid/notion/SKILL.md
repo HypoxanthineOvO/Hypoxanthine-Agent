@@ -1,13 +1,13 @@
 ---
 name: "notion"
-description: "读取与写入 Notion page / database。用户要在 Notion workspace 中 search、query、create 或 update 内容时使用。"
+description: "读取与写入普通 Notion page / database。用户要在 Notion workspace 中 search、query、create 或 update 非计划通内容时使用。"
 compatibility: "linux"
 allowed-tools: "notion_get_schema notion_read_page notion_export_page_markdown notion_write_page notion_update_page notion_query_db notion_create_entry notion_search"
 metadata:
   hypo.category: "hybrid"
   hypo.backend: "notion"
   hypo.exec_profile:
-  hypo.triggers: "notion,笔记,页面,数据库,记录,写入,创建页面,查询,工作区,写到notion,读取页面,导出,markdown,md,计划通,待办,事项,任务"
+  hypo.triggers: "notion,笔记,页面,数据库,记录,写入,创建页面,查询,工作区,写到notion,读取页面,导出,markdown,md"
   hypo.risk: "medium"
   hypo.dependencies: "notion-client"
 ---
@@ -23,6 +23,7 @@ metadata:
 - 用户要读写 Notion 页面正文。
 - 用户要查询、创建或更新 Notion database 条目。
 - 用户只知道关键词，不知道具体 page / database 对象。
+- 计划通 / Notion Plan 的日期事项读写应使用 `notion-plan`，不要用本 skill 的通用 create/write 工具。
 
 ## 工具与接口 (Tools)
 

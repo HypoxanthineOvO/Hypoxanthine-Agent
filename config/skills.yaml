@@ -29,6 +29,9 @@ skills:
   # Hybrid skill: guidance lives in skills/hybrid/notion/SKILL.md.
   notion:
     enabled: true
+  # Dedicated HYX Notion Plan domain skill; separated from generic Notion page/database tools.
+  notion_plan:
+    enabled: true
   # Pure skill now owned by SkillCatalog at skills/pure/log-inspector/SKILL.md.
   log_inspector:
     enabled: true
@@ -63,4 +66,7 @@ skills:
     description: "平台登录管理（扫码/验证码），Cookie 状态检查"
   # Internal heartbeat middle-layer skill. Exposes fixed structured snapshot tools.
   heartbeat_snapshot:
+    enabled: true
+  # Image generation via GPT-Image-2 CLI wrapper. Supports text-to-image and image editing.
+  image_gen:
     enabled: true

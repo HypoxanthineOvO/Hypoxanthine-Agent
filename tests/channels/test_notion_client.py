@@ -61,6 +61,64 @@ def test_api_timeout(monkeypatch) -> None:
         asyncio.run(client.get_database("db-test"))
 
 
+def test_api_timeout_retries_until_success(monkeypatch) -> None:
+    client = NotionClient("ntn_test_secret", max_retries=2, api_timeout_seconds=0.01)
+    calls = 0
+
+    async def fake_retrieve(*args, **kwargs):
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        if calls == 1:
+            await asyncio.sleep(0.05)
+        return {"id": "db-test"}
+
+    monkeypatch.setattr(client.client.databases, "retrieve", fake_retrieve)
+
+    result = asyncio.run(client.get_database("db-test"))
+
+    assert result == {"id": "db-test"}
+    assert calls == 2
+
+
+def test_create_page_omits_children_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = NotionClient("ntn_test_secret", max_retries=1)
+    captured: dict[str, object] = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return {"id": "new-page"}
+
+    monkeypatch.setattr(client.client.pages, "create", fake_create)
+
+    result = asyncio.run(
+        client.create_page(
+            parent={"database_id": "db"},
+            properties={"Name": {"title": []}},
+            children=None,
+        )
+    )
+
+    assert result == {"id": "new-page"}
+    assert "children" not in captured
+
+
+def test_append_blocks_supports_after_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = NotionClient("ntn_test_secret", max_retries=1)
+    captured: dict[str, object] = {}
+
+    async def fake_append(**kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(client.client.blocks.children, "append", fake_append)
+
+    asyncio.run(client.append_blocks("page-1", [{"type": "paragraph", "paragraph": {"rich_text": []}}], after="block-1"))
+
+    assert captured["block_id"] == "page-1"
+    assert captured["after"] == "block-1"
+
+
 def test_notion_client_passes_proxy_url_to_httpx(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
     real_async_client = httpx.AsyncClient

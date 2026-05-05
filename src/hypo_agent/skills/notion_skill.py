@@ -14,6 +14,7 @@ from hypo_agent.core.config_loader import load_secrets_config
 from hypo_agent.core.uploads import sanitize_upload_filename
 from hypo_agent.models import Attachment
 from hypo_agent.core.notion_todo_binding import discover_notion_todo_candidate, get_bound_notion_todo_database_id
+from hypo_agent.core.notion_plan import NotionPlanReader
 from hypo_agent.models import SkillOutput
 from hypo_agent.skills.base import BaseSkill
 from hypo_agent.skills.notion_heartbeat import NotionTodoHeartbeatSource
@@ -48,6 +49,7 @@ class NotionSkill(BaseSkill):
         self._todo_today_match_mode = self._normalize_today_match_mode(today_match_mode)
         self._client = notion_client or self._build_client_from_config()
         self._todo_database_id: str | None = self._load_todo_database_id()
+        self._plan_config = self._load_plan_config()
         if self._todo_database_id and heartbeat_service is not None and hasattr(
             heartbeat_service, "register_event_source"
         ):
@@ -189,6 +191,18 @@ class NotionSkill(BaseSkill):
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "notion_get_plan_today",
+                    "description": "Read today's HYX plan page from Notion in read-only mode.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                },
+            },
         ]
 
     async def execute(self, tool_name: str, params: dict[str, Any]) -> SkillOutput:
@@ -253,6 +267,8 @@ class NotionSkill(BaseSkill):
                     status="success",
                     result=await self.notion_search(query, object_type=object_type),
                 )
+            if tool_name == "notion_get_plan_today":
+                return SkillOutput(status="success", result=await self.get_plan_snapshot())
         except NotionUnavailableError as exc:
             error_text = str(exc).strip()
             if error_text:
@@ -262,6 +278,17 @@ class NotionSkill(BaseSkill):
             logger.warning("notion_skill.execute_failed", tool_name=tool_name, error=str(exc))
             return SkillOutput(status="error", error_info=str(exc))
         return SkillOutput(status="error", error_info=f"Unsupported tool '{tool_name}'")
+
+    async def get_plan_snapshot(self) -> dict[str, Any]:
+        reader = NotionPlanReader(
+            notion_client=self._client,
+            plan_page_id=str(self._plan_config.get("plan_page_id") or ""),
+            root_title=str(self._plan_config.get("plan_root_title") or ""),
+            plan_title=str(self._plan_config.get("plan_title") or "HYX的计划通"),
+            semester_title=str(self._plan_config.get("plan_semester_title") or ""),
+        )
+        summary = await reader.read_today(today=self.now_fn().date())
+        return summary.to_payload()
 
     async def notion_read_page(self, page_id: str) -> str:
         page = await self._client.get_page(page_id)
@@ -526,6 +553,19 @@ class NotionSkill(BaseSkill):
         notion_cfg = services.notion if services is not None else None
         value = str(notion_cfg.todo_database_id).strip() if notion_cfg is not None else ""
         return value or None
+
+    def _load_plan_config(self) -> dict[str, str]:
+        try:
+            services = load_secrets_config(self.secrets_path).services
+        except FileNotFoundError:
+            services = None
+        notion_cfg = services.notion if services is not None else None
+        return {
+            "plan_page_id": str(getattr(notion_cfg, "plan_page_id", "") or "").strip(),
+            "plan_title": str(getattr(notion_cfg, "plan_title", "") or "").strip() or "HYX的计划通",
+            "plan_root_title": str(getattr(notion_cfg, "plan_root_title", "") or "").strip(),
+            "plan_semester_title": str(getattr(notion_cfg, "plan_semester_title", "") or "").strip(),
+        }
 
     def _normalize_page_id(self, value: Any) -> str:
         raw = str(value or "").strip()

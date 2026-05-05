@@ -22,6 +22,12 @@ tool_narration:
     template: "📋 正在读取今日概况..."
   get_notion_todo_snapshot:
     template: "📋 正在读取计划通..."
+  notion_plan_get_today:
+    template: "📋 正在读取计划通..."
+  notion_plan_get_structure:
+    template: "📋 正在读取计划通结构..."
+  notion_plan_add_items:
+    template: "✏️ 正在写入计划通..."
   search_emails:
     template: "📧 正在搜索邮件「{query}」..."
     fallback: "📧 正在搜索邮件..."
