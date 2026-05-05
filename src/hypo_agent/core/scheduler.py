@@ -473,7 +473,7 @@ class SchedulerService:
             run_at = self._parse_once_schedule(schedule_value=schedule_value)
             if run_at is None:
                 raise ValueError("Invalid once schedule_value")
-            return DateTrigger(run_date=run_at)
+            return DateTrigger(run_date=run_at, timezone=run_at.tzinfo or self._timezone_obj())
         if schedule_type == "cron":
             expression, timezone = self.parse_cron_schedule(
                 schedule_value,

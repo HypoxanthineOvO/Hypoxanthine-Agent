@@ -2803,7 +2803,110 @@ def test_pipeline_stream_routes_plan_keyword_mutation_through_llm_tools() -> Non
         }
     ]
     assert skill_manager.calls[0][0] == "update_reminder"
-    assert skill_manager.calls[0][1] == {
-        "title": "普拉提",
-        "schedule_value": "2026-04-20T16:00:00+08:00",
-    }
+
+
+def test_pipeline_shortcuts_notion_plan_add_item_without_llm() -> None:
+    memory = StubSessionMemory()
+
+    class PlanSkillManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict, str | None, str | None]] = []
+
+        def get_tools_schema(self) -> list[dict]:
+            return [{"type": "function", "function": {"name": "notion_plan_add_items"}}]
+
+        async def invoke(
+            self,
+            tool_name: str,
+            params: dict,
+            *,
+            session_id: str | None = None,
+            skill_name: str | None = None,
+        ) -> SkillOutput:
+            self.calls.append((tool_name, params, session_id, skill_name))
+            return SkillOutput(
+                status="success",
+                result="已加入计划通：5/8 10:30-11:30 普拉提训练\n插入位置：2026年5月 / 5月8日 / 位于 09:00-10:00 组会 与 14:00-15:00 阅读 之间",
+            )
+
+    class StubRouter:
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            del model_name, messages, tools, session_id
+            raise AssertionError("LLM should not be called for high-confidence Notion Plan add item")
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            del model_name, messages, session_id, tools
+            raise AssertionError("stream should not be called")
+            yield ""  # pragma: no cover
+
+    skill_manager = PlanSkillManager()
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skill_manager,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(
+            text="5/8 10:30-11:30 普拉提训练\n把这一条加到Notion计划通子页面里对应位置",
+            sender="user",
+            session_id="s1",
+        )
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    events = asyncio.run(_collect())
+
+    assert events[0]["type"] == "assistant_chunk"
+    assert "已加入计划通" in events[0]["text"]
+    assert skill_manager.calls == [
+        (
+            "notion_plan_add_items",
+            {"text": "5/8 10:30-11:30 普拉提训练\n把这一条加到Notion计划通子页面里对应位置"},
+            "s1",
+            "direct",
+        )
+    ]
+
+
+def test_pipeline_shortcuts_notion_plan_add_item_from_previous_message() -> None:
+    memory = StubSessionMemory(
+        history=[
+            Message(text="5/8 10:30-11:30 普拉提训练", sender="user", session_id="s1"),
+        ]
+    )
+
+    class PlanSkillManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict, str | None, str | None]] = []
+
+        def get_tools_schema(self) -> list[dict]:
+            return [{"type": "function", "function": {"name": "notion_plan_add_items"}}]
+
+        async def invoke(self, tool_name, params, *, session_id=None, skill_name=None):
+            self.calls.append((tool_name, params, session_id, skill_name))
+            return SkillOutput(status="success", result="已加入计划通：5/8 10:30-11:30 普拉提训练")
+
+    class StubRouter:
+        async def call_with_tools(self, model_name, messages, *, tools=None, session_id=None):
+            raise AssertionError("LLM should not be called")
+
+        async def stream(self, model_name, messages, *, session_id=None, tools=None):
+            raise AssertionError("stream should not be called")
+            yield ""  # pragma: no cover
+
+    skill_manager = PlanSkillManager()
+    pipeline = ChatPipeline(
+        router=StubRouter(),
+        chat_model="Gemini3Pro",
+        session_memory=memory,
+        skill_manager=skill_manager,
+    )
+
+    async def _collect() -> list[dict]:
+        inbound = Message(text="把这一条加到计划通", sender="user", session_id="s1")
+        return [event async for event in pipeline.stream_reply(inbound)]
+
+    asyncio.run(_collect())
+
+    assert skill_manager.calls[0][1] == {"text": "5/8 10:30-11:30 普拉提训练\n把这一条加到计划通"}

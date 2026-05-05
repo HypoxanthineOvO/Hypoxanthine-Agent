@@ -5,6 +5,7 @@ import asyncio
 import pytest
 from structlog.testing import capture_logs
 
+from hypo_agent.core.model_router import ModelFallbackError
 from hypo_agent.core.pipeline import ChatPipeline
 from hypo_agent.models import Message
 from tests.shared import NoopRouter
@@ -27,7 +28,7 @@ def _has_event(logs: list[dict[str, object]], event_name: str, caplog) -> bool:
 
 
 @pytest.mark.unit
-def test_pipeline_logs_error_converted_for_timeout(caplog) -> None:
+def test_pipeline_logs_timeout_handled_for_timeout(caplog) -> None:
     async def _run() -> None:
         pipeline = ChatPipeline(
             router=NoopRouter(),
@@ -53,7 +54,7 @@ def test_pipeline_logs_error_converted_for_timeout(caplog) -> None:
             )
 
         assert emitted[0]["code"] == "LLM_TIMEOUT"
-        assert _has_event(logs, "pipeline.error_converted", caplog)
+        assert _has_event(logs, "pipeline.timeout_handled", caplog)
 
     asyncio.run(_run())
 
@@ -86,6 +87,51 @@ def test_pipeline_logs_error_converted_for_runtime_error(caplog) -> None:
 
         assert emitted[0]["code"] == "LLM_RUNTIME_ERROR"
         assert _has_event(logs, "pipeline.error_converted", caplog)
+
+    asyncio.run(_run())
+
+
+@pytest.mark.unit
+def test_pipeline_emits_structured_model_fallback_error(caplog) -> None:
+    async def _run() -> None:
+        pipeline = ChatPipeline(
+            router=NoopRouter(),
+            chat_model="Gemini3Pro",
+            session_memory=_StubSessionMemory(),
+        )
+        emitted: list[dict[str, object]] = []
+
+        async def _failing_stream_reply(inbound: Message):
+            del inbound
+            if False:  # pragma: no cover
+                yield {}
+            raise ModelFallbackError(
+                "all failed",
+                requested_model="Gemini3Pro",
+                task_type="vision",
+                attempted_chain=[
+                    {"model": "Gemini3Pro", "error_class": "TimeoutError"},
+                    {"model": "VisionBackup", "error_class": "RuntimeError"},
+                ],
+            )
+
+        pipeline.stream_reply = _failing_stream_reply  # type: ignore[method-assign]
+
+        with capture_logs() as logs:
+            await pipeline._consume_user_message_event(
+                {
+                    "message": Message(text="看图", sender="user", session_id="s-model"),
+                    "emit": emitted.append,
+                }
+            )
+
+        assert emitted[0]["code"] == "LLM_FALLBACK_EXHAUSTED"
+        assert emitted[0]["attempted_chain"] == [
+            {"model": "Gemini3Pro", "error_class": "TimeoutError"},
+            {"model": "VisionBackup", "error_class": "RuntimeError"},
+        ]
+        assert "Gemini3Pro -> VisionBackup" in str(emitted[0]["message"])
+        assert _has_event(logs, "pipeline.model_fallback_exhausted", caplog)
 
     asyncio.run(_run())
 

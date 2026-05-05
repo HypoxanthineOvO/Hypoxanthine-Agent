@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 ToolOutcomeClass = Literal[
     "success",
@@ -76,6 +76,7 @@ def classify_tool_outcome(
     status: str,
     error_info: str | None = "",
     operation: str = "",
+    metadata: dict[str, Any] | None = None,
 ) -> ToolOutcome:
     normalized_status = str(status or "").strip().lower()
     normalized_error = str(error_info or "").strip()
@@ -101,6 +102,16 @@ def classify_tool_outcome(
         or "required" in lowered_error
         or "missing" in lowered_error
     ):
+        recovery_action = (metadata or {}).get("recovery_action")
+        if isinstance(recovery_action, dict) and str(recovery_action.get("type") or "").strip():
+            return ToolOutcome(
+                outcome_class="user_input_error",
+                retryable=True,
+                breaker_weight=0,
+                user_visible_summary=f"输入信息不完整或目标不存在，但工具返回了可以恢复的动作：{normalized_error}",
+                side_effect_class=operation,
+                operation=operation,
+            )
         return ToolOutcome(
             outcome_class="user_input_error",
             retryable=False,

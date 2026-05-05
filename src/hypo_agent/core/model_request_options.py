@@ -141,6 +141,13 @@ def _detect_provider(
     ):
         return "moonshot"
     if (
+        "xiaomi" in provider_name
+        or provider_name.startswith("mimo")
+        or "xiaomimimo.com" in base_url
+        or slug.startswith("mimo-")
+    ):
+        return "mimo_openai"
+    if (
         prefix == "openai"
         or "openai" in provider_name
         or "ttapi" in provider_name
@@ -267,6 +274,8 @@ def get_request_options(
     if provider_type == "openai":
         if _supports_openai_reasoning_model(model_name):
             overrides["reasoning_effort"] = reasoning_level
+        return overrides
+    if provider_type == "mimo_openai":
         return overrides
     if provider_type == "anthropic":
         return _anthropic_overrides(reasoning_level, allow_low=from_override)

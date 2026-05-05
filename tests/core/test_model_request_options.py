@@ -132,6 +132,38 @@ def test_unknown_provider_no_injection() -> None:
     assert kwargs == {}
 
 
+def test_mimo_token_plan_chat_does_not_get_openai_reasoning_injection() -> None:
+    config = _resolved_model(
+        provider="MimoTokenPlan",
+        litellm_model="openai/mimo-v2.5",
+        api_base="https://token-plan-cn.xiaomimimo.com/v1",
+    )
+
+    kwargs = build_model_request_kwargs(
+        model_config=config,
+        litellm_model=config.litellm_model,
+        task_type="chat",
+    )
+
+    assert kwargs == {}
+
+
+def test_mimo_token_plan_reasoning_does_not_get_openai_reasoning_injection() -> None:
+    config = _resolved_model(
+        provider="MimoTokenPlan",
+        litellm_model="openai/mimo-v2.5-pro",
+        api_base="https://token-plan-cn.xiaomimimo.com/v1",
+    )
+
+    kwargs = build_model_request_kwargs(
+        model_config=config,
+        litellm_model=config.litellm_model,
+        task_type="reasoning",
+    )
+
+    assert kwargs == {}
+
+
 def test_user_override_via_reasoning_config() -> None:
     config = _resolved_model(
         provider="OpenAI",

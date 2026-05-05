@@ -20,6 +20,7 @@ import structlog
 
 from hypo_agent.core.channel_adapter import ChannelAdapter, WebUIAdapter
 from hypo_agent.core.config_loader import get_memory_dir
+from hypo_agent.core.model_router import ModelFallbackError
 from hypo_agent.core.model_runtime_context import build_runtime_model_context
 from hypo_agent.core.notion_todo_binding import (
     confirm_pending_notion_todo_candidate,
@@ -28,9 +29,11 @@ from hypo_agent.core.notion_todo_binding import (
     message_rejects_notion_todo_candidate,
     reject_pending_notion_todo_candidate,
 )
+from hypo_agent.core.notion_plan_editor import contains_plan_item
 from hypo_agent.core.rich_response import RichResponse
 from hypo_agent.core.skill_catalog import SkillManifest
 from hypo_agent.core.time_utils import utc_isoformat, utc_now
+from hypo_agent.core.tool_display import classify_tool_error, summarize_tool_failure, tool_display_payload
 from hypo_agent.core.uploads import guess_mime_type, sanitize_upload_filename
 from hypo_agent.exceptions import HypoAgentError
 from hypo_agent.memory.semantic_memory import estimate_token_count
@@ -171,6 +174,13 @@ _PIPELINE_RECOVERABLE_ERRORS = (
     ValueError,
 )
 
+
+def _int_or_default(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 _HISTORY_SKIP_MESSAGE_TAGS = {
     "reminder",
     "heartbeat",
@@ -216,6 +226,7 @@ _RETRYABLE_TOOLS = {
 
 _TERMINAL_SUCCESS_TOOLS = {
     "notion_export_page_markdown",
+    "notion_plan_add_items",
 }
 
 LEGACY_TOOL_NAME_REMAP = {
@@ -264,6 +275,15 @@ def _error_fields(exc: Exception) -> dict[str, str]:
         "error_type": type(exc).__name__,
         "error_msg": message,
     }
+
+
+def _generic_llm_error_message(exc: Exception) -> str:
+    message = str(exc).strip()
+    if not message:
+        return "模型调用失败：未返回可用回复，请稍后重试。"
+    if len(message) > 180:
+        message = f"{message[:177]}..."
+    return f"模型调用失败：{message}"
 
 
 class ChatModelRouter(Protocol):
@@ -2119,8 +2139,15 @@ class ChatPipeline:
                                         "status": output.status,
                                         "result": output.result,
                                         "error_info": output.error_info,
-                                        "metadata": {"ephemeral": True},
+                                        "metadata": {
+                                            "ephemeral": True,
+                                            "outcome_class": classify_tool_error(output.error_info),
+                                            "attempts": 1,
+                                        },
                                         "summary": self._tool_fallback_text(output),
+                                        "attempts": 1,
+                                        "outcome_class": classify_tool_error(output.error_info),
+                                        "retryable": False,
                                         "duration_ms": 0,
                                         "iteration": round_num,
                                     }
@@ -2296,8 +2323,11 @@ class ChatPipeline:
                                     "tool": tool_name,
                                     "error": str(exc),
                                     "will_retry": False,
+                                    "retryable": False,
+                                    "outcome_class": classify_tool_error(str(exc)),
                                     "iteration": round_num,
                                     "session_id": inbound.session_id,
+                                    **tool_display_payload(tool_name),
                                 },
                                 event_emitter=event_emitter,
                             )
@@ -2344,8 +2374,12 @@ class ChatPipeline:
                                     "tool": tool_name,
                                     "error": str(output.error_info or output.status),
                                     "will_retry": False,
+                                    "retryable": False,
+                                    "outcome_class": classify_tool_error(output.error_info),
+                                    "attempts": output.metadata.get("attempts", 1),
                                     "iteration": round_num,
                                     "session_id": inbound.session_id,
+                                    **tool_display_payload(tool_name),
                                 },
                                 event_emitter=event_emitter,
                             )
@@ -2375,6 +2409,13 @@ class ChatPipeline:
                         tool_result_for_event: Any = output.result
                         tool_metadata_for_event = dict(output.metadata)
                         tool_metadata_for_event["ephemeral"] = True
+                        attempts = _int_or_default(tool_metadata_for_event.get("attempts"), 1)
+                        outcome_class = str(
+                            tool_metadata_for_event.get("outcome_class")
+                            or classify_tool_error(output.error_info)
+                        )
+                        tool_metadata_for_event["attempts"] = attempts
+                        tool_metadata_for_event["outcome_class"] = outcome_class
                         tool_attachments_for_event = [
                             attachment.model_copy()
                             for attachment in output.attachments
@@ -2401,6 +2442,14 @@ class ChatPipeline:
                             tool_attachments_for_event.append(exported_attachment)
                         if tool_attachments_for_event:
                             collected_attachments.extend(tool_attachments_for_event)
+                        if output.status != "success":
+                            tool_summary = summarize_tool_failure(
+                                tool_name=tool_name,
+                                error=output.error_info,
+                                outcome_class=outcome_class,
+                                attempts=attempts,
+                                retryable=False,
+                            )
                         yield await self._format_event(
                             event_type="tool_call_result",
                             response=RichResponse(
@@ -2414,6 +2463,9 @@ class ChatPipeline:
                                         "error_info": output.error_info,
                                         "metadata": tool_metadata_for_event,
                                         "summary": tool_summary,
+                                        "attempts": attempts,
+                                        "outcome_class": outcome_class,
+                                        "retryable": output.status == "timeout",
                                         "duration_ms": duration_ms,
                                         "iteration": round_num,
                                     }
@@ -3371,7 +3423,67 @@ class ChatPipeline:
         confirmation = await self._try_handle_notion_todo_binding_confirmation(inbound)
         if confirmation is not None:
             return confirmation
+        notion_plan_add = await self._try_handle_notion_plan_add_request(inbound)
+        if notion_plan_add is not None:
+            return notion_plan_add
         return await self._try_handle_notion_todo_snapshot_request(inbound)
+
+    async def _try_handle_notion_plan_add_request(self, inbound: Message) -> str | None:
+        text = self._notion_plan_add_text(inbound)
+        if not text:
+            return None
+        if self.skill_manager is None or not self._tool_is_available("notion_plan_add_items"):
+            return None
+        try:
+            output = await self.skill_manager.invoke(
+                "notion_plan_add_items",
+                {"text": text},
+                session_id=inbound.session_id,
+                skill_name="direct",
+            )
+        except _PIPELINE_RECOVERABLE_ERRORS:
+            logger.warning("pipeline.notion_plan_add_shortcut_failed", exc_info=True)
+            return "写入计划通失败，请稍后重试。"
+        text_output = self._tool_fallback_text(output)
+        if text_output:
+            return text_output
+        if output.status != "success":
+            return str(output.error_info or "").strip() or "写入计划通失败，请稍后重试。"
+        return "计划通写入已执行，但没有返回可展示的结果。"
+
+    def _notion_plan_add_text(self, inbound: Message) -> str:
+        current = self._message_text_for_llm(inbound).strip()
+        if not current:
+            return ""
+        compact = self._compact_notion_todo_shortcut_text(current)
+        compact_casefold = compact.casefold()
+        if "计划通" not in compact and "notionplan" not in compact_casefold:
+            return ""
+        if not any(token in compact for token in ("加", "加入", "添加", "插入", "放到", "写入")):
+            return ""
+        if contains_plan_item(current):
+            return current
+        previous = self._recent_plan_item_text(inbound.session_id)
+        if previous:
+            return f"{previous}\n{current}"
+        return ""
+
+    def _recent_plan_item_text(self, session_id: str) -> str:
+        getter = getattr(self.session_memory, "get_recent_messages", None)
+        if not callable(getter):
+            return ""
+        try:
+            history = getter(session_id, limit=6)
+        except Exception:
+            logger.warning("pipeline.get_recent_messages_failed", exc_info=True)
+            return ""
+        for item in reversed(history or []):
+            if not isinstance(item, Message):
+                continue
+            text = str(item.text or "").strip()
+            if text and contains_plan_item(text):
+                return text
+        return ""
 
     async def _try_handle_pre_llm_message(self, inbound: Message) -> Message | None:
         if str(inbound.sender or "").strip().lower() != "user":
@@ -3725,7 +3837,12 @@ class ChatPipeline:
                         attempts=attempt,
                         final_status=output.status,
                     )
-                return output
+                if output.status == "success":
+                    return output
+                metadata = dict(output.metadata)
+                metadata.setdefault("attempts", attempt)
+                metadata.setdefault("outcome_class", classify_tool_error(output.error_info))
+                return output.model_copy(update={"metadata": metadata})
             logger.warning(
                 "tool.retrying",
                 session_id=session_id,
@@ -3739,8 +3856,12 @@ class ChatPipeline:
                     "tool": tool_name,
                     "error": str(output.error_info or "tool failed"),
                     "will_retry": True,
+                    "retryable": True,
+                    "attempts": attempt,
+                    "outcome_class": classify_tool_error(output.error_info),
                     "iteration": iteration,
                     "session_id": session_id,
+                    **tool_display_payload(tool_name),
                 },
                 event_emitter=event_emitter,
             )
@@ -4020,8 +4141,8 @@ class ChatPipeline:
                     await emit_result
             return "done"
         except TimeoutError as exc:
-            logger.warning(
-                "pipeline.error_converted",
+            logger.info(
+                "pipeline.timeout_handled",
                 session_id=inbound.session_id,
                 converted_type="LLM_TIMEOUT",
                 **_error_fields(exc),
@@ -4037,6 +4158,30 @@ class ChatPipeline:
             if inspect.isawaitable(emit_result):
                 await emit_result
             return "timeout"
+        except ModelFallbackError as exc:
+            logger.warning(
+                "pipeline.model_fallback_exhausted",
+                session_id=inbound.session_id,
+                converted_type="LLM_FALLBACK_EXHAUSTED",
+                requested_model=exc.requested_model,
+                task_type=exc.task_type,
+                attempted_chain=exc.attempted_chain,
+                **_error_fields(exc),
+            )
+            error_payload = {
+                "type": "error",
+                "code": "LLM_FALLBACK_EXHAUSTED",
+                "message": exc.user_message(),
+                "retryable": exc.retryable,
+                "session_id": inbound.session_id,
+                "requested_model": exc.requested_model,
+                "task_type": exc.task_type,
+                "attempted_chain": exc.attempted_chain,
+            }
+            emit_result = emitter(error_payload)
+            if inspect.isawaitable(emit_result):
+                await emit_result
+            return "error"
         except RuntimeError as exc:
             logger.warning(
                 "pipeline.error_converted",
@@ -4047,7 +4192,7 @@ class ChatPipeline:
             error_payload = {
                 "type": "error",
                 "code": "LLM_RUNTIME_ERROR",
-                "message": "LLM 调用失败，请检查配置或稍后重试",
+                "message": _generic_llm_error_message(exc),
                 "retryable": True,
                 "session_id": inbound.session_id,
             }
@@ -4065,7 +4210,7 @@ class ChatPipeline:
             error_payload = {
                 "type": "error",
                 "code": "LLM_RUNTIME_ERROR",
-                "message": "LLM 调用失败，请检查配置或稍后重试",
+                "message": _generic_llm_error_message(exc),
                 "retryable": True,
                 "session_id": inbound.session_id,
             }

@@ -207,6 +207,23 @@ def test_read_file_resolves_exported_attachment_filename_from_memory_exports(
     assert output.metadata["path"] == str(exported)
 
 
+def test_read_file_returns_resource_recovery_action_for_missing_file(tmp_path: Path) -> None:
+    skill, writable, _ = _build_skill(tmp_path)
+    nearby = writable / "channel-report.md"
+    older = writable / "old-report.md"
+    nearby.write_text("report", encoding="utf-8")
+    older.write_text("old", encoding="utf-8")
+
+    output = asyncio.run(skill.execute("read_file", {"path": "report.md"}))
+
+    assert output.status == "error"
+    assert "File not found" in output.error_info
+    assert output.metadata["resource_resolution"]["status"] == "ambiguous"
+    assert output.metadata["recovery_action"]["type"] == "ask_user"
+    assert output.metadata["recovery_action"]["reason"] == "multiple_candidates"
+    assert output.metadata["resource_candidates"][0]["display_name"] == "channel-report.md"
+
+
 def test_write_file_allows_whitelisted_path(tmp_path: Path) -> None:
     skill, writable, _ = _build_skill(tmp_path)
     file_path = writable / "nested" / "notes.md"

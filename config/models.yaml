@@ -1,15 +1,70 @@
-default_model: DeepSeekV4
+default_model: MimoV25Flash
 
 task_routing:
-  chat: DeepSeekV4
-  reasoning: DeepSeekV4
-  heartbeat: DeepSeekV4
-  lightweight: GenesiQWen35BA3B
-  compression: GenesiQWen35BA3B
+  chat: MimoV25Flash
+  reasoning: MimoV25Pro
+  heartbeat: MimoV25Flash
+  lightweight: MimoV25Flash
+  compression: MimoV25Flash
   embedding: VolcanoEmbedding
-  vision: GPT
+  vision: MimoV2Omni
 
 models:
+  MimoV25Flash:
+    litellm_model: "openai/mimo-v2.5"
+    provider: "MimoTokenPlan"
+    supports_tool_calling: true
+    description: "MiMo V2.5 Flash via Xiaomi Token Plan"
+    fallback: DeepSeekV4
+    reasoning_config:
+      chat: low
+      lightweight: low
+      compression: low
+      reasoning: medium
+  MimoV25Pro:
+    litellm_model: "openai/mimo-v2.5-pro"
+    provider: "MimoTokenPlan"
+    supports_tool_calling: true
+    description: "MiMo V2.5 Pro via Xiaomi Token Plan"
+    fallback: MimoV25Flash
+    reasoning_config:
+      chat: medium
+      reasoning: high
+  MimoV2Pro:
+    litellm_model: "openai/mimo-v2-pro"
+    provider: "MimoTokenPlan"
+    supports_tool_calling: true
+    description: "MiMo V2 Pro via Xiaomi Token Plan"
+    fallback: MimoV25Flash
+    reasoning_config:
+      chat: medium
+      reasoning: high
+  MimoV2Omni:
+    litellm_model: "openai/mimo-v2-omni"
+    provider: "MimoTokenPlan"
+    supports_tool_calling: true
+    description: "MiMo V2 Omni via Xiaomi Token Plan"
+    fallback: MimoV25Flash
+  MimoV25TTS:
+    litellm_model: "openai/mimo-v2.5-tts"
+    provider: "MimoTokenPlan"
+    description: "MiMo V2.5 TTS via Xiaomi Token Plan"
+    fallback: null
+  MimoV25TTSVoiceClone:
+    litellm_model: "openai/mimo-v2.5-tts-voiceclone"
+    provider: "MimoTokenPlan"
+    description: "MiMo V2.5 TTS VoiceClone via Xiaomi Token Plan"
+    fallback: null
+  MimoV25TTSVoiceDesign:
+    litellm_model: "openai/mimo-v2.5-tts-voicedesign"
+    provider: "MimoTokenPlan"
+    description: "MiMo V2.5 TTS VoiceDesign via Xiaomi Token Plan"
+    fallback: null
+  MimoV2TTS:
+    litellm_model: "openai/mimo-v2-tts"
+    provider: "MimoTokenPlan"
+    description: "MiMo V2 TTS via Xiaomi Token Plan"
+    fallback: null
   GPT:
     litellm_model: "openai/gpt-5.4"
     provider: "VSPLab"
@@ -34,42 +89,12 @@ models:
     reasoning_config:
       chat: low
       reasoning: high
-  GeminiPro3_1:
-    litellm_model: "anthropic/gemini-3.1-pro-high"
-    provider: "VSPLab_Gemini"
+  DeepSeekV4Pro:
+    litellm_model: "deepseek/deepseek-v4-pro"
+    provider: Deepseek
     supports_tool_calling: true
-    description: "Gemini 3.1 Pro via VSPLab Antigravity"
-    fallback: GeminiPro3_0
-  GeminiPro3_0:
-    litellm_model: "anthropic/gemini-3-pro-high"
-    provider: "VSPLab_Gemini"
-    supports_tool_calling: true
-    description: "Gemini 3.0 Pro via VSPLab Antigravity"
-    fallback: GeminiLow
-  GeminiLow:
-    litellm_model: "anthropic/gemini-3.1-pro-low"
-    provider: "VSPLab_Gemini"
-    supports_tool_calling: true
-    description: "Gemini 3.1 Pro Low via VSPLab Antigravity"
-    fallback: Claude
-  GeminiFlash:
-    litellm_model: "anthropic/gemini-3-flash"
-    provider: "VSPLab_Gemini"
-    supports_tool_calling: true
-    description: "Gemini 3 Flash via VSPLab Antigravity"
-    fallback: EdenQwen
-  Claude:
-    litellm_model: "anthropic/claude-opus-4-5-thinking"
-    provider: "VSPLab_Claude"
-    supports_tool_calling: true
-    description: "Claude Opus 4.5 Thinking via VSPLab Antigravity"
-    fallback: EdenQwen
-  GenesisQwen122B:
-    litellm_model: "openai/qwen3.5-122b"
-    provider: "Genesis"
-    supports_tool_calling: true
-    description: "Genesis local Qwen3.5 122B"
-    fallback: CodingPlanAuto
+    description: "Deepseek V4 Pro"
+    fallback: DeepSeekV4
     reasoning_config:
       chat: low
       reasoning: high

@@ -17,6 +17,7 @@ from hypo_agent.core.directory_index import (
     load_directory_index_payload,
     merge_directory_descriptions,
 )
+from hypo_agent.core.resource_resolution import ResourceResolution, ResourceResolver
 from hypo_agent.models import SkillOutput
 from hypo_agent.security.permission_manager import PermissionManager
 from hypo_agent.skills.base import BaseSkill
@@ -190,7 +191,12 @@ class FileSystemSkill(BaseSkill):
             return denied
 
         if not path.exists() or not path.is_file():
-            return SkillOutput(status="error", error_info=f"File not found: {path}")
+            resolution = self._resolve_missing_resource(raw_path)
+            return SkillOutput(
+                status="error",
+                error_info=f"File not found: {path}",
+                metadata=self._resource_resolution_metadata(resolution),
+            )
 
         ext = path.suffix.lower()
         try:
@@ -523,6 +529,45 @@ class FileSystemSkill(BaseSkill):
             if candidate.exists() and candidate.is_file():
                 return candidate
         return unique_candidates[0]
+
+    def _resolve_missing_resource(self, raw_path: str) -> ResourceResolution:
+        search_roots = []
+        if self.permission_manager is not None:
+            search_roots.extend(self.permission_manager.paths_for_operation("read"))
+        search_roots.append(get_memory_dir() / "exports")
+        resolver = ResourceResolver(search_roots=search_roots)
+        return resolver.resolve(raw_path, purpose="read_file")
+
+    def _resource_resolution_metadata(self, resolution: ResourceResolution) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "resource_resolution": {
+                "status": resolution.status,
+            },
+            "resource_candidates": [
+                {
+                    "kind": candidate.ref.kind,
+                    "uri": candidate.ref.uri,
+                    "display_name": candidate.ref.display_name,
+                    "score": candidate.score,
+                    "source": candidate.source,
+                    "reason": candidate.reason,
+                }
+                for candidate in resolution.candidates
+            ],
+        }
+        if resolution.ref is not None:
+            metadata["resource_resolution"]["ref"] = {
+                "kind": resolution.ref.kind,
+                "uri": resolution.ref.uri,
+                "display_name": resolution.ref.display_name,
+            }
+        if resolution.recovery_action is not None:
+            metadata["recovery_action"] = {
+                "type": resolution.recovery_action.type,
+                "reason": resolution.recovery_action.reason,
+                "message": resolution.recovery_action.message,
+            }
+        return metadata
 
     def _truncate_text(self, content: str) -> tuple[str, bool]:
         if len(content) <= self.MAX_FILE_CHARS:

@@ -12,14 +12,6 @@ from time import perf_counter
 from typing import Any
 
 import structlog
-try:
-    from litellm import acompletion as litellm_acompletion
-    from litellm import aembedding as litellm_aembedding
-    from litellm.exceptions import OpenAIError as LiteLLMOpenAIError
-except ImportError:  # pragma: no cover - depends on runtime environment
-    litellm_acompletion = None
-    litellm_aembedding = None
-    LiteLLMOpenAIError = None
 
 try:
     from openai import OpenAIError as OpenAIClientError
@@ -32,6 +24,11 @@ from hypo_agent.core.antigravity_compat import (
     transform_antigravity_tools,
 )
 from hypo_agent.core.config_loader import RuntimeModelConfig
+from hypo_agent.core.litellm_runtime import (
+    LiteLLMOpenAIError,
+    litellm_acompletion,
+    litellm_aembedding,
+)
 from hypo_agent.core.model_runtime_context import (
     RUNTIME_MODEL_CONTEXT_HEADING,
     build_runtime_model_context,
@@ -52,6 +49,69 @@ _MODEL_ROUTER_PROVIDER_ERRORS = tuple(
     if isinstance(error_type, type)
 )
 _MODEL_ROUTER_ERRORS = _MODEL_ROUTER_BASE_ERRORS + _MODEL_ROUTER_PROVIDER_ERRORS
+
+_DSML_TOOL_TAG_NAME_PATTERN = r"(?:tool|took)_calls"
+_DSML_TOOL_BLOCK_RE = re.compile(
+    r"<\s*[｜|]\s*DSML\s*[｜|]\s*"
+    + _DSML_TOOL_TAG_NAME_PATTERN
+    + r"\s*>(?P<body>.*?)</\s*[｜|]\s*DSML\s*[｜|]\s*"
+    + _DSML_TOOL_TAG_NAME_PATTERN
+    + r"\s*>",
+    flags=re.DOTALL | re.IGNORECASE,
+)
+_DSML_TOOL_START_RE = re.compile(
+    r"<\s*[｜|]\s*DSML\s*[｜|]\s*"
+    + _DSML_TOOL_TAG_NAME_PATTERN
+    + r"\s*>",
+    flags=re.IGNORECASE,
+)
+_DSML_TOOL_END_RE = re.compile(
+    r"</\s*[｜|]\s*DSML\s*[｜|]\s*"
+    + _DSML_TOOL_TAG_NAME_PATTERN
+    + r"\s*>",
+    flags=re.IGNORECASE,
+)
+_DSML_INVOKE_RE = re.compile(
+    r"<\s*[｜|]\s*DSML\s*[｜|]\s*invoke\b(?P<attrs>[^>]*)>"
+    r"(?P<body>.*?)</\s*[｜|]\s*DSML\s*[｜|]\s*invoke\s*>",
+    flags=re.DOTALL | re.IGNORECASE,
+)
+_DSML_PARAMETER_RE = re.compile(
+    r"<\s*[｜|]\s*DSML\s*[｜|]\s*parameter\b(?P<attrs>[^>]*)>"
+    r"(?P<body>.*?)</\s*[｜|]\s*DSML\s*[｜|]\s*parameter\s*>",
+    flags=re.DOTALL | re.IGNORECASE,
+)
+
+
+class ModelFallbackError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        requested_model: str,
+        task_type: str | None,
+        attempted_chain: list[dict[str, Any]],
+        retryable: bool = True,
+    ) -> None:
+        super().__init__(message)
+        self.requested_model = requested_model
+        self.task_type = task_type
+        self.attempted_chain = attempted_chain
+        self.retryable = retryable
+
+    def user_message(self) -> str:
+        chain = " -> ".join(
+            str(item.get("model") or "").strip()
+            for item in self.attempted_chain
+            if str(item.get("model") or "").strip()
+        )
+        if self.task_type == "vision":
+            prefix = "图片理解模型调用失败"
+        else:
+            prefix = "模型调用失败"
+        if chain:
+            return f"{prefix}：已尝试 {chain}，均未成功。请稍后重试。"
+        return f"{prefix}：所有备用模型均不可用，请稍后重试。"
 
 
 class ModelRouter:
@@ -111,14 +171,25 @@ class ModelRouter:
         event_emitter: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> dict[str, Any]:
         attempted: list[str] = []
+        attempt_details: list[dict[str, Any]] = []
         last_error: Exception | None = None
         started_at = perf_counter()
         candidate_chain = self._candidate_chain(model_name)
 
         for index, candidate in enumerate(candidate_chain):
             cfg = self.config.models[candidate]
+            candidate_started_at = perf_counter()
             if cfg.provider is None or cfg.litellm_model is None:
                 attempted.append(f"{candidate}(skipped)")
+                attempt_details.append(
+                    self._attempt_detail(
+                        candidate,
+                        cfg,
+                        status="skipped",
+                        reason="provider_or_litellm_model_missing",
+                        started_at=candidate_started_at,
+                    )
+                )
                 self.logger.info(
                     "model_skipped",
                     requested_model=model_name,
@@ -126,8 +197,35 @@ class ModelRouter:
                     reason="provider_or_litellm_model_missing",
                 )
                 continue
+            if task_type == "vision" and cfg.type != "vision":
+                attempted.append(f"{candidate}(no-vision)")
+                attempt_details.append(
+                    self._attempt_detail(
+                        candidate,
+                        cfg,
+                        status="skipped",
+                        reason="vision_not_supported",
+                        started_at=candidate_started_at,
+                    )
+                )
+                self.logger.warning(
+                    "model_skipped",
+                    requested_model=model_name,
+                    resolved_model=candidate,
+                    reason="vision_not_supported",
+                )
+                continue
             if tools and cfg.supports_tool_calling is False:
                 attempted.append(f"{candidate}(no-tools)")
+                attempt_details.append(
+                    self._attempt_detail(
+                        candidate,
+                        cfg,
+                        status="skipped",
+                        reason="tool_calling_not_supported",
+                        started_at=candidate_started_at,
+                    )
+                )
                 self.logger.warning(
                     "model_skipped",
                     requested_model=model_name,
@@ -232,8 +330,7 @@ class ModelRouter:
                     tool_calls,
                     reverse_tool_name_map,
                 )
-                if tool_calls:
-                    text = self._strip_embedded_tool_payload_text(text)
+                text = self._strip_embedded_tool_payload_text(text)
                 reasoning_content = self._extract_reasoning_content(response)
                 assistant_message: dict[str, Any] = {
                     "role": "assistant",
@@ -274,6 +371,16 @@ class ModelRouter:
             except _MODEL_ROUTER_ERRORS as exc:  # pragma: no cover - exercised in tests
                 attempted.append(candidate)
                 last_error = exc
+                attempt_details.append(
+                    self._attempt_detail(
+                        candidate,
+                        cfg,
+                        status="failed",
+                        reason=str(exc),
+                        started_at=candidate_started_at,
+                        error=exc,
+                    )
+                )
                 self.logger.warning(
                     "model_call_failed",
                     requested_model=model_name,
@@ -288,6 +395,7 @@ class ModelRouter:
                     provider=cfg.provider,
                     session_id=session_id,
                     event_emitter=event_emitter,
+                    attempted_chain=attempt_details,
                 )
 
         await self._emit_fallback_exhausted_event(
@@ -296,9 +404,14 @@ class ModelRouter:
             reason=str(last_error or "unknown model failure"),
             session_id=session_id,
             event_emitter=event_emitter,
+            attempted_chain=attempt_details,
+            task_type=task_type,
         )
-        raise RuntimeError(
-            f"All models failed for '{model_name}'. Attempted chain: {attempted}"
+        raise ModelFallbackError(
+            f"All models failed for '{model_name}'. Attempted chain: {attempted}",
+            requested_model=model_name,
+            task_type=task_type,
+            attempted_chain=attempt_details,
         ) from last_error
 
     async def stream(
@@ -313,14 +426,25 @@ class ModelRouter:
         event_emitter: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> AsyncIterator[str]:
         attempted: list[str] = []
+        attempt_details: list[dict[str, Any]] = []
         last_error: Exception | None = None
         started_at = perf_counter()
         candidate_chain = self._candidate_chain(model_name)
 
         for index, candidate in enumerate(candidate_chain):
             cfg = self.config.models[candidate]
+            candidate_started_at = perf_counter()
             if cfg.provider is None or cfg.litellm_model is None:
                 attempted.append(f"{candidate}(skipped)")
+                attempt_details.append(
+                    self._attempt_detail(
+                        candidate,
+                        cfg,
+                        status="skipped",
+                        reason="provider_or_litellm_model_missing",
+                        started_at=candidate_started_at,
+                    )
+                )
                 self.logger.info(
                     "model_skipped",
                     requested_model=model_name,
@@ -328,8 +452,35 @@ class ModelRouter:
                     reason="provider_or_litellm_model_missing",
                 )
                 continue
+            if task_type == "vision" and cfg.type != "vision":
+                attempted.append(f"{candidate}(no-vision)")
+                attempt_details.append(
+                    self._attempt_detail(
+                        candidate,
+                        cfg,
+                        status="skipped",
+                        reason="vision_not_supported",
+                        started_at=candidate_started_at,
+                    )
+                )
+                self.logger.warning(
+                    "model_skipped",
+                    requested_model=model_name,
+                    resolved_model=candidate,
+                    reason="vision_not_supported",
+                )
+                continue
             if tools and cfg.supports_tool_calling is False:
                 attempted.append(f"{candidate}(no-tools)")
+                attempt_details.append(
+                    self._attempt_detail(
+                        candidate,
+                        cfg,
+                        status="skipped",
+                        reason="tool_calling_not_supported",
+                        started_at=candidate_started_at,
+                    )
+                )
                 self.logger.warning(
                     "model_skipped",
                     requested_model=model_name,
@@ -419,13 +570,31 @@ class ModelRouter:
 
                 response_stream = await self._acompletion(**kwargs)
 
+                pending_text = ""
                 async for chunk in response_stream:
                     usage = self._extract_usage(chunk, default=usage)
                     text = self._extract_delta_text(chunk)
                     if not text:
                         continue
+                    pending_text += text
+                    visible_chunks, pending_text = self._consume_visible_stream_text(
+                        pending_text,
+                    )
+                    for visible_chunk in visible_chunks:
+                        if not visible_chunk:
+                            continue
+                        started = True
+                        yield visible_chunk
+
+                visible_chunks, pending_text = self._consume_visible_stream_text(
+                    pending_text,
+                    flush=True,
+                )
+                for visible_chunk in visible_chunks:
+                    if not visible_chunk:
+                        continue
                     started = True
-                    yield text
+                    yield visible_chunk
 
                 event_payload = {
                     "event": "model_stream_success",
@@ -451,16 +620,41 @@ class ModelRouter:
                 return
             except _MODEL_ROUTER_ERRORS as exc:  # pragma: no cover - exercised in tests
                 if started:
+                    attempt_details.append(
+                        self._attempt_detail(
+                            candidate,
+                            cfg,
+                            status="failed_after_output",
+                            reason=str(exc),
+                            started_at=candidate_started_at,
+                            error=exc,
+                        )
+                    )
                     self.logger.error(
                         "model_stream_failed_after_output",
                         requested_model=model_name,
                         resolved_model=candidate,
                         error=str(exc),
                     )
-                    raise
+                    raise ModelFallbackError(
+                        f"Stream failed after output started for '{model_name}' on '{candidate}'.",
+                        requested_model=model_name,
+                        task_type=task_type,
+                        attempted_chain=attempt_details,
+                    ) from exc
 
                 attempted.append(candidate)
                 last_error = exc
+                attempt_details.append(
+                    self._attempt_detail(
+                        candidate,
+                        cfg,
+                        status="failed",
+                        reason=str(exc),
+                        started_at=candidate_started_at,
+                        error=exc,
+                    )
+                )
                 self.logger.warning(
                     "model_stream_failed",
                     requested_model=model_name,
@@ -475,6 +669,7 @@ class ModelRouter:
                     provider=cfg.provider,
                     session_id=session_id,
                     event_emitter=event_emitter,
+                    attempted_chain=attempt_details,
                 )
 
         await self._emit_fallback_exhausted_event(
@@ -483,9 +678,14 @@ class ModelRouter:
             reason=str(last_error or "unknown model failure"),
             session_id=session_id,
             event_emitter=event_emitter,
+            attempted_chain=attempt_details,
+            task_type=task_type,
         )
-        raise RuntimeError(
-            f"All stream models failed for '{model_name}'. Attempted chain: {attempted}"
+        raise ModelFallbackError(
+            f"All stream models failed for '{model_name}'. Attempted chain: {attempted}",
+            requested_model=model_name,
+            task_type=task_type,
+            attempted_chain=attempt_details,
         ) from last_error
 
     def get_model_for_task(self, task_type: str) -> str:
@@ -608,6 +808,7 @@ class ModelRouter:
         provider: str | None,
         session_id: str | None,
         event_emitter: Callable[[dict[str, Any]], Awaitable[None] | None] | None,
+        attempted_chain: list[dict[str, Any]] | None = None,
     ) -> None:
         next_index = failed_index + 1
         if next_index >= len(candidate_chain):
@@ -631,6 +832,7 @@ class ModelRouter:
                 "requested_model": requested_model,
                 "provider": provider,
                 "session_id": session_id,
+                "attempted_chain": list(attempted_chain or []),
             },
         )
 
@@ -642,6 +844,8 @@ class ModelRouter:
         reason: str,
         session_id: str | None,
         event_emitter: Callable[[dict[str, Any]], Awaitable[None] | None] | None,
+        attempted_chain: list[dict[str, Any]] | None = None,
+        task_type: str | None = None,
     ) -> None:
         failed_model = candidate_chain[-1] if candidate_chain else requested_model
         self.logger.error(
@@ -658,7 +862,52 @@ class ModelRouter:
                 "reason": reason,
                 "requested_model": requested_model,
                 "session_id": session_id,
+                "task_type": task_type,
+                "attempted_chain": list(attempted_chain or []),
+                "user_message": ModelFallbackError(
+                    "model fallback exhausted",
+                    requested_model=requested_model,
+                    task_type=task_type,
+                    attempted_chain=list(attempted_chain or []),
+                ).user_message(),
             },
+        )
+
+    def _attempt_detail(
+        self,
+        model_name: str,
+        cfg: Any,
+        *,
+        status: str,
+        reason: str,
+        started_at: float,
+        error: Exception | None = None,
+    ) -> dict[str, Any]:
+        detail: dict[str, Any] = {
+            "model": model_name,
+            "provider": getattr(cfg, "provider", None),
+            "model_id": getattr(cfg, "litellm_model", None),
+            "status": status,
+            "reason": reason,
+            "capabilities": {
+                "vision": getattr(cfg, "type", None) == "vision",
+                "tool_calling": getattr(cfg, "supports_tool_calling", None),
+            },
+            "latency_ms": round((perf_counter() - started_at) * 1000.0, 1),
+            "retryable": self._model_error_retryable(error),
+        }
+        if error is not None:
+            detail["error_class"] = type(error).__name__
+        return detail
+
+    def _model_error_retryable(self, error: Exception | None) -> bool:
+        if error is None:
+            return True
+        text = str(error).lower()
+        if any(token in text for token in ("invalid", "unsupported", "not found", "bad request", "permission")):
+            return False
+        return isinstance(error, (asyncio.TimeoutError, TimeoutError, OSError, RuntimeError)) or bool(
+            _MODEL_ROUTER_PROVIDER_ERRORS and isinstance(error, _MODEL_ROUTER_PROVIDER_ERRORS)
         )
 
     def _apply_runtime_model_context(
@@ -1245,36 +1494,27 @@ class ModelRouter:
 
     def _extract_dsml_tool_calls(self, text: str) -> list[dict[str, Any]]:
         raw = str(text or "")
-        if "DSML" not in raw or "tool_calls" not in raw:
+        lowered = raw.casefold()
+        if "dsml" not in lowered or (
+            "tool_calls" not in lowered and "took_calls" not in lowered
+        ):
             return []
 
-        block_match = re.search(
-            r"<\s*｜DSML｜tool_calls\s*>(?P<body>.*?)</\s*｜DSML｜tool_calls\s*>",
-            raw,
-            flags=re.DOTALL,
-        )
+        block_match = _DSML_TOOL_BLOCK_RE.search(raw)
         if block_match is None:
             return []
 
         block_body = block_match.group("body")
         normalized: list[dict[str, Any]] = []
-        invoke_pattern = re.compile(
-            r"<\s*｜DSML｜invoke\b(?P<attrs>[^>]*)>(?P<body>.*?)</\s*｜DSML｜invoke\s*>",
-            flags=re.DOTALL,
-        )
-        param_pattern = re.compile(
-            r"<\s*｜DSML｜parameter\b(?P<attrs>[^>]*)>(?P<body>.*?)</\s*｜DSML｜parameter\s*>",
-            flags=re.DOTALL,
-        )
 
-        for idx, invoke_match in enumerate(invoke_pattern.finditer(block_body), start=1):
+        for idx, invoke_match in enumerate(_DSML_INVOKE_RE.finditer(block_body), start=1):
             invoke_attrs = self._parse_dsml_attrs(invoke_match.group("attrs"))
             tool_name = str(invoke_attrs.get("name") or "").strip()
             if not tool_name:
                 continue
 
             arguments: dict[str, Any] = {}
-            for param_match in param_pattern.finditer(invoke_match.group("body")):
+            for param_match in _DSML_PARAMETER_RE.finditer(invoke_match.group("body")):
                 param_attrs = self._parse_dsml_attrs(param_match.group("attrs"))
                 param_name = str(param_attrs.get("name") or "").strip()
                 if not param_name:
@@ -1318,15 +1558,57 @@ class ModelRouter:
 
     def _strip_embedded_tool_payload_text(self, text: str) -> str:
         raw = str(text or "")
-        if "DSML" not in raw or "tool_calls" not in raw:
+        if "dsml" not in raw.casefold():
             return raw
-        stripped = re.sub(
-            r"<\s*｜DSML｜tool_calls\s*>.*?</\s*｜DSML｜tool_calls\s*>",
-            "",
-            raw,
-            flags=re.DOTALL,
-        ).strip()
-        return stripped
+        return _DSML_TOOL_BLOCK_RE.sub("", raw).strip()
+
+    def _consume_visible_stream_text(
+        self,
+        pending_text: str,
+        *,
+        flush: bool = False,
+    ) -> tuple[list[str], str]:
+        pending = str(pending_text or "")
+        visible: list[str] = []
+
+        while pending:
+            start_match = _DSML_TOOL_START_RE.search(pending)
+            if start_match is None:
+                if flush:
+                    visible.append(pending)
+                    return visible, ""
+
+                last_tag_start = pending.rfind("<")
+                if last_tag_start < 0:
+                    visible.append(pending)
+                    return visible, ""
+                if not self._could_be_partial_dsml_tool_start(pending[last_tag_start:]):
+                    visible.append(pending)
+                    return visible, ""
+                if last_tag_start > 0:
+                    visible.append(pending[:last_tag_start])
+                    return visible, pending[last_tag_start:]
+                return visible, pending
+
+            if start_match.start() > 0:
+                visible.append(pending[: start_match.start()])
+
+            end_match = _DSML_TOOL_END_RE.search(pending, start_match.end())
+            if end_match is None:
+                if flush:
+                    return visible, ""
+                return visible, pending[start_match.start() :]
+
+            pending = pending[end_match.end() :]
+
+        return visible, ""
+
+    def _could_be_partial_dsml_tool_start(self, text: str) -> bool:
+        normalized = re.sub(r"\s+", "", str(text or "").casefold()).replace("｜", "|")
+        if not normalized:
+            return False
+        markers = ("<|dsml|tool_calls>", "<|dsml|took_calls>")
+        return any(marker.startswith(normalized) for marker in markers)
 
     def _extract_delta_text(self, chunk: Any) -> str:
         choices = self._read_field(chunk, "choices") or []

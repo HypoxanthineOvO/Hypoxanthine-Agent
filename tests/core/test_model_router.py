@@ -8,7 +8,7 @@ import pytest
 from litellm.exceptions import InternalServerError
 
 from hypo_agent.core.config_loader import RuntimeModelConfig
-from hypo_agent.core.model_router import ModelRouter
+from hypo_agent.core.model_router import ModelFallbackError, ModelRouter
 
 
 def _web_search_tool_schema() -> dict[str, Any]:
@@ -399,17 +399,101 @@ def test_fallback_emits_event(runtime_config: RuntimeModelConfig) -> None:
         "openai/gemini-2.5-pro",
         "openai/ep-20251215171209-4z5qk",
     ]
-    assert emitted == [
-        {
-            "type": "model_fallback",
-            "failed_model": "Gemini3Pro",
-            "reason": "API timeout",
-            "fallback_model": "DeepseekV3_2",
-            "requested_model": "Gemini3Pro",
-            "provider": "Hiapi",
-            "session_id": "s-fallback",
-        }
+    assert len(emitted) == 1
+    assert emitted[0]["type"] == "model_fallback"
+    assert emitted[0]["failed_model"] == "Gemini3Pro"
+    assert emitted[0]["fallback_model"] == "DeepseekV3_2"
+    assert emitted[0]["attempted_chain"][0]["model"] == "Gemini3Pro"
+    assert emitted[0]["attempted_chain"][0]["error_class"] == "TimeoutError"
+
+
+def test_fallback_exhausted_raises_structured_error(runtime_config: RuntimeModelConfig) -> None:
+    emitted: list[dict] = []
+
+    async def fake_acompletion(**kwargs):
+        raise TimeoutError(f"{kwargs['model']} timeout")
+
+    async def event_emitter(event: dict) -> None:
+        emitted.append(event)
+
+    router = ModelRouter(runtime_config, acompletion_fn=fake_acompletion)
+
+    with pytest.raises(ModelFallbackError) as exc_info:
+        asyncio.run(
+            router.call(
+                "Gemini3Pro",
+                [{"role": "user", "content": "hi"}],
+                session_id="s-failed",
+                event_emitter=event_emitter,
+            )
+        )
+
+    assert [item["model"] for item in exc_info.value.attempted_chain] == [
+        "Gemini3Pro",
+        "DeepseekV3_2",
+        "QwenPlus",
     ]
+    exhausted = emitted[-1]
+    assert exhausted["type"] == "model_fallback_exhausted"
+    assert exhausted["attempted_chain"][0]["model"] == "Gemini3Pro"
+    assert "Gemini3Pro -> DeepseekV3_2 -> QwenPlus" in exhausted["user_message"]
+
+
+def test_vision_task_skips_non_vision_fallbacks() -> None:
+    runtime = RuntimeModelConfig.model_validate(
+        {
+            "default_model": "VisionA",
+            "task_routing": {"vision": "VisionA"},
+            "models": {
+                "VisionA": {
+                    "type": "vision",
+                    "provider": "Hiapi",
+                    "litellm_model": "openai/vision-a",
+                    "fallback": "ChatOnly",
+                    "api_base": "https://example.test/v1",
+                    "api_key": "key",
+                },
+                "ChatOnly": {
+                    "type": "chat",
+                    "provider": "Hiapi",
+                    "litellm_model": "openai/chat",
+                    "fallback": "VisionB",
+                    "api_base": "https://example.test/v1",
+                    "api_key": "key",
+                },
+                "VisionB": {
+                    "type": "vision",
+                    "provider": "Hiapi",
+                    "litellm_model": "openai/vision-b",
+                    "fallback": None,
+                    "api_base": "https://example.test/v1",
+                    "api_key": "key",
+                },
+            },
+        }
+    )
+    called_models: list[str] = []
+
+    async def fake_acompletion(**kwargs):
+        called_models.append(kwargs["model"])
+        if kwargs["model"] == "openai/vision-a":
+            raise TimeoutError("vision-a timeout")
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="vision ok"))],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    router = ModelRouter(runtime, acompletion_fn=fake_acompletion)
+    text = asyncio.run(
+        router.call(
+            "VisionA",
+            [{"role": "user", "content": [{"type": "text", "text": "看图"}]}],
+            task_type="vision",
+        )
+    )
+
+    assert text == "vision ok"
+    assert called_models == ["openai/vision-a", "openai/vision-b"]
 
 
 def test_model_router_fallback_sanitizes_tool_call_ids_for_gpt5_responses_models() -> None:
@@ -1153,6 +1237,96 @@ def test_model_router_call_with_tools_extracts_text_embedded_dsml_tool_call(
         '{"path": "/home/heyx/Hypo-Agent/memory/knowledge/belongings.md", '
         '"content": "# 重要物品存放位置\\n学生证: 工位左手边抽屉"}'
     )
+
+
+def test_model_router_call_with_tools_strips_non_executable_dsml_payload(
+    runtime_config: RuntimeModelConfig,
+) -> None:
+    async def fake_acompletion(**kwargs):
+        del kwargs
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            "搜索完成。\n"
+                            "<｜DSML｜tool_calls>"
+                            "<｜DSML｜invoke>"
+                            "<｜DSML｜parameter name=\"query\">Hypo Agent</｜DSML｜parameter>"
+                            "</｜DSML｜invoke>"
+                            "</｜DSML｜tool_calls>\n"
+                            "请参考上面的结果。"
+                        )
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    router = ModelRouter(runtime_config, acompletion_fn=fake_acompletion)
+    payload = asyncio.run(
+        router.call_with_tools(
+            "Gemini3Pro",
+            [{"role": "user", "content": "hi"}],
+            tools=[_web_search_tool_schema()],
+        )
+    )
+
+    assert payload["tool_calls"] == []
+    assert payload["text"] == "搜索完成。\n\n请参考上面的结果。"
+    assert "DSML" not in payload["text"]
+
+
+def test_model_router_stream_strips_split_dsml_tool_payload(
+    runtime_config: RuntimeModelConfig,
+) -> None:
+    async def fake_acompletion(**kwargs):
+        assert kwargs["stream"] is True
+
+        async def _gen():
+            yield {"choices": [{"delta": {"content": "搜索完成。\n<｜DS"}}]}
+            yield {
+                "choices": [
+                    {
+                        "delta": {
+                            "content": (
+                                "ML｜tool_calls><｜DSML｜invoke name=\"web_search\">"
+                                "<｜DSML｜parameter name=\"query\">Hypo Agent"
+                            )
+                        }
+                    }
+                ]
+            }
+            yield {
+                "choices": [
+                    {
+                        "delta": {
+                            "content": (
+                                "</｜DSML｜parameter></｜DSML｜invoke>"
+                                "</｜DSML｜tool_calls>\n最终答案。"
+                            )
+                        }
+                    }
+                ]
+            }
+
+        return _gen()
+
+    router = ModelRouter(runtime_config, acompletion_fn=fake_acompletion)
+
+    async def _collect() -> list[str]:
+        chunks: list[str] = []
+        async for chunk in router.stream(
+            "Gemini3Pro",
+            [{"role": "user", "content": "hi"}],
+            tools=[_web_search_tool_schema()],
+        ):
+            chunks.append(chunk)
+        return chunks
+
+    chunks = asyncio.run(_collect())
+    assert "".join(chunks) == "搜索完成。\n\n最终答案。"
+    assert "DSML" not in "".join(chunks)
 
 
 def test_model_router_does_not_pass_api_base_when_missing() -> None:

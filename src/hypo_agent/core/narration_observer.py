@@ -11,12 +11,9 @@ from typing import Any, Protocol
 
 import httpx
 import structlog
-try:
-    from litellm import acompletion as litellm_acompletion
-except ImportError:  # pragma: no cover - runtime dependent
-    litellm_acompletion = None
 
 from hypo_agent.core.config_loader import load_narration_config
+from hypo_agent.core.litellm_runtime import litellm_acompletion
 from hypo_agent.core.model_request_options import build_model_request_kwargs
 from hypo_agent.core.tool_narration import (
     NarrationContext,

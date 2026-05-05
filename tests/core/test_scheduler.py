@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from hypo_agent.core.event_queue import EventQueue
 from hypo_agent.core.scheduler import SchedulerService
 
@@ -154,6 +156,32 @@ def test_scheduler_uses_default_timezone_for_naive_once_datetime() -> None:
         await service.stop()
 
     asyncio.run(_run())
+
+
+def test_scheduler_once_trigger_does_not_probe_local_timezone(monkeypatch: pytest.MonkeyPatch) -> None:
+    import apscheduler.triggers.date as date_trigger_module
+
+    service = SchedulerService(
+        structured_store=StubStore(),
+        event_queue=EventQueue(),
+        default_timezone="Asia/Shanghai",
+    )
+    reminder = {
+        "id": 31,
+        "title": "显式时区提醒",
+        "description": "",
+        "schedule_type": "once",
+        "schedule_value": "2099-01-01T08:00:00+08:00",
+        "status": "active",
+    }
+
+    def _unexpected_localzone():
+        raise AssertionError("get_localzone should not be called for once reminders")
+
+    monkeypatch.setattr(date_trigger_module, "get_localzone", _unexpected_localzone)
+
+    trigger = service._build_trigger(reminder)
+    assert str(trigger.run_date.tzinfo) == "Asia/Shanghai"
 
 
 def test_scheduler_enqueues_reminder_event_on_trigger() -> None:

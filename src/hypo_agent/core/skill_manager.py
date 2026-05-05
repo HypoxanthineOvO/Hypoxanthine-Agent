@@ -447,6 +447,51 @@ class SkillManager:
             self._attach_invocation_id(result, invocation_id)
             return result
 
+        schema = self._schema_for_tool(tool_name, skill=skill, builtin=builtin)
+        missing_fields = self._missing_required_fields(schema, params)
+        if missing_fields:
+            operation = self._infer_operation(tool_name)
+            result = SkillOutput(
+                status="error",
+                error_info=f"Missing required argument(s): {', '.join(missing_fields)}",
+                metadata={
+                    "missing_fields": missing_fields,
+                    "recovery_action": {
+                        "type": "ask_user",
+                        "reason": "missing_required_arguments",
+                        "message": f"缺少必要参数：{', '.join(missing_fields)}。请补充后重试。",
+                    },
+                },
+            )
+            outcome = classify_tool_outcome(
+                status=result.status,
+                error_info=result.error_info,
+                operation=operation,
+                metadata=result.metadata,
+            )
+            self._attach_outcome_metadata(result, outcome, self._new_trace_id())
+            logger.warning(
+                "skill.invoke.fail.validation",
+                tool_name=tool_name,
+                session_id=session_id,
+                skill_name=effective_skill_name,
+                missing_fields=missing_fields,
+            )
+            invocation_id = await self._record_tool_invocation(
+                tool_name=tool_name,
+                params=params,
+                session_id=session_id,
+                skill_name=effective_skill_name,
+                status="error",
+                result=None,
+                error_info=result.error_info,
+                duration_ms=self._duration_ms(started_at),
+                outcome=outcome,
+                trace_id=str(result.metadata["trace_id"]),
+            )
+            self._attach_invocation_id(result, invocation_id)
+            return result
+
         if (
             self._permission_manager is not None
             and skill is not None
@@ -594,6 +639,7 @@ class SkillManager:
             status=result.status,
             error_info=result.error_info,
             operation=self._infer_operation(tool_name),
+            metadata=result.metadata,
         )
         self._attach_outcome_metadata(result, outcome, self._new_trace_id())
         if self._circuit_breaker is not None:
@@ -659,6 +705,47 @@ class SkillManager:
             return ""
         name = function_payload.get("name")
         return str(name) if isinstance(name, str) else ""
+
+    def _schema_for_tool(
+        self,
+        tool_name: str,
+        *,
+        skill: BaseSkill | None,
+        builtin: tuple[dict[str, Any], BuiltinToolHandler, str] | None,
+    ) -> dict[str, Any] | None:
+        if builtin is not None:
+            return builtin[0]
+        if skill is None:
+            return None
+        for schema in skill.tools:
+            if self._read_tool_name(schema) == tool_name:
+                return schema
+        return None
+
+    def _missing_required_fields(
+        self,
+        schema: dict[str, Any] | None,
+        params: dict[str, Any],
+    ) -> list[str]:
+        if not isinstance(schema, dict):
+            return []
+        function_payload = schema.get("function")
+        if not isinstance(function_payload, dict):
+            return []
+        parameters = function_payload.get("parameters")
+        if not isinstance(parameters, dict):
+            return []
+        required = parameters.get("required")
+        if not isinstance(required, list):
+            return []
+        missing: list[str] = []
+        for field in required:
+            name = str(field or "").strip()
+            if not name:
+                continue
+            if name not in params or params.get(name) in {None, ""}:
+                missing.append(name)
+        return missing
 
     async def _record_tool_invocation(
         self,
