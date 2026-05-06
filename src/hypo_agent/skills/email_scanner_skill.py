@@ -8,10 +8,12 @@ from email import message_from_bytes
 from email.header import decode_header, make_header
 from email.message import Message as EmailMessage
 from email.utils import parsedate_to_datetime
+import html
 import imaplib
 import json
 from pathlib import Path
 import secrets
+import re
 from typing import Any
 
 import structlog
@@ -414,6 +416,7 @@ class EmailScannerSkill(BaseSkill):
             return ""
         prompt = (
             "请用中文输出 1-2 句邮件摘要，突出行动项。"
+            "不要复述标题；如果标题已包含的信息足够，只补充正文里的时间、地点、要求或截止日期。"
             f"\n发件人: {email_payload.get('from', '')}"
             f"\n标题: {email_payload.get('subject', '')}"
             f"\n正文: {str(email_payload.get('body', ''))[:1000]}"
@@ -432,7 +435,7 @@ class EmailScannerSkill(BaseSkill):
                 model_name = "chat"
 
         try:
-            return str(
+            generated = str(
                 await self._await_model_result(
                     self.model_router.call(
                         model_name,
@@ -442,6 +445,11 @@ class EmailScannerSkill(BaseSkill):
                     timeout_seconds=None,
                 )
             ).strip()
+            return self._normalize_generated_summary(
+                subject=str(email_payload.get("subject") or ""),
+                body=str(email_payload.get("body") or ""),
+                summary=generated,
+            )
         except _EMAIL_MODEL_ERRORS as exc:
             # FALLBACK: summary text is optional and can be omitted when generation fails.
             logger.warning(
@@ -885,14 +893,14 @@ class EmailScannerSkill(BaseSkill):
         msg_num: bytes,
     ) -> dict[str, str]:
         raw_subject = str(parsed.get("Subject") or "")
-        subject = str(make_header(decode_header(raw_subject))) if raw_subject else ""
-        sender = str(parsed.get("From") or "")
-        recipient = str(parsed.get("To") or "")
+        subject = self._clean_email_text(str(make_header(decode_header(raw_subject))) if raw_subject else "")
+        sender = self._clean_email_text(str(parsed.get("From") or ""))
+        recipient = self._clean_email_text(str(parsed.get("To") or ""))
         message_id = str(parsed.get("Message-ID") or "").strip()
         if not message_id:
             message_id = f"<{account_name}-{msg_num.decode('utf-8', errors='ignore')}>"
         received_at = str(parsed.get("Date") or "")
-        body = self._extract_text_body(parsed)
+        body = self._clean_email_text(self._extract_text_body(parsed), strip=False)
         return {
             "message_id": message_id,
             "from": sender,
@@ -910,14 +918,68 @@ class EmailScannerSkill(BaseSkill):
                 if content_type == "text/plain" and "attachment" not in disposition:
                     payload = part.get_payload(decode=True)
                     if isinstance(payload, (bytes, bytearray)):
-                        charset = part.get_content_charset() or "utf-8"
-                        return payload.decode(charset, errors="replace")
+                        return self._decode_email_bytes(payload, charset=part.get_content_charset())
         payload = parsed.get_payload(decode=True)
         if isinstance(payload, (bytes, bytearray)):
-            return payload.decode(parsed.get_content_charset() or "utf-8", errors="replace")
+            return self._decode_email_bytes(payload, charset=parsed.get_content_charset())
         if isinstance(payload, str):
             return payload
         return ""
+
+    def _decode_email_bytes(self, payload: bytes | bytearray, *, charset: str | None) -> str:
+        data = bytes(payload)
+        candidates = [str(charset or "").strip(), "utf-8", "gb18030", "big5", "cp1252", "latin-1"]
+        seen: set[str] = set()
+        decoded: list[str] = []
+        for candidate in candidates:
+            if not candidate or candidate.lower() in seen:
+                continue
+            seen.add(candidate.lower())
+            try:
+                decoded.append(data.decode(candidate, errors="strict"))
+            except (LookupError, UnicodeDecodeError):
+                continue
+        if decoded:
+            return min((self._clean_email_text(item, strip=False) for item in decoded), key=self._email_text_badness)
+        return self._clean_email_text(data.decode("utf-8", errors="replace"), strip=False)
+
+    def _clean_email_text(self, value: str, *, strip: bool = True) -> str:
+        text = html.unescape(str(value or "")).replace("\x00", "")
+        text = self._repair_mojibake(text)
+        text = text.replace("\ufffd", "")
+        text = re.sub(r"[\u200b-\u200f\u202a-\u202e\ufeff]", "", text)
+        text = re.sub(r"[ \t\r\f\v]+", " ", text)
+        return text.strip() if strip else text
+
+    def _repair_mojibake(self, value: str) -> str:
+        text = str(value or "")
+        repaired_candidates = [text]
+        for source_encoding in ("latin-1", "cp1252"):
+            try:
+                repaired_candidates.append(text.encode(source_encoding).decode("utf-8"))
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                continue
+        return min(repaired_candidates, key=self._email_text_badness)
+
+    def _email_text_badness(self, value: str) -> int:
+        text = str(value or "")
+        suspicious = sum(text.count(token) for token in ("�", "Ã", "Â", "â", "æ", "è", "é", "å", "ç"))
+        controls = sum(1 for char in text if ord(char) < 32 and char not in "\n\t")
+        cjk = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
+        return suspicious * 12 + controls * 20 - cjk
+
+    def _normalize_generated_summary(self, *, subject: str, body: str, summary: str) -> str:
+        del body
+        cleaned = self._clean_email_text(summary)
+        subject_clean = self._clean_email_text(subject)
+        if not cleaned or not subject_clean:
+            return cleaned
+        escaped_subject = re.escape(subject_clean)
+        cleaned = re.sub(rf"^\s*{escaped_subject}\s*[:：,，\-— ]*", "", cleaned).strip()
+        cleaned = re.sub(rf"^\s*{escaped_subject}\s+", "", cleaned).strip()
+        cleaned = re.sub(rf"([:：,，\-— ]*){escaped_subject}([:：,，\-— ]*)", r"\1", cleaned).strip()
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ：:,，-—")
+        return cleaned or subject_clean
 
     def _save_attachments(
         self,

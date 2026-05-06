@@ -945,6 +945,13 @@ class LlmRouterStub:
         return "这是重点邮件摘要"
 
 
+class RepeatingSummaryRouterStub(LlmRouterStub):
+    async def call(self, model_name: str, messages: list[dict], *, session_id: str | None = None, tools=None):
+        del model_name, messages, session_id, tools
+        self.chat_calls += 1
+        return "讲座报名通知：讲座报名通知 截止时间 5 月 10 日，需要填写表单。"
+
+
 class SlowHeartbeatLlmRouterStub:
     def __init__(self) -> None:
         self.lightweight_calls = 0
@@ -1030,6 +1037,57 @@ def test_layer3_calls_default_model_for_important_and_system(tmp_path: Path) -> 
     assert outcome["category"] in {"important", "system"}
     assert router.chat_calls == 1
     assert "摘要" in outcome["summary"]
+
+
+def test_email_payload_repairs_utf8_mojibake_from_wrong_charset(tmp_path: Path) -> None:
+    skill = EmailScannerSkill(
+        structured_store=StubStore(),
+        model_router=None,
+        message_queue=None,
+        rules_path=tmp_path / "email_rules.yaml",
+    )
+    raw = (
+        b"From: office@example.com\n"
+        b"Message-ID: <mojibake-1>\n"
+        b"Subject: =?iso-8859-1?q?=E6=B5=8B=E8=AF=95=E9=80=9A=E7=9F=A5?=\n"
+        b"Content-Type: text/plain; charset=iso-8859-1\n"
+        b"\n"
+        + "报名截止时间为 5 月 10 日。".encode("utf-8")
+        + b"\n"
+    )
+
+    payload = skill._extract_email_payload(
+        message_from_bytes(raw),
+        account_name="main",
+        msg_num=b"1",
+    )
+
+    assert payload["subject"] == "测试通知"
+    assert payload["body"].strip() == "报名截止时间为 5 月 10 日。"
+
+
+def test_layer3_summary_removes_repeated_subject_from_model_output(tmp_path: Path) -> None:
+    rules_path = tmp_path / "email_rules.yaml"
+    rules_path.write_text("rules: []", encoding="utf-8")
+    router = RepeatingSummaryRouterStub()
+    skill = EmailScannerSkill(
+        structured_store=StubStore(),
+        model_router=router,
+        message_queue=None,
+        rules_path=rules_path,
+    )
+
+    summary = asyncio.run(
+        skill._layer3_summarize(
+            {
+                "from": "office@example.com",
+                "subject": "讲座报名通知",
+                "body": "截止时间 5 月 10 日，需要填写表单。",
+            }
+        )
+    )
+
+    assert summary == "截止时间 5 月 10 日，需要填写表单。"
 
 
 def test_heartbeat_classification_times_out_layer2_and_skips_layer3(tmp_path: Path, monkeypatch) -> None:
