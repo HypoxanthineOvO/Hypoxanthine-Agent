@@ -8,6 +8,8 @@ task_routing:
   compression: MimoV25Flash
   embedding: VolcanoEmbedding
   vision: MimoV2Omni
+  audio: MimoV25TTS
+  tts: MimoV25TTS
 
 models:
   MimoV25Flash:
@@ -40,27 +42,53 @@ models:
       chat: medium
       reasoning: high
   MimoV2Omni:
+    type: vision
     litellm_model: "openai/mimo-v2-omni"
     provider: "MimoTokenPlan"
     supports_tool_calling: true
-    description: "MiMo V2 Omni via Xiaomi Token Plan"
-    fallback: MimoV25Flash
+    description: "MiMo V2 Omni vision via Xiaomi Token Plan; primary low-latency image understanding route"
+    fallback: DashscopeQwenVLPlus
+  DashscopeQwenVLPlus:
+    type: vision
+    litellm_model: "openai/qwen-vl-plus-latest"
+    provider: "Dashscope"
+    supports_tool_calling: true
+    description: "Qwen VL Plus latest via DashScope; fast non-Mimo vision fallback"
+    fallback: DashscopeQwen3VLFlash
+  DashscopeQwen3VLFlash:
+    type: vision
+    litellm_model: "openai/qwen3-vl-flash"
+    provider: "Dashscope"
+    supports_tool_calling: true
+    description: "Qwen3 VL Flash via DashScope; second fast non-Mimo vision fallback"
+    fallback: MimoV25VisionFlash
+  MimoV25VisionFlash:
+    type: vision
+    litellm_model: "openai/mimo-v2.5"
+    provider: "MimoTokenPlan"
+    supports_tool_calling: true
+    description: "MiMo V2.5 Flash vision-capable fallback via Xiaomi Token Plan"
+    fallback: null
   MimoV25TTS:
+    type: audio
     litellm_model: "openai/mimo-v2.5-tts"
     provider: "MimoTokenPlan"
     description: "MiMo V2.5 TTS via Xiaomi Token Plan"
-    fallback: null
+    fallback: MimoV2TTS
   MimoV25TTSVoiceClone:
+    type: audio
     litellm_model: "openai/mimo-v2.5-tts-voiceclone"
     provider: "MimoTokenPlan"
     description: "MiMo V2.5 TTS VoiceClone via Xiaomi Token Plan"
-    fallback: null
+    fallback: MimoV25TTS
   MimoV25TTSVoiceDesign:
+    type: audio
     litellm_model: "openai/mimo-v2.5-tts-voicedesign"
     provider: "MimoTokenPlan"
     description: "MiMo V2.5 TTS VoiceDesign via Xiaomi Token Plan"
-    fallback: null
+    fallback: MimoV25TTS
   MimoV2TTS:
+    type: audio
     litellm_model: "openai/mimo-v2-tts"
     provider: "MimoTokenPlan"
     description: "MiMo V2 TTS via Xiaomi Token Plan"

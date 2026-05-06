@@ -138,6 +138,60 @@ def test_model_router_call_uses_primary_model_first(
     assert calls[0]["api_key"] == "sk-hiapi"
 
 
+def test_model_router_vision_chain_uses_only_vision_models() -> None:
+    runtime = RuntimeModelConfig.model_validate(
+        {
+            "default_model": "MimoV25Flash",
+            "task_routing": {"vision": "MimoV2Omni"},
+            "models": {
+                "MimoV2Omni": {
+                    "type": "vision",
+                    "provider": "MimoTokenPlan",
+                    "litellm_model": "openai/mimo-v2-omni",
+                    "fallback": "DashscopeQwenVLPlus",
+                    "api_base": "https://token-plan-cn.xiaomimimo.com/v1",
+                    "api_key": "mimo-key",
+                },
+                "DashscopeQwenVLPlus": {
+                    "type": "vision",
+                    "provider": "Dashscope",
+                    "litellm_model": "openai/qwen-vl-plus-latest",
+                    "fallback": "DashscopeQwen3VLFlash",
+                    "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "api_key": "dashscope-key",
+                },
+                "DashscopeQwen3VLFlash": {
+                    "type": "vision",
+                    "provider": "Dashscope",
+                    "litellm_model": "openai/qwen3-vl-flash",
+                    "fallback": "MimoV25VisionFlash",
+                    "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "api_key": "dashscope-key",
+                },
+                "MimoV25VisionFlash": {
+                    "type": "vision",
+                    "provider": "MimoTokenPlan",
+                    "litellm_model": "openai/mimo-v2.5",
+                    "fallback": None,
+                    "api_base": "https://token-plan-cn.xiaomimimo.com/v1",
+                    "api_key": "mimo-key",
+                },
+            },
+        }
+    )
+    router = ModelRouter(runtime, acompletion_fn=lambda **_: None)
+
+    chain = router.get_fallback_chain(router.get_model_for_task("vision"))
+
+    assert chain == [
+        "MimoV2Omni",
+        "DashscopeQwenVLPlus",
+        "DashscopeQwen3VLFlash",
+        "MimoV25VisionFlash",
+    ]
+    assert all(runtime.models[item].type == "vision" for item in chain)
+
+
 def test_model_router_disables_thinking_for_ollama_chat_routes() -> None:
     captured: list[dict] = []
     runtime = RuntimeModelConfig.model_validate(
