@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.7.0 - 2026-05-07
+
+### Highlights
+
+- Improved Agent tool-call UX so recoverable intermediate tool/model failures are folded internally and only terminal failures produce concise user-facing summaries.
+- Collapsed repeated fallback progress messages into a stable single running state while preserving final success/failure replay.
+- Added retry for transient search/web-read timeouts and kept successful model fallback notices out of external channels.
+- Enabled the non-blocking message runtime by default so inbound channel messages enqueue quickly while long tasks run in the background.
+- Refreshed Hypo-Workflow/OpenCode adapters to version `12.1.0`, adding `/hw:pr` and `/hw:explain` mappings and removing the retired dashboard command.
+
+### Validation
+
+- `uv run pytest -q`: passed.
+- `cd web && npm test -- --run`: passed.
+- `cd web && npm run build`: passed.
+- `hypo-workflow sync --repair --platform opencode --project /home/heyx/Hypo-Agent`: completed with `errors:0`; one non-blocking warning remains for missing `.pipeline/reports.compact.md` source discovery.
+- Production health after restart: backend `http://127.0.0.1:8765/api/health` returned ok and frontend `http://127.0.0.1:5178` returned `200`.
+
 ## v1.6.0 - 2026-05-05
 
 ### Highlights

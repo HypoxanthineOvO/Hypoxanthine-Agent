@@ -12,7 +12,7 @@ import {
 
 const metadata = {
   name: "hypo-workflow",
-  version: "10.2.0",
+  version: "12.1.0",
   commandMap: [
   {
     "canonical": "/hw:start",
@@ -169,6 +169,20 @@ const metadata = {
     "skill": "skills/patch/SKILL.md"
   },
   {
+    "canonical": "/hw:pr",
+    "opencode": "/hw-pr",
+    "agent": "hw-review",
+    "route": "change-request",
+    "skill": "skills/pr/SKILL.md"
+  },
+  {
+    "canonical": "/hw:explain",
+    "opencode": "/hw-explain",
+    "agent": "hw-review",
+    "route": "explain",
+    "skill": "skills/explain/SKILL.md"
+  },
+  {
     "canonical": "/hw:compact",
     "opencode": "/hw-compact",
     "agent": "hw-compact",
@@ -265,13 +279,6 @@ const metadata = {
     "agent": "hw-status",
     "route": "setup",
     "skill": "skills/setup/SKILL.md"
-  },
-  {
-    "canonical": "/hw:dashboard",
-    "opencode": "/hw-dashboard",
-    "agent": "hw-status",
-    "route": "tool",
-    "skill": "skills/dashboard/SKILL.md"
   }
 ],
 };
