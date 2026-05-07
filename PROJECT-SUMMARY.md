@@ -2,9 +2,9 @@
 
 This file is a generated Hypo-Workflow project summary. Edit authority files under `.pipeline/`, then run `/hw:sync --repair`.
 
-- Pipeline status: completed
-- Cycle: 4
-- Current: M11: 路由、体验与端到端验收
-- Step: pending_acceptance
-- Progress: 11/11
-- Progress note: > 最后更新：2026-05-05T21:46:00+08:00 | 状态：completed | 阶段：pending_acceptance
+- Pipeline status: planned
+- Cycle: 5
+- Current: ready_to_start
+- Step: ready_to_start
+- Progress: 0/6
+- Progress note: > 最后更新：2026-05-07T23:19:55+08:00 | 状态：planned | 阶段：ready_to_start
