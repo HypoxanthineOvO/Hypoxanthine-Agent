@@ -69,6 +69,41 @@ def test_channel_progress_suppresses_recoverable_tool_error_without_retry_flag()
     assert sent is False
 
 
+def test_channel_progress_suppresses_nonterminal_nonretryable_tool_error() -> None:
+    text, sent = summarize_channel_progress_event(
+        {
+            "type": "tool_call_error",
+            "tool": "read_file",
+            "error": "File not found: stale path",
+            "will_retry": False,
+            "retryable": False,
+            "outcome_class": "missing_resource",
+        }
+    )
+
+    assert text is None
+    assert sent is False
+
+
+def test_channel_progress_terminal_tool_error_is_visible() -> None:
+    text, sent = summarize_channel_progress_event(
+        {
+            "type": "tool_call_error",
+            "tool": "read_file",
+            "error": "File not found: final path",
+            "will_retry": False,
+            "retryable": False,
+            "outcome_class": "missing_resource",
+            "terminal": True,
+        }
+    )
+
+    assert sent is False
+    assert text is not None
+    assert text.startswith("读取文件 失败")
+    assert "missing_resource" in text
+
+
 def test_channel_progress_suppresses_successful_model_fallback_notice() -> None:
     text, sent = summarize_channel_progress_event(
         {

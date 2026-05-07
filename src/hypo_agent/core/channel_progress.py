@@ -78,9 +78,7 @@ def summarize_channel_progress_event(
         return None, False
 
     if event_type == "tool_call_error":
-        if bool(event.get("will_retry")) or (
-            event.get("retryable") is True and not _is_terminal_failure(event)
-        ):
+        if not _is_terminal_failure(event):
             return None, False
         error = str(event.get("error") or "处理失败").strip()
         return summarize_tool_failure(
