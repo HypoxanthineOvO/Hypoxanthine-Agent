@@ -26,6 +26,7 @@ def test_channel_progress_final_failure_uses_display_summary() -> None:
             "error_info": "Could not find property with name or id: Status",
             "attempts": 3,
             "outcome_class": "schema_mismatch",
+            "terminal": True,
         }
     )
 
@@ -33,3 +34,50 @@ def test_channel_progress_final_failure_uses_display_summary() -> None:
     assert text is not None
     assert text.startswith("查询 Notion 失败")
     assert "已尝试 3 次" in text
+
+
+def test_channel_progress_suppresses_intermediate_tool_result_failure() -> None:
+    text, sent = summarize_channel_progress_event(
+        {
+            "type": "tool_call_result",
+            "tool_name": "read_file",
+            "status": "error",
+            "error_info": "File not found: /home/heyx/Hypo-Agent/weixin-image.png",
+            "attempts": 1,
+            "outcome_class": "missing_resource",
+            "metadata": {"ephemeral": True},
+        }
+    )
+
+    assert text is None
+    assert sent is False
+
+
+def test_channel_progress_suppresses_recoverable_tool_error_without_retry_flag() -> None:
+    text, sent = summarize_channel_progress_event(
+        {
+            "type": "tool_call_error",
+            "tool": "notion_plan_get_structure",
+            "error": "Notion page not found: HYX的计划通",
+            "will_retry": False,
+            "retryable": True,
+            "outcome_class": "missing_resource",
+        }
+    )
+
+    assert text is None
+    assert sent is False
+
+
+def test_channel_progress_suppresses_successful_model_fallback_notice() -> None:
+    text, sent = summarize_channel_progress_event(
+        {
+            "type": "model_fallback",
+            "failed_model": "Gemini3Pro",
+            "fallback_model": "DeepseekV3_2",
+            "reason": "Request timed out after 60 seconds.",
+        }
+    )
+
+    assert text is None
+    assert sent is False

@@ -92,6 +92,40 @@ def test_pipeline_logs_error_converted_for_runtime_error(caplog) -> None:
 
 
 @pytest.mark.unit
+def test_pipeline_timeout_runtime_error_uses_generic_timeout_message(caplog) -> None:
+    async def _run() -> None:
+        pipeline = ChatPipeline(
+            router=NoopRouter(),
+            chat_model="Gemini3Pro",
+            session_memory=_StubSessionMemory(),
+        )
+        emitted: list[dict[str, object]] = []
+
+        async def _failing_stream_reply(inbound: Message):
+            del inbound
+            if False:  # pragma: no cover
+                yield {}
+            raise RuntimeError("Request timed out after 60 seconds.")
+
+        pipeline.stream_reply = _failing_stream_reply  # type: ignore[method-assign]
+
+        with capture_logs() as logs:
+            await pipeline._consume_user_message_event(
+                {
+                    "message": Message(text="hi", sender="user", session_id="s-timeout-runtime"),
+                    "emit": emitted.append,
+                }
+            )
+
+        assert emitted[0]["code"] == "LLM_TIMEOUT"
+        assert emitted[0]["message"] == "模型调用超时，请稍后重试"
+        assert "Request timed out after 60 seconds" not in str(emitted[0]["message"])
+        assert _has_event(logs, "pipeline.error_converted", caplog)
+
+    asyncio.run(_run())
+
+
+@pytest.mark.unit
 def test_pipeline_emits_structured_model_fallback_error(caplog) -> None:
     async def _run() -> None:
         pipeline = ChatPipeline(

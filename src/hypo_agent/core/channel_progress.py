@@ -34,7 +34,7 @@ def summarize_channel_progress_event(
         return None, False
 
     if event_type == "model_fallback":
-        return "⚠️ 主模型暂时不可用，已切换备用模型回复你", False
+        return None, False
 
     if event_type == "model_fallback_exhausted":
         return "❌ 所有模型均不可用，请稍后再试", False
@@ -62,6 +62,8 @@ def summarize_channel_progress_event(
     if event_type == "tool_call_result":
         status = str(event.get("status") or "").strip().lower()
         if status != "success":
+            if not _is_terminal_failure(event):
+                return None, False
             error = str(event.get("error") or event.get("error_info") or "处理失败").strip()
             summary = str(event.get("summary") or "").strip()
             if summary:
@@ -76,7 +78,9 @@ def summarize_channel_progress_event(
         return None, False
 
     if event_type == "tool_call_error":
-        if bool(event.get("will_retry")):
+        if bool(event.get("will_retry")) or (
+            event.get("retryable") is True and not _is_terminal_failure(event)
+        ):
             return None, False
         error = str(event.get("error") or "处理失败").strip()
         return summarize_tool_failure(
@@ -95,3 +99,12 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _is_terminal_failure(event: dict[str, Any]) -> bool:
+    if event.get("terminal") is True:
+        return True
+    metadata = event.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("terminal") is True:
+        return True
+    return False

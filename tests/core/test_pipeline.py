@@ -1345,7 +1345,7 @@ def test_system_prompt_updates_on_fallback() -> None:
     assert "主模型 Gemini3Pro 暂时不可用" in str(second_runtime)
 
 
-def test_fallback_visible_on_external_channel() -> None:
+def test_successful_fallback_is_not_visible_on_external_channel() -> None:
     text, prelude_sent = summarize_channel_progress_event(
         {
             "type": "model_fallback",
@@ -1355,7 +1355,7 @@ def test_fallback_visible_on_external_channel() -> None:
         }
     )
 
-    assert text == "⚠️ 主模型暂时不可用，已切换备用模型回复你"
+    assert text is None
     assert prelude_sent is False
 
 

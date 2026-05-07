@@ -279,11 +279,20 @@ def _error_fields(exc: Exception) -> dict[str, str]:
 
 def _generic_llm_error_message(exc: Exception) -> str:
     message = str(exc).strip()
+    if _is_timeout_like_error(exc):
+        return "模型调用超时，请稍后重试"
     if not message:
         return "模型调用失败：未返回可用回复，请稍后重试。"
     if len(message) > 180:
         message = f"{message[:177]}..."
     return f"模型调用失败：{message}"
+
+
+def _is_timeout_like_error(exc: Exception) -> bool:
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    text = str(exc).strip().lower()
+    return "timeout" in text or "timed out" in text
 
 
 class ChatModelRouter(Protocol):
@@ -4183,6 +4192,24 @@ class ChatPipeline:
                 await emit_result
             return "error"
         except RuntimeError as exc:
+            if _is_timeout_like_error(exc):
+                logger.warning(
+                    "pipeline.error_converted",
+                    session_id=inbound.session_id,
+                    converted_type="LLM_TIMEOUT",
+                    **_error_fields(exc),
+                )
+                error_payload = {
+                    "type": "error",
+                    "code": "LLM_TIMEOUT",
+                    "message": _generic_llm_error_message(exc),
+                    "retryable": True,
+                    "session_id": inbound.session_id,
+                }
+                emit_result = emitter(error_payload)
+                if inspect.isawaitable(emit_result):
+                    await emit_result
+                return "timeout"
             logger.warning(
                 "pipeline.error_converted",
                 session_id=inbound.session_id,
