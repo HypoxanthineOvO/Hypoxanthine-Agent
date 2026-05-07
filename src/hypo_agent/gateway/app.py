@@ -967,8 +967,18 @@ def _build_default_pipeline(deps: AppDeps) -> ChatPipeline:
         sop_manager=deps.sop_manager,
         skill_catalog=skill_catalog,
         coder_task_service=deps.coder_task_service,
-        nonblocking_runtime_enabled=os.getenv("HYPO_NONBLOCKING_RUNTIME", "").strip() == "1",
+        nonblocking_runtime_enabled=_nonblocking_runtime_enabled_from_env(),
     )
+
+
+def _nonblocking_runtime_enabled_from_env() -> bool:
+    raw_value = os.getenv("HYPO_NONBLOCKING_RUNTIME")
+    if raw_value is None:
+        return True
+    normalized = raw_value.strip().lower()
+    if not normalized:
+        return True
+    return normalized not in {"0", "false", "no", "off", "disabled"}
 
 
 def _derive_heartbeat_service_timeout_seconds(

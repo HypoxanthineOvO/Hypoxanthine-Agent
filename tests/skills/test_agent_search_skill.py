@@ -69,6 +69,54 @@ class FakeTavilyClient:
         }
 
 
+def test_agent_search_skill_retries_search_timeout_once(tmp_path: Path) -> None:
+    secrets_path = tmp_path / "secrets.yaml"
+    _write_secrets(secrets_path)
+
+    class TimeoutThenSuccessClient(FakeTavilyClient):
+        def search(self, query: str, **kwargs):
+            if not self.search_calls:
+                self.search_calls.append({"query": query, **kwargs})
+                raise RuntimeError("Request timed out after 60 seconds.")
+            return super().search(query, **kwargs)
+
+    client = TimeoutThenSuccessClient("tvly-test-key")
+    skill = AgentSearchSkill(
+        secrets_path=secrets_path,
+        tavily_client_factory=lambda api_key: client,
+    )
+
+    output = asyncio.run(skill.execute("search_web", {"query": "ticnote 区别", "max_results": 2}))
+
+    assert output.status == "success"
+    assert output.result["results"][0]["title"] == "Example Result"
+    assert len(client.search_calls) == 2
+
+
+def test_agent_search_skill_retries_web_read_timeout_once(tmp_path: Path) -> None:
+    secrets_path = tmp_path / "secrets.yaml"
+    _write_secrets(secrets_path)
+
+    class TimeoutThenSuccessClient(FakeTavilyClient):
+        def extract(self, urls, **kwargs):
+            if not self.extract_calls:
+                self.extract_calls.append({"urls": urls, **kwargs})
+                raise TimeoutError("extract timed out")
+            return super().extract(urls, **kwargs)
+
+    client = TimeoutThenSuccessClient("tvly-test-key")
+    skill = AgentSearchSkill(
+        secrets_path=secrets_path,
+        tavily_client_factory=lambda api_key: client,
+    )
+
+    output = asyncio.run(skill.execute("web_read", {"url": "https://example.com/article"}))
+
+    assert output.status == "success"
+    assert "Long-form article body" in output.result["content"]
+    assert len(client.extract_calls) == 2
+
+
 def test_agent_search_skill_search_web_returns_normalized_results(tmp_path: Path) -> None:
     secrets_path = tmp_path / "secrets.yaml"
     _write_secrets(secrets_path)

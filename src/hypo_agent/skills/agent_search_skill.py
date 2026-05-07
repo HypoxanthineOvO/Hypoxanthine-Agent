@@ -28,6 +28,7 @@ from hypo_agent.skills.base import BaseSkill
 
 logger = structlog.get_logger("hypo_agent.skills.agent_search")
 _AGENT_SEARCH_ERRORS = (OSError, RuntimeError, TypeError, ValueError)
+_AGENT_SEARCH_CLIENT_ERRORS = (OSError, RuntimeError, TimeoutError, httpx.HTTPError)
 _HTML_BREAK_RE = re.compile(r"(?i)<br\s*/?>")
 _HTML_BLOCK_CLOSE_RE = re.compile(r"(?i)</(p|div|li|h[1-6]|blockquote|pre|tr)>")
 _HTML_LIST_OPEN_RE = re.compile(r"(?i)<li[^>]*>")
@@ -50,10 +51,12 @@ class AgentSearchSkill(BaseSkill):
         secrets_path: Path | str = "config/secrets.yaml",
         tavily_client_factory: Callable[[str], Any] | None = None,
         http_transport: Any | None = None,
+        max_retries: int = 1,
     ) -> None:
         self.secrets_path = Path(secrets_path)
         self._tavily_client_factory = tavily_client_factory or self._build_default_client
         self._http_transport = http_transport
+        self._max_retries = max(0, int(max_retries))
         self._client: Any | None = None
         self._client_api_key: str | None = None
 
@@ -127,7 +130,7 @@ class AgentSearchSkill(BaseSkill):
 
     async def search_web(self, query: str, max_results: int = 5) -> dict[str, Any]:
         client = self._get_client()
-        payload = await asyncio.to_thread(
+        payload = await self._call_client_with_retry(
             client.search,
             query,
             search_depth="advanced",
@@ -167,7 +170,7 @@ class AgentSearchSkill(BaseSkill):
         client = self._get_client()
         fallback_error: Exception | None = None
         try:
-            payload = await asyncio.to_thread(
+            payload = await self._call_client_with_retry(
                 client.extract,
                 [url],
                 extract_depth="advanced",
@@ -197,6 +200,32 @@ class AgentSearchSkill(BaseSkill):
         if fallback_error is not None:
             raise ValueError(str(fallback_error))
         raise ValueError(f"No extractable content returned for URL: {url}")
+
+    async def _call_client_with_retry(self, operation: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        last_error: Exception | None = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                return await asyncio.to_thread(operation, *args, **kwargs)
+            except _AGENT_SEARCH_CLIENT_ERRORS as exc:
+                last_error = exc
+                if attempt >= self._max_retries or not self._is_retryable_client_error(exc):
+                    raise
+                logger.info(
+                    "agent_search.client_retry",
+                    operation=getattr(operation, "__name__", "unknown"),
+                    attempt=attempt + 1,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                await asyncio.sleep(0.05 * (attempt + 1))
+        assert last_error is not None
+        raise last_error
+
+    def _is_retryable_client_error(self, exc: Exception) -> bool:
+        if isinstance(exc, (TimeoutError, httpx.TimeoutException, httpx.TransportError, OSError)):
+            return True
+        text = str(exc).strip().lower()
+        return any(token in text for token in ("timeout", "timed out", "temporarily", "connection reset"))
 
     def _get_client(self) -> Any:
         api_key = self._load_api_key()
