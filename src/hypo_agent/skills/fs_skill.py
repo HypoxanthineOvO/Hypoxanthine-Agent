@@ -192,10 +192,20 @@ class FileSystemSkill(BaseSkill):
 
         if not path.exists() or not path.is_file():
             resolution = self._resolve_missing_resource(raw_path)
+            resolved_path = self._resolved_resource_path(resolution)
+            if resolved_path is not None:
+                path = resolved_path
+            else:
+                return SkillOutput(
+                    status="error",
+                    error_info=f"File not found: {path}",
+                    metadata=self._resource_resolution_metadata(resolution),
+                )
+
+        if not path.exists() or not path.is_file():
             return SkillOutput(
                 status="error",
                 error_info=f"File not found: {path}",
-                metadata=self._resource_resolution_metadata(resolution),
             )
 
         ext = path.suffix.lower()
@@ -534,9 +544,20 @@ class FileSystemSkill(BaseSkill):
         search_roots = []
         if self.permission_manager is not None:
             search_roots.extend(self.permission_manager.paths_for_operation("read"))
+        search_roots.append(get_memory_dir() / "uploads")
         search_roots.append(get_memory_dir() / "exports")
         resolver = ResourceResolver(search_roots=search_roots)
         return resolver.resolve(raw_path, purpose="read_file")
+
+    def _resolved_resource_path(self, resolution: ResourceResolution) -> Path | None:
+        if resolution.status != "resolved" or resolution.ref is None:
+            return None
+        if resolution.ref.kind not in {"file", "attachment", "generated_file"}:
+            return None
+        path = Path(resolution.ref.uri).expanduser().resolve(strict=False)
+        if path.exists() and path.is_file():
+            return path
+        return None
 
     def _resource_resolution_metadata(self, resolution: ResourceResolution) -> dict[str, Any]:
         metadata: dict[str, Any] = {

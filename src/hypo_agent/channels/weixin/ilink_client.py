@@ -157,19 +157,25 @@ class ILinkClient:
             "/ilink/bot/getupdates",
             {"get_updates_buf": self.get_updates_buf},
         )
-        next_cursor = payload.get("get_updates_buf")
+        next_cursor = self._extract_update_cursor(payload)
         if isinstance(next_cursor, str):
             self.get_updates_buf = next_cursor
             self._persist_state()
 
-        raw_messages = payload.get("msgs")
-        if not isinstance(raw_messages, list):
-            return []
-        return [
+        raw_messages = self._extract_update_messages(payload)
+        messages = [
             message
-            for message in raw_messages
-            if isinstance(message, dict) and int(message.get("message_type") or 0) == 1
+            for raw_message in raw_messages
+            if (message := self._normalize_inbound_update(raw_message)) is not None
+            and self._is_inbound_update(message)
         ]
+        if raw_messages and len(messages) != len(raw_messages):
+            logger.info(
+                "weixin.updates.filtered",
+                raw_count=len(raw_messages),
+                inbound_count=len(messages),
+            )
+        return messages
 
     async def send_message(
         self,
@@ -536,6 +542,106 @@ class ILinkClient:
         if not qrcode_id or not qrcode_content:
             raise LoginError("二维码响应缺少 qrcode 或 qrcode_img_content")
         return qrcode_id, qrcode_content
+
+    def _extract_update_cursor(self, payload: dict[str, Any]) -> str | None:
+        for container in self._iter_update_containers(payload):
+            for key in ("get_updates_buf", "next_cursor", "cursor"):
+                value = container.get(key)
+                if isinstance(value, str):
+                    return value
+        return None
+
+    def _extract_update_messages(self, payload: dict[str, Any]) -> list[Any]:
+        for container in self._iter_update_containers(payload):
+            for key in ("msgs", "msg_list", "message_list", "messages", "updates"):
+                value = container.get(key)
+                if isinstance(value, list):
+                    return value
+        return []
+
+    def _iter_update_containers(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        containers = [payload]
+        for key in ("data", "result", "response", "payload"):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                containers.append(value)
+        return containers
+
+    def _normalize_inbound_update(self, raw_message: Any) -> dict[str, Any] | None:
+        if not isinstance(raw_message, dict):
+            return None
+
+        message = dict(raw_message)
+        for key in ("msg", "message"):
+            nested = message.get(key)
+            if isinstance(nested, dict):
+                parent_context = {
+                    parent_key: parent_value
+                    for parent_key, parent_value in message.items()
+                    if parent_key not in {"msg", "message"} and parent_key not in nested
+                }
+                message = {**parent_context, **nested}
+                break
+
+        from_user_id = (
+            message.get("from_user_id")
+            or message.get("sender_user_id")
+            or message.get("sender_id")
+            or message.get("from")
+        )
+        if isinstance(from_user_id, str) and from_user_id.strip():
+            message["from_user_id"] = from_user_id.strip()
+
+        item_list = (
+            message.get("item_list")
+            or message.get("items")
+            or message.get("message_items")
+            or message.get("msg_items")
+        )
+        if isinstance(item_list, list):
+            message["item_list"] = [self._normalize_update_item(item) for item in item_list]
+        elif isinstance(message.get("text"), str) and str(message.get("text")).strip():
+            message["item_list"] = [
+                {
+                    "type": 1,
+                    "text_item": {"text": str(message["text"])},
+                }
+            ]
+
+        return message
+
+    def _normalize_update_item(self, raw_item: Any) -> Any:
+        if not isinstance(raw_item, dict):
+            return raw_item
+        item = dict(raw_item)
+        text = item.get("text")
+        if isinstance(text, str) and text and not isinstance(item.get("text_item"), dict):
+            item["text_item"] = {"text": text}
+        return item
+
+    def _is_inbound_update(self, message: dict[str, Any]) -> bool:
+        message_type = self._coerce_int(message.get("message_type"))
+        if message_type == 1:
+            return True
+        if message_type is not None:
+            return False
+
+        from_user_id = str(message.get("from_user_id") or "").strip()
+        if not from_user_id or from_user_id == self.bot_id:
+            return False
+        return isinstance(message.get("item_list"), list) and bool(message["item_list"])
+
+    def _coerce_int(self, value: Any) -> int | None:
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.strip():
+            try:
+                return int(value.strip())
+            except ValueError:
+                return None
+        return None
 
     def _build_url(self, path: str) -> str:
         return f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"

@@ -166,6 +166,7 @@ def test_weixin_channel_downloads_image_and_voice_into_message(tmp_path: Path) -
         assert len(message.attachments) == 1
         attachment = message.attachments[0]
         assert attachment.type == "image"
+        assert attachment.filename == "weixin-alice@im.wechat-image.png"
         assert attachment.mime_type == "image/png"
         assert Path(attachment.url).exists()
         assert Path(attachment.url).read_bytes() == _PNG_1X1

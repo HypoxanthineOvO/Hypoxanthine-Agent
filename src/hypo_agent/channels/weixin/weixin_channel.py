@@ -167,7 +167,7 @@ class WeixinChannel:
             if item_type == 2:
                 attachment = await self._download_attachment(
                     item.get("image_item"),
-                    fallback_name="image.png",
+                    fallback_name=f"weixin-{from_user}-image.png",
                     media_kind="image",
                 )
                 if attachment is not None:

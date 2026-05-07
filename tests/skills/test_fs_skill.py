@@ -178,6 +178,34 @@ def test_read_file_returns_image_metadata_without_ocr(tmp_path: Path) -> None:
     assert output.metadata["height"] == 1
 
 
+def test_read_file_recovers_missing_weixin_image_from_uploads(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    skill, _, _ = _build_skill(tmp_path)
+    memory_dir = tmp_path / "memory"
+    uploads_dir = memory_dir / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    file_path = uploads_dir / "20260507_weixin-o9cq808jv68ZmOGLuAh4Yt0rna6g-image.png"
+    file_path.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+tmR0AAAAASUVORK5CYII="
+        )
+    )
+    monkeypatch.setattr(fs_module, "get_memory_dir", lambda: memory_dir)
+
+    output = asyncio.run(
+        skill.execute(
+            "read_file",
+            {"path": "/tmp/weixin/o9cq808jv68ZmOGLuAh4Yt0rna6g/image.png"},
+        )
+    )
+
+    assert output.status == "success"
+    assert output.metadata["path"] == str(file_path)
+    assert output.metadata["format"] == "image"
+
+
 def test_read_file_falls_back_for_unsupported_format(tmp_path: Path) -> None:
     skill, _, readonly = _build_skill(tmp_path)
     file_path = readonly / "blob.bin"

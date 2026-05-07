@@ -255,6 +255,70 @@ def test_ilink_client_get_updates_filters_bot_messages_and_persists_cursor(tmp_p
     asyncio.run(client.close())
 
 
+def test_ilink_client_get_updates_accepts_nested_payload_and_missing_message_type(
+    tmp_path: Path,
+) -> None:
+    token_path = tmp_path / "weixin_auth.json"
+    token_path.write_text(
+        json.dumps(
+            {
+                "bot_token": "bot-123",
+                "bot_id": "bot@im.bot",
+                "get_updates_buf": "cursor-1",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/ilink/bot/getupdates"
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "msg_list": [
+                        {
+                            "message": {
+                                "message_id": 1,
+                                "sender_user_id": "user@im.wechat",
+                                "context_token": "ctx-1",
+                                "items": [{"type": "1", "text": "你好"}],
+                            }
+                        },
+                        {
+                            "message_id": 2,
+                            "from_user_id": "bot@im.bot",
+                            "message_type": 2,
+                        },
+                    ],
+                    "next_cursor": "cursor-2",
+                }
+            },
+        )
+
+    client = ILinkClient(
+        "https://ilinkai.weixin.qq.com",
+        token_path=str(token_path),
+        transport=httpx.MockTransport(handler),
+    )
+
+    messages = asyncio.run(client.get_updates())
+
+    assert messages == [
+        {
+            "message_id": 1,
+            "sender_user_id": "user@im.wechat",
+            "context_token": "ctx-1",
+            "items": [{"type": "1", "text": "你好"}],
+            "from_user_id": "user@im.wechat",
+            "item_list": [{"type": "1", "text": "你好", "text_item": {"text": "你好"}}],
+        }
+    ]
+    assert client.get_updates_buf == "cursor-2"
+
+    asyncio.run(client.close())
+
+
 def test_ilink_client_get_updates_raises_session_expired(tmp_path: Path) -> None:
     token_path = tmp_path / "weixin_auth.json"
     token_path.write_text(json.dumps({"bot_token": "bot-123"}), encoding="utf-8")
