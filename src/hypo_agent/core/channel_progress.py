@@ -27,7 +27,6 @@ def summarize_channel_progress_event(
     *,
     prelude_sent: bool = False,
 ) -> tuple[str | None, bool]:
-    del prelude_sent
     event_type = str(event.get("type") or "").strip().lower()
 
     if event_type in {"pipeline_stage", "thinking_delta", "react_iteration", "react_complete", "compression"}:
@@ -47,6 +46,8 @@ def summarize_channel_progress_event(
     narration_config = _narration_config()
 
     if event_type == "tool_call_start":
+        if prelude_sent:
+            return None, True
         if narration_config is not None and narration_config.enabled:
             return None, False
         if narration_config is not None:
@@ -56,8 +57,8 @@ def summarize_channel_progress_event(
                 event.get("arguments", {}),
             )
             if rendered:
-                return rendered, False
-        return display.running_text, False
+                return rendered, True
+        return display.running_text, True
 
     if event_type == "tool_call_result":
         status = str(event.get("status") or "").strip().lower()

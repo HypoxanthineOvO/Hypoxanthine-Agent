@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+from hypo_agent.core import channel_progress
 from hypo_agent.core.channel_progress import summarize_channel_progress_event
 
 
@@ -116,3 +119,25 @@ def test_channel_progress_suppresses_successful_model_fallback_notice() -> None:
 
     assert text is None
     assert sent is False
+
+
+def test_channel_progress_collapses_repeated_tool_start_when_narration_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(
+        channel_progress,
+        "_narration_config",
+        lambda: SimpleNamespace(enabled=False, tool_narration={}),
+    )
+
+    first_text, prelude_sent = summarize_channel_progress_event(
+        {"type": "tool_call_start", "tool_name": "search_web"},
+        prelude_sent=False,
+    )
+    second_text, second_prelude_sent = summarize_channel_progress_event(
+        {"type": "tool_call_start", "tool_name": "read_file"},
+        prelude_sent=prelude_sent,
+    )
+
+    assert first_text == "正在调用 搜索网页"
+    assert prelude_sent is True
+    assert second_text is None
+    assert second_prelude_sent is True
